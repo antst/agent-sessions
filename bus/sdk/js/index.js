@@ -105,7 +105,17 @@ class Peer {
     this.caller = new Caller(this, options.caller);
   }
   call(method, params, signal) { if (!this.connection) return Promise.reject(new Error("not connected")); return this.connection.call(method, params, signal); }
-  async rehello(identity) { const next = snapshot(identity); if (!this.connection || this.connection.signal.aborted) { this.identity = next; return; } await this.call("session.hello", { protocol: 1, ...next }); this.identity = next; }
+  async rehello(update) {
+    if (this.terminal) throw new Error("superseded");
+    if (!update || typeof update !== "object" || Array.isArray(update) || Object.keys(update).length !== 2 || !Object.hasOwn(update, "name") || !Object.hasOwn(update, "info")) throw new Error("invalid rehello identity");
+    const desired = { ...this.identity, name: update.name, info: update.info };
+    if (!validate("SessionHelloRequest", { protocol: 1, ...desired })) throw new Error("invalid rehello identity");
+    this.identity = snapshot(desired);
+    const connection = this.connection;
+    if (!connection || connection.signal.aborted) throw new Error("not connected");
+    try { return await connection.call("session.hello", { protocol: 1, ...this.identity }); }
+    catch (error) { if (connection.signal.aborted) throw new Error("not connected"); throw error; }
+  }
   shutdown() { this.terminal = true; this.connection?.close(); this.finish(); }
   async _open() {
     if (this.terminal) return; let connection; try { connection = new Connection(this.connect(this.socket), true, (request) => this._handle(request, connection)); } catch { this.schedule(() => { this.ready = this._open(); }, 2000); return; } this.connection = connection;
