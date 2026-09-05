@@ -1,0 +1,136 @@
+package mcp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"reflect"
+	"testing"
+
+	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
+)
+
+type fakeBackend struct {
+	action    string
+	arguments string
+	result    json.RawMessage
+	err       error
+	calls     int
+}
+
+func (b *fakeBackend) Call(_ context.Context, action string, arguments json.RawMessage) (json.RawMessage, error) {
+	b.action, b.arguments, b.calls = action, string(arguments), b.calls+1
+	return b.result, b.err
+}
+
+func TestServerMethods(t *testing.T) {
+	tests := []struct {
+		name, input string
+		backend     *fakeBackend
+		code        float64
+		check       func(*testing.T, map[string]any, *fakeBackend)
+	}{
+		{"initialize", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"fixture"}}`, &fakeBackend{}, 0, func(t *testing.T, response map[string]any, _ *fakeBackend) {
+			result := response["result"].(map[string]any)
+			check(t, result["protocolVersion"] == "fixture", "initialize = %#v", result)
+		}},
+		{"tools list", `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`, &fakeBackend{}, 0, func(t *testing.T, response map[string]any, _ *fakeBackend) {
+			tool := response["result"].(map[string]any)["tools"].([]any)[0].(map[string]any)
+			schema := tool["inputSchema"].(map[string]any)["properties"].(map[string]any)
+			check(t, tool["name"] == ToolName && reflect.DeepEqual(stringsOf(schema["action"].(map[string]any)["enum"]), Actions), "tool = %#v", tool)
+		}},
+		{"tools call", `{"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"send","arguments":{"message":"hello"}}}}`, &fakeBackend{result: json.RawMessage(`{"sent":true}`)}, 0, func(t *testing.T, response map[string]any, backend *fakeBackend) {
+			result := response["result"].(map[string]any)
+			check(t, backend.action == "send" && backend.arguments == `{"message":"hello"}` && result["structuredContent"].(map[string]any)["sent"] == true, "call = %#v / %#v", backend, result)
+		}},
+		{"protocol error", `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"list"}}}`, &fakeBackend{err: &sessionkit.ProtocolError{Code: -32004, Message: "offline", Data: json.RawMessage(`{"session_id":"id"}`)}}, -32004, nil},
+		{"invalid action", `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"unknown"}}}`, &fakeBackend{}, -32602, nil},
+		{"unknown method", `{"jsonrpc":"2.0","id":6,"method":"unknown"}`, &fakeBackend{}, -32601, nil},
+		{"parse error", `{`, &fakeBackend{}, -32700, nil},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response, err := serveOne(&Server{Backend: test.backend}, test.input)
+			check(t, err == nil, "serve: %v", err)
+			if test.code != 0 {
+				failure := response["error"].(map[string]any)
+				check(t, failure["code"] == test.code, "error = %#v", failure)
+			} else if test.check != nil {
+				test.check(t, response, test.backend)
+			}
+		})
+	}
+}
+
+func TestServerReturnsOutputFailure(t *testing.T) {
+	err := (&Server{Backend: &fakeBackend{}}).Serve(context.Background(), reader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`), failedWriter{})
+	check(t, errors.Is(err, io.ErrClosedPipe), "error = %v", err)
+}
+
+func TestServerCancelWithStoppedOutput(t *testing.T) {
+	input, writeInput := io.Pipe()
+	output := &blockedWriter{started: make(chan struct{}), release: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- (&Server{Backend: &fakeBackend{}}).Serve(ctx, input, output) }()
+	_, _ = io.WriteString(writeInput, `{"jsonrpc":"2.0","id":1,"method":"initialize"}`+"\n")
+	<-output.started
+	cancel()
+	check(t, errors.Is(<-done, context.Canceled), "server did not return on cancel")
+	close(output.release)
+}
+
+func serveOne(server *Server, input string) (map[string]any, error) {
+	in, writeInput := io.Pipe()
+	readOutput, output := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(context.Background(), in, output) }()
+	go func() { _, _ = io.WriteString(writeInput, input+"\n"); _ = writeInput.Close() }()
+	var response map[string]any
+	err := json.NewDecoder(readOutput).Decode(&response)
+	_ = readOutput.Close()
+	_ = output.Close()
+	return response, errors.Join(err, <-done)
+}
+
+func stringsOf(value any) []string {
+	values := value.([]any)
+	result := make([]string, len(values))
+	for index := range values {
+		result[index] = values[index].(string)
+	}
+	return result
+}
+
+func reader(value string) io.Reader { return &stringReader{value: []byte(value + "\n")} }
+
+type stringReader struct{ value []byte }
+
+func (r *stringReader) Read(body []byte) (int, error) {
+	if len(r.value) == 0 {
+		return 0, io.EOF
+	}
+	count := copy(body, r.value)
+	r.value = r.value[count:]
+	return count, nil
+}
+
+type failedWriter struct{}
+
+func (failedWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+type blockedWriter struct{ started, release chan struct{} }
+
+func (w *blockedWriter) Write(body []byte) (int, error) {
+	close(w.started)
+	<-w.release
+	return len(body), nil
+}
+
+func check(t *testing.T, condition bool, format string, values ...any) {
+	t.Helper()
+	if !condition {
+		t.Fatalf(format, values...)
+	}
+}
