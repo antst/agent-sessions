@@ -1,0 +1,42 @@
+{
+  "shapes": {
+    "start": {
+      "request": {"session_id":"lane@local","input":"first"},
+      "result": {"turn_id":"t-1"}
+    },
+    "running": {
+      "result": {"turn_id":"t-1","session_id":"lane@local","state":"running"}
+    },
+    "done": {
+      "terminal": {"outcome":"completed","result":"done"},
+      "result": {"turn_id":"t-1","session_id":"lane@local","state":"done","result":{"outcome":"completed","result":"done"}}
+    },
+    "eof": {
+      "result": {"turn_id":"t-1","session_id":"lane@local","state":"unavailable","reason":"result unavailable, lane resumable"}
+    },
+    "wire_error": {
+      "code": -32004,
+      "message": "not_running",
+      "result": {"turn_id":"t-1","session_id":"lane@local","state":"unavailable","reason":"-32004 not_running"}
+    }
+  },
+  "sequences": {
+    "target_release_before_collection": {
+      "session_id": "lane@local",
+      "first_input": "first",
+      "second_input": "second",
+      "first_turn_id": "t-1",
+      "second_turn_id": "t-2"
+    },
+    "invalid_local_requests": [
+      {"operation":"start","request":{"session_id":"","input":"work"},"error":"invalid session value"},
+      {"operation":"status","request":{"turn_id":""},"error":"invalid status request"},
+      {"operation":"wait","request":{"turn_id":"t-1","timeout_ms":-1},"error":"invalid wait request"}
+    ],
+    "crossed_rehello": {
+      "identity": {"product":"fixture-client","session_id":"peer","name":"initial","groups":["team"],"info":{"nested":{"value":"initial"}}},
+      "first": {"name":"first","info":{"nested":{"value":"first"}}},
+      "second": {"name":"second","info":{"nested":{"value":"second"}}}
+    }
+  }
+}

@@ -84,7 +84,8 @@ func (p *fakeProduct) Deliver(ctx context.Context, _ DeliveryRequest) (DeliveryR
 		return DeliveryReceipt{}, ctx.Err()
 	}
 	if p.outbound {
-		return DeliveryReceipt{Disposition: "injected"}, p.worker.Call(ctx, "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{})
+		_, err := p.worker.Caller().List(ctx, protocol.SessionListRequest{})
+		return DeliveryReceipt{Disposition: "injected"}, err
 	}
 	return DeliveryReceipt{Disposition: "injected"}, nil
 }
@@ -110,6 +111,7 @@ func startHarness(t *testing.T, p *fakeProduct, acknowledge, openNow bool) *rpc.
 	setEnvironment(t, "token", "")
 	worker, daemon := net.Pipe()
 	p.worker = NewWorker(p)
+	check(t, p.worker.Caller() == p.worker.Caller(), "worker did not retain one pre-serve caller")
 	p.worker.dial = func(_ context.Context, network, address string) (net.Conn, error) {
 		check(t, atomic.LoadInt32(&p.calls[0]) == 1 && network == "unix" && address == "/fixture/socket", "dial before hello or wrong endpoint")
 		return worker, nil
@@ -206,9 +208,6 @@ func runCase(t *testing.T, name string) [6]int32 {
 		h := startHarness(t, p, true, false)
 		check(t, h.Call(context.Background(), "session.superseded", struct{}{}, &struct{}{}) == nil, "superseded call failed")
 		check(t, p.worker.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}) != nil, "expected error")
-		for _, proof := range []string{"eof reconnect", "same-id re-hello", "changed groups", "different-id re-hello", "worker re-hello pending daemon admission"} {
-			t.Run(proof, func(t *testing.T) { t.Skip("pending connectPeer or daemon admission") })
-		}
 	case "wrong-direction-request":
 		h := startHarness(t, p, true, false)
 		check(t, h.Call(context.Background(), "session.hello", protocol.WorkerHello{Protocol: 1, LaunchToken: "again", HelloDescription: HelloDescription{Product: "worker", SupportedOpenFields: []string{}, ExtraArguments: []ExtraArgument{}}}, &struct{}{}) != nil, "expected error")
