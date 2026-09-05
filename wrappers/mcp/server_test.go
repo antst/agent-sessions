@@ -31,9 +31,9 @@ func TestServerMethods(t *testing.T) {
 		code        float64
 		check       func(*testing.T, map[string]any, *fakeBackend)
 	}{
-		{"initialize", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"fixture"}}`, &fakeBackend{}, 0, func(t *testing.T, response map[string]any, _ *fakeBackend) {
+		{"initialize version mismatch", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"fixture"}}`, &fakeBackend{}, 0, func(t *testing.T, response map[string]any, _ *fakeBackend) {
 			result := response["result"].(map[string]any)
-			check(t, result["protocolVersion"] == "fixture", "initialize = %#v", result)
+			check(t, result["protocolVersion"] == ProtocolVersion, "initialize = %#v", result)
 		}},
 		{"tools list", `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`, &fakeBackend{}, 0, func(t *testing.T, response map[string]any, _ *fakeBackend) {
 			tool := response["result"].(map[string]any)["tools"].([]any)[0].(map[string]any)
@@ -59,6 +59,38 @@ func TestServerMethods(t *testing.T) {
 			} else if test.check != nil {
 				test.check(t, response, test.backend)
 			}
+		})
+	}
+}
+
+func TestInvalidRequests(t *testing.T) {
+	tests := []struct {
+		name, input string
+		id          any
+	}{
+		{"wrong version", `{"jsonrpc":"1.0","id":"kept","method":"initialize"}`, "kept"},
+		{"missing method", `{"jsonrpc":"2.0","id":8}`, float64(8)},
+		{"bad id kind", `{"jsonrpc":"2.0","id":{},"method":"initialize"}`, nil},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response, err := serveOne(&Server{Backend: &fakeBackend{}}, test.input)
+			check(t, err == nil, "serve: %v", err)
+			failed := response["error"].(map[string]any)
+			check(t, failed["code"] == float64(-32600) && reflect.DeepEqual(response["id"], test.id), "response = %#v", response)
+		})
+	}
+}
+
+func TestToolArgumentsMustBeObject(t *testing.T) {
+	for _, arguments := range []string{"null", `[]`, `"scalar"`} {
+		t.Run(arguments, func(t *testing.T) {
+			backend := &fakeBackend{}
+			input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_sessions","arguments":` + arguments + `}}`
+			response, err := serveOne(&Server{Backend: backend}, input)
+			check(t, err == nil, "serve: %v", err)
+			failed := response["error"].(map[string]any)
+			check(t, failed["code"] == float64(-32602) && backend.calls == 0, "response/backend = %#v/%#v", response, backend)
 		})
 	}
 }

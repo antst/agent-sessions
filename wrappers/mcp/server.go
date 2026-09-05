@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,7 +12,10 @@ import (
 	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
 )
 
-const ToolName = "agent_sessions"
+const (
+	ToolName        = "agent_sessions"
+	ProtocolVersion = "2025-06-18"
+)
 
 var Actions = []string{"list", "send", "spawn", "describe", "run", "start", "wait", "status", "interrupt", "close", "forget"}
 
@@ -26,9 +30,9 @@ type Server struct {
 }
 
 type request struct {
-	ID     json.RawMessage `json:"id"`
-	Method string          `json:"method"`
-	Params json.RawMessage `json:"params"`
+	ID     json.RawMessage
+	Method string
+	Params json.RawMessage
 }
 
 type failure struct {
@@ -76,9 +80,9 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 }
 
 func (s *Server) handle(ctx context.Context, body []byte, output io.Writer) {
-	var request request
-	if json.Unmarshal(body, &request) != nil {
-		s.write(output, nil, nil, &failure{Code: -32700, Message: "Parse error"})
+	request, failed := decodeRequest(body)
+	if failed != nil {
+		s.write(output, request.ID, nil, failed)
 		return
 	}
 	if len(request.ID) == 0 {
@@ -91,14 +95,7 @@ func (s *Server) handle(ctx context.Context, body []byte, output io.Writer) {
 func (s *Server) call(ctx context.Context, request request) (any, *failure) {
 	switch request.Method {
 	case "initialize":
-		var params struct {
-			ProtocolVersion string `json:"protocolVersion"`
-		}
-		_ = json.Unmarshal(request.Params, &params)
-		if params.ProtocolVersion == "" {
-			params.ProtocolVersion = "2025-06-18"
-		}
-		return map[string]any{"protocolVersion": params.ProtocolVersion, "capabilities": map[string]any{"tools": map[string]any{}}, "serverInfo": map[string]string{"name": "agent-sessions", "version": "unified"}}, nil
+		return map[string]any{"protocolVersion": ProtocolVersion, "capabilities": map[string]any{"tools": map[string]any{}}, "serverInfo": map[string]string{"name": "agent-sessions", "version": "unified"}}, nil
 	case "tools/list":
 		return map[string]any{"tools": []any{toolDefinition()}}, nil
 	case "tools/call":
@@ -110,24 +107,26 @@ func (s *Server) call(ctx context.Context, request request) (any, *failure) {
 
 func (s *Server) callTool(ctx context.Context, raw json.RawMessage) (any, *failure) {
 	var call struct {
-		Name      string `json:"name"`
-		Arguments struct {
-			Action    string          `json:"action"`
-			Arguments json.RawMessage `json:"arguments"`
-		} `json:"arguments"`
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
 	}
-	if json.Unmarshal(raw, &call) != nil || call.Name != ToolName || !validAction(call.Arguments.Action) {
+	if !object(raw) || json.Unmarshal(raw, &call) != nil || call.Name != ToolName || !object(call.Arguments) {
 		return nil, &failure{Code: -32602, Message: "Invalid params"}
 	}
-	arguments := call.Arguments.Arguments
+	var input struct {
+		Action    string          `json:"action"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if json.Unmarshal(call.Arguments, &input) != nil || !validAction(input.Action) {
+		return nil, &failure{Code: -32602, Message: "Invalid params"}
+	}
+	arguments := input.Arguments
 	if len(arguments) == 0 {
 		arguments = json.RawMessage(`{}`)
-	}
-	var object map[string]any
-	if json.Unmarshal(arguments, &object) != nil {
+	} else if !object(arguments) {
 		return nil, &failure{Code: -32602, Message: "Invalid params"}
 	}
-	result, err := s.Backend.Call(ctx, call.Arguments.Action, arguments)
+	result, err := s.Backend.Call(ctx, input.Action, arguments)
 	if err != nil {
 		return nil, errorFailure(err)
 	}
@@ -139,6 +138,36 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) (any, *failu
 		return nil, &failure{Code: -32603, Message: "Agentbus backend returned an invalid response"}
 	}
 	return map[string]any{"content": []map[string]string{{"type": "text", "text": string(result)}}, "structuredContent": structured}, nil
+}
+
+func decodeRequest(body []byte) (request, *failure) {
+	if !json.Valid(body) {
+		return request{}, &failure{Code: -32700, Message: "Parse error"}
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil || fields == nil {
+		return request{}, &failure{Code: -32600, Message: "Invalid Request"}
+	}
+	value := request{ID: usableID(fields["id"]), Params: fields["params"]}
+	var version string
+	methodOK := json.Unmarshal(fields["method"], &value.Method) == nil && value.Method != ""
+	if json.Unmarshal(fields["jsonrpc"], &version) != nil || version != "2.0" || !methodOK || (len(fields["id"]) != 0 && value.ID == nil) {
+		return value, &failure{Code: -32600, Message: "Invalid Request"}
+	}
+	return value, nil
+}
+
+func usableID(raw json.RawMessage) json.RawMessage {
+	body := bytes.TrimSpace(raw)
+	if len(body) == 0 || body[0] == '"' || body[0] == '-' || body[0] >= '0' && body[0] <= '9' {
+		return raw
+	}
+	return nil
+}
+
+func object(raw json.RawMessage) bool {
+	body := bytes.TrimSpace(raw)
+	return len(body) > 0 && body[0] == '{' && json.Valid(body)
 }
 
 func (s *Server) write(output io.Writer, id json.RawMessage, result any, failed *failure) {
