@@ -206,9 +206,6 @@ func runCase(t *testing.T, name string) [6]int32 {
 		h := startHarness(t, p, true, false)
 		check(t, h.Call(context.Background(), "session.superseded", struct{}{}, &struct{}{}) == nil, "superseded call failed")
 		check(t, p.worker.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}) != nil, "expected error")
-		for _, proof := range []string{"eof reconnect", "same-id re-hello", "changed groups", "different-id re-hello", "worker re-hello pending daemon admission"} {
-			t.Run(proof, func(t *testing.T) { t.Skip("pending connectPeer or daemon admission") })
-		}
 	case "wrong-direction-request":
 		h := startHarness(t, p, true, false)
 		check(t, h.Call(context.Background(), "session.hello", protocol.WorkerHello{Protocol: 1, LaunchToken: "again", HelloDescription: HelloDescription{Product: "worker", SupportedOpenFields: []string{}, ExtraArguments: []ExtraArgument{}}}, &struct{}{}) != nil, "expected error")
