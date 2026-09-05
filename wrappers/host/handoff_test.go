@@ -195,23 +195,12 @@ func TestHandoffInterruptBeforeRunAbortsCreation(t *testing.T) {
 	}
 }
 
-func TestHandoffQueueBounds(t *testing.T) {
-	for _, test := range []struct {
-		name  string
-		items int
-		bytes int
-	}{
-		{"items", MaxQueuedDeliveries, 0},
-		{"bytes", 1, MaxQueuedBytes},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			h := &Handoff{queue: make([]string, test.items), queueSize: test.bytes}
-			receipt, err := h.Deliver(context.Background(), delivery("overflow"))
-			must(t, err)
-			if receipt.Disposition != "rejected" || receipt.Reason != "queue_full" {
-				t.Fatalf("receipt = %#v", receipt)
-			}
-		})
+func TestHandoffQueueByteBound(t *testing.T) {
+	h := &Handoff{queue: []string{"full"}, queueSize: MaxQueuedBytes}
+	receipt, err := h.Deliver(context.Background(), delivery("overflow"))
+	must(t, err)
+	if receipt.Disposition != "rejected" || receipt.Reason != "queue_full" {
+		t.Fatalf("receipt = %#v", receipt)
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"strings"
-	"syscall"
 )
 
 const (
@@ -66,10 +65,6 @@ func InteractivePlan(path string, args, environment []string, identity PeerIdent
 	environment = replaceEnv(environment, SessionIDEnv, identity.SessionID)
 	environment = replaceEnv(environment, NameEnv, identity.Name)
 	return ExecPlan{Path: path, Args: forwarded, Env: environment}, nil
-}
-
-func (p ExecPlan) Exec() error {
-	return syscall.Exec(p.Path, append([]string{p.Path}, p.Args...), p.Env) //nolint:gosec // the product wrapper selects the executable.
 }
 
 type ArgumentRule struct {

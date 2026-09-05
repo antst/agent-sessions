@@ -55,7 +55,11 @@ func (h *Handoff) Run(ctx context.Context, input string, start StartTurn) (sessi
 	queued := append([]string(nil), h.queue...)
 	starting := &creation{done: make(chan struct{})}
 	h.starting = starting
-	prompt := prepend(queued, input)
+	prompt := strings.Join(queued, "\n")
+	if len(queued) > 0 && input != "" {
+		prompt += "\n"
+	}
+	prompt += input
 	h.mu.Unlock()
 
 	turn, err := start(ctx, prompt)
@@ -103,10 +107,14 @@ func (h *Handoff) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 			return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
 		}
 	}
-	if len(h.queue) == MaxQueuedDeliveries || h.queueSize+separator(h.queue)+len(rendered) > MaxQueuedBytes {
+	added := len(rendered)
+	if len(h.queue) > 0 {
+		added++
+	}
+	if len(h.queue) == MaxQueuedDeliveries || h.queueSize+added > MaxQueuedBytes {
 		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: ErrQueueFull.Error()}, nil
 	}
-	h.queueSize += separator(h.queue) + len(rendered)
+	h.queueSize += added
 	h.queue = append(h.queue, rendered)
 	return sessionkit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
 }
@@ -132,22 +140,4 @@ func (h *Handoff) Interrupt(ctx context.Context) error {
 		return turn.Interrupt(ctx)
 	}
 	return nil
-}
-
-func prepend(messages []string, input string) string {
-	if len(messages) == 0 {
-		return input
-	}
-	prefix := strings.Join(messages, "\n")
-	if input == "" {
-		return prefix
-	}
-	return prefix + "\n" + input
-}
-
-func separator(messages []string) int {
-	if len(messages) > 0 {
-		return 1
-	}
-	return 0
 }
