@@ -232,10 +232,9 @@ token, not a speculative ID, keys the provisional worker until open returns.
 Resume requires the returned ID
 to equal `resume_session_id`. A fresh open returning an ID already held by an
 existing row fails with `spawn_failed` and the exact text `session id already
-exists`. The durable commit runs in the open-response completion hook before
-the reader dispatches the worker's next request. An exit drains the closed
-socket first, so an already-written valid open response can commit; EOF first
-fails the spawn.
+exists`. The lane owner commits while handling the open response, before it
+handles the next inbox frame. An exit drains the closed socket first, so an
+already-written valid open response can commit; EOF first fails the spawn.
 
 #### `session.open`
 
@@ -324,11 +323,11 @@ this version has none.
 - A rowless describe token can authenticate hello but can never authorize
   `session.open`; EOF after describe is the worker's normal exit.
 - Worker-originated session methods before the session ID commit are rejected.
-  The successful open-response completion hook commits the row before the
-  reader advances to the next worker frame; commit failure closes the
-  provisional connection. The kit adds no buffer, gate, or commit wait. After
-  commit, the same connection is the lane's presence and uses those ordinary
-  methods; there is no tool frame.
+  The lane owner commits while handling the successful open response, before
+  handling the next inbox frame; commit failure closes the provisional
+  connection. The kit adds no additional commit buffer, gate, or
+  acknowledgement. After commit, the same connection is the lane's presence
+  and uses those ordinary methods; there is no tool frame.
 - A second `turn.run` while one is outstanding returns busy. There is one
   running boolean in a product kit and one pending RPC in the daemon.
 - `lane.spawn` with `resume_session_id` naming a connected row returns
