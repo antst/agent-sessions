@@ -829,7 +829,10 @@ discovery, and local-encryption configuration, and renders results. Product
 selection never enters either request router.
 
 `bus/internal/rpc` is the product-agnostic full-duplex connection
-implementation. One reader dispatches requests without waiting. One send helper
+implementation. One reader runs each handler synchronously in frame order. A
+handler decides state and returns at once; long work such as a product run or a
+forwarded wait is spawned by the handler, never by the transport. A handler
+never blocks the reader. One send helper
 holds a write mutex for one complete frame; it checks the closed flag immediately
 before writing, and any write error calls `Close`. A separate mutex protects only
 the closed flag, the strictly increasing request counters, and the pending map;
@@ -1035,9 +1038,11 @@ primitive use the wrapper-host inherited-flock rule in Section 4.1.
 
 ### 3.2 Full-duplex lifecycle
 
-One reader continuously validates and dispatches inbound requests; it never
-awaits any product callback inline. This permits open, deliver, interrupt, or
-close code to originate an ordinary session method and receive its response. One writer
+One reader validates inbound requests and runs each handler synchronously in
+frame order. The handler decides state and returns at once; it dispatches every
+product callback and response write outside the reader. This permits open,
+deliver, interrupt, or close code to originate an ordinary session method and
+receive its response. One writer
 mutex preserves complete frames. Independent
 request IDs correlate worker-originated session methods and inbound results, so
 `deliver`, `interrupt`, `session.close`, and those methods all proceed while
