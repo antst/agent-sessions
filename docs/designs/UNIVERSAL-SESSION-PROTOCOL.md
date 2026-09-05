@@ -1059,9 +1059,12 @@ request IDs correlate worker-originated session methods and inbound results, so
 `deliver`, `interrupt`, `session.close`, and those methods all proceed while
 `turn.run` is outstanding.
 
-The `Run` token is installed before `run()` starts. Under one slot mutex, the run
-handler validates the terminal result, writes its response, and clears the
-slot. A failed write closes the connection and leaves the slot occupied. A
+The `Run` token is installed before `run()` starts. Immediately when `run()`
+returns, the kit cancels its per-run context under the slot mutex; from then on
+interrupt returns `not_running` without product code, including during result
+mapping, truncation, and the terminal write. Under that mutex, the run handler
+then validates the terminal result, writes its response, and clears the slot. A
+failed write closes the connection and leaves the slot occupied. A
 second run receives `busy` while native work remains; one arriving during the
 terminal write waits on the mutex and is admitted after the slot clears.
 Interrupt marks the slot once and invokes `interrupt()` once; concurrent and
@@ -1154,8 +1157,8 @@ kits. The lifecycle cases are:
 10. a daemon-to-worker `session.hello` rejected as a wrong-direction request
     before a product callback; worker-originated re-hello rejection belongs to
     daemon admission;
-11. a terminal response followed by interrupt, proving `not_running` and no
-    native interrupt call;
+11. `run()` returning, terminal processing paused, and then interrupt, proving
+    `not_running` and no native interrupt call before the terminal write;
 12. delivery first and another delivery during close, proving cancellation of
     the first callback and `closing` before a second product call;
 13. a non-run callback that originates a session method and receives its response;

@@ -111,7 +111,12 @@ func (w *Worker) handle(_ context.Context, request *rpc.Request) {
 			return
 		}
 		slot := w.run
-		call := slot.context != nil && slot.context.Err() == nil && slot.interrupted.CompareAndSwap(false, true)
+		if slot.context != nil && slot.context.Err() != nil {
+			w.mu.Unlock()
+			go w.answer(request, nil, protocol.NotRunning)
+			return
+		}
+		call := slot.context != nil && slot.interrupted.CompareAndSwap(false, true)
 		w.mu.Unlock()
 		go w.interrupt(request, slot, call)
 	case "message.deliver":
@@ -151,12 +156,14 @@ func (w *Worker) open(ctx context.Context, request *rpc.Request) {
 
 func (w *Worker) runTurn(_ context.Context, request *rpc.Request, slot *Run) {
 	result, err := w.product.Run(slot.context, slot, request.Params.(*protocol.TurnRunRequest).Input)
+	w.mu.Lock()
+	slot.cancel()
+	w.mu.Unlock()
 	if err != nil {
 		result = TurnResult{Outcome: "failed", Result: err.Error()}
 	}
 	result.Result, result.Truncated = truncate(result.Result)
 	w.mu.Lock()
-	slot.cancel()
 	if _, err = protocol.EncodeResult("turn.run", result); err == nil {
 		err = w.conn.Result(request, result)
 	}
