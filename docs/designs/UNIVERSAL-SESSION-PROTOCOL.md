@@ -238,10 +238,9 @@ token, not a speculative ID, keys the provisional worker until open returns.
 Resume requires the returned ID
 to equal `resume_session_id`. A fresh open returning an ID already held by an
 existing row fails with `spawn_failed` and the exact text `session id already
-exists`. The durable commit runs in the open-response completion hook before
-the reader dispatches the worker's next request. An exit drains the closed
-socket first, so an already-written valid open response can commit; EOF first
-fails the spawn.
+exists`. The lane owner commits while handling the open response, before it
+handles the next inbox frame. An exit drains the closed socket first, so an
+already-written valid open response can commit; EOF first fails the spawn.
 
 #### `session.open`
 
@@ -330,11 +329,11 @@ this version has none.
 - A rowless describe token can authenticate hello but can never authorize
   `session.open`; EOF after describe is the worker's normal exit.
 - Worker-originated session methods before the session ID commit are rejected.
-  The successful open-response completion hook commits the row before the
-  reader advances to the next worker frame; commit failure closes the
-  provisional connection. The kit adds no buffer, gate, or commit wait. After
-  commit, the same connection is the lane's presence and uses those ordinary
-  methods; there is no tool frame.
+  The lane owner commits while handling the successful open response, before
+  handling the next inbox frame; commit failure closes the provisional
+  connection. The kit adds no additional commit buffer, gate, or
+  acknowledgement. After commit, the same connection is the lane's presence
+  and uses those ordinary methods; there is no tool frame.
 - A second `turn.run` while one is outstanding returns busy. There is one
   running boolean in a product kit and one pending RPC in the daemon.
 - `lane.spawn` with `resume_session_id` naming a connected row returns
@@ -599,7 +598,7 @@ Before commit it may answer daemon calls but every worker-originated session
 method returns `not_committed`. The lane owner processes the open response and
 commits before it processes the next frame already waiting in its inbox. Commit
 failure closes the provisional connection. This commit-before-dispatch ordering
-needs no buffer, gate, worker-side acknowledgement, or wait.
+needs no additional commit buffer, gate, or acknowledgement.
 
 Local peers state their identity and groups, and a federated daemon states its
 own summaries. The daemon adds no PID, peer-credential, descendant, signature,
@@ -665,10 +664,10 @@ serializes the open response, process exit, timeout, connection close, and
 shutdown. A process-exit event records the exit while the reader drains frames
 already written before EOF; one later event finishes the request. It records
 TERM or KILL intent even when the process-start event is late, then applies that
-exact intent when the child arrives. Final cleanup releases the reservation
-once, kills the process group, reaps only the direct child, and sends a final
-group KILL. A child that exits before hello takes this same cleanup path, so its
-descendants do not survive.
+exact intent when the child arrives. Final cleanup stops the process group and
+joins the direct child, performs the final group KILL, then releases the
+reservation. A child that exits before hello takes this same cleanup path, so
+its descendants do not survive.
 
 For a fresh open response, the owner validates the product-returned session ID,
 reserves that canonical ID in the directory, writes the row file, then publishes
@@ -677,8 +676,8 @@ the ID, name, and attachment together. An existing peer or row with that ID is
 to `resume_session_id`. A disk failure returns `internal`; it removes the
 unpublished ID and reservation and does not retry. The owner commits before it
 handles the worker's next queued frame, so a request written immediately after
-the open response observes the row. There is no gate, frame queue, or worker
-acknowledgement for commit.
+the open response observes the row. There is no additional commit buffer, gate,
+or acknowledgement.
 
 If the child exits during open, the reader still posts every frame it read
 before its one connection-closed event. The owner records the process exit and
@@ -710,10 +709,11 @@ entry when the request arrives and keeps that copy with the request;
 caller-supplied identity does not cross the route and a later peer identity
 replacement cannot alter an admitted call.
 
-Resolution and the non-blocking post to the destination inbox are one directory
-operation. A full 256-element inbox returns `busy` at that door. The inbox holds
-mixed events, not 256 reserved call slots. A request already in that queue may
-later receive `busy` when the target owner dequeues it.
+Destination-entry validation and the non-blocking post to its inbox are one
+directory operation. A full 256-element inbox returns `busy` at that door. The
+inbox holds mixed events, not 256 reserved call slots. A request already in that
+queue may later receive `busy` when the target owner dequeues it. Multicast
+resolution and deduplication happen first on a copied directory snapshot.
 
 The target owner admits requests in inbox order. Its pending map contains at
 most 256 unanswered worker calls; a dequeued 257th call returns `busy`. This is
@@ -722,7 +722,8 @@ calls. For `turn.run`, the owner also rejects a second outstanding run, records
 the pending call, updates the directory's running projection, and sends the
 worker frame before it handles a following interrupt. `turn.interrupt`,
 `session.close`, and `message.deliver` use the same path. The worker kit owns the
-single native interrupt invocation.
+single native interrupt invocation. A `session.close` operation retains its
+pending slot through process cleanup.
 
 Each pending operation retains the destination entry token and its capacity-one
 reply slot. A worker result removes the operation and answers the slot in the
@@ -743,8 +744,9 @@ On the first admitted `session.close`, the lane owner marks the row claimed and
 sends exactly one worker close. The worker kit interrupts and awaits any current
 run. A successful close response is held in the caller owner only while that
 same target still has a run reply outstanding; a busy close is an admission
-failure and is never held. The run terminal is written first, then the one held
-close response. No dependency crosses targets.
+failure and is never held. When no same-target run reply remains pending, all
+eligible held successful closes are released. The run terminal is written
+first, then the close response. No dependency crosses targets.
 
 The one `closeBound = 10s` deadline starts when the daemon sends
 `session.close`. Close waits for the worker response, never for delivery of that
@@ -760,8 +762,8 @@ bounded tail.
 After cleanup the row remains offline and resumable. With `forget:true`, the
 owner deletes its row file before removing the directory entry; later control or
 resume is `unknown_session`. Forced cleanup settles the pending run once and
-persists no fabricated result. The caller response is independent of cleanup,
-so a missing or non-reading caller cannot retain a claim.
+persists no fabricated result. Cleanup and claim release never wait for writing
+the caller response.
 
 Once close begins, the kit keeps the existing run slot occupied until process
 exit even if the native run has already settled. A later `turn.run` is `busy`
@@ -781,20 +783,22 @@ same worker connection is therefore a protocol violation and closes that
 connection without a reply.
 
 Every connection ending closes its file descriptor. The reader then posts the
-one connection-closed event. The owner removes its exact attachment under the
-directory mutex, drains its inbox once, settles pending requests, closes its
-outbox, and exits after its owned count reaches zero. Unrequested lane EOF also
-kills the process group and reaps the child before releasing the claim. A resume
-attempt during that cleanup receives `busy`. Peer EOF removes only the exact
-transient entry. A stale EOF cannot clear a replacement entry.
+one connection-closed event. On that event the owner detaches its exact
+attachment, settles pending calls, and disposes the outbox. It continues
+consuming its inbox until its owned helpers and child are finished and the inbox
+is empty. Unrequested lane EOF also kills the process group and reaps the child
+before releasing the claim. A resume attempt during that cleanup receives
+`busy`. Peer EOF removes only the exact transient entry. A stale EOF cannot
+clear a replacement entry.
 
 Daemon shutdown closes every accepted connection, including a token-
 authenticated worker that has not committed, prevents new reservations and
 commits under the directory mutex, and broadcasts shutdown once. Each owner
 disables that select case after receiving it, closes its socket, settles pending
-work, and reaps its child. Helpers and owner loops register with the daemon wait
-group before starting. Shutdown returns after the accept loop and all registered
-work have ended; nothing commits afterward.
+work, and reaps its child. Connection owner loops, readers, writers, and launch
+producers are registered before starting; reply helpers are covered transitively
+by their owner's owned count. Shutdown returns after the accept loop and all
+registered work have ended; nothing commits afterward.
 
 ### 2.5 Listing, messaging, and federation
 
@@ -858,8 +862,8 @@ Secrets never leave configuration, TLS 1.3 supplies forward secrecy, and no
 custom application handshake exists. There is deliberately no separate expiry
 or revocation system: rotation is an edit to both configurations. The local daemon socket remains
 the trusted transport described in Section 1. This transport is capped at
-**120 production and 120 test logical lines** inside `internal/daemon`'s
-existing 1,100-line budget; tests cover derivation, pinning, mismatch, and
+**120 production and 120 test logical lines** inside the proposed combined
+daemon-and-connection budget; tests cover derivation, pinning, mismatch, and
 rotation by configuration edit. Optional local encryption reuses that code and
 may add at most **40 production and 60 test logical lines**; it does not create
 a separate transport package or budget.
@@ -956,7 +960,7 @@ lines, not as additions hidden behind relocation accounting:
 
 | Surface | Maximum | Constraint |
 | --- | ---: | --- |
-| `bus/internal/daemon` | 1,100 | Directory, session owners, row files, launch, delivery, and federation together. |
+| `bus/internal/daemon` + `bus/internal/conn` | **1,400 proposed; owner decision pending** | Directory, session owners, row files, launch, delivery, federation, and the daemon socket pair together. |
 | Largest daemon router file | 450 | No product literal, argv parser, or product callback. |
 | Durable row files | 120 | Load, write+rename, and delete for the six stored columns. |
 | Connection admission | 150 | First hello, both peer re-hello branches, and supersession. |
@@ -965,7 +969,7 @@ lines, not as additions hidden behind relocation accounting:
 | Close, EOF, and forget | 100 | Claim, settle, optional row delete, and KILL at 10 seconds. |
 | CLI, composition, and config | 100 | Optional hub, host, products, and local-key loading. |
 | Cross-host forwarder | 60 | Host-qualified session ID or explicit spawn/describe host; one hop, no state, retry, or shape translation. |
-| `bus/internal/conn` | 150 | One reader, one writer, bounded inbox/outbox, and descriptor close. |
+| `bus/internal/conn` subcap | 150 | One reader, one writer, bounded inbox/outbox, and descriptor close. |
 | `bus/internal/rpc` | 200 | Framing, one reader, pending calls, complete-frame writes, and close. |
 | `bus/internal/structuredprocess` | 700 | Generic process ownership; current functionality may remain. |
 | `bus/cmd/agentbus` daemon composition | 350 | Construction and rendering only; no protocol state. |
