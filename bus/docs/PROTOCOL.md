@@ -64,7 +64,7 @@ start/wait/status/interrupt/list/send tools are caller-kit sugar over them.
 
 Turn input and result strings, `message.send.message`, and
 `message.deliver.body` are each limited to 262,144 decoded characters through
-the schema's `maxLength` keyword. The raw 1 MiB framing guard remains an earlier,
+the closed generated types. The raw 1 MiB framing guard remains an earlier,
 independent byte limit because UTF-8 width and JSON escaping are not character
 counts. A worker kit truncates a longer native turn result to 262,144 characters
 and sets `truncated:true`. Both
@@ -72,10 +72,10 @@ kits emit compact JSON with no insignificant whitespace.
 
 The closed parameter and result shapes are authoritative in
 `bus/internal/protocol/session.schema.json`, re-exported as bytes by each public
-SDK. The schema uses only the shared
-minimal validator vocabulary, including `maxLength` alongside `minLength`; both
-validator allowlists and their shared authority test name it. An implementation rejects a frame before invoking
-product code if the corresponding definition does not validate it. Its
+SDK. An implementation decodes each frame into the closed types generated from
+the schema and rejects unknown fields, missing or null required fields, and
+out-of-range values before invoking product code. The schema is the published
+contract and the shared fixture file is its test, not a runtime component. Its
 **440-line cap** includes the optional federated product-discovery and bounded
 turn-result shapes; this
 is list data, never launch authority.

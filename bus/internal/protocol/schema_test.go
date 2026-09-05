@@ -1,0 +1,236 @@
+package protocol
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
+)
+
+type fixtureFile struct {
+	Cases []struct {
+		Name, Definition, Raw string
+		Valid                 bool
+		Value                 json.RawMessage
+		Repeat                *struct {
+			Path  []string
+			Text  string
+			Count int
+		}
+	} `json:"cases"`
+}
+
+func TestSchemaFixtures(t *testing.T) {
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource("schema.json", strings.NewReader(string(SessionSchema))); err != nil {
+		t.Fatal(err)
+	}
+	var root struct {
+		Definitions map[string]json.RawMessage `json:"$defs"`
+	}
+	if err := json.Unmarshal(SessionSchema, &root); err != nil {
+		t.Fatal(err)
+	}
+	definitions := map[string]*jsonschema.Schema{}
+	for name := range root.Definitions {
+		compiled, err := compiler.Compile("schema.json#/$defs/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		definitions[name] = compiled
+	}
+	var fixtures fixtureFile
+	raw, err := os.ReadFile("session.fixtures.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &fixtures); err != nil {
+		t.Fatal(err)
+	}
+	coverage := map[string][2]bool{}
+	for _, fixture := range fixtures.Cases {
+		fixture := fixture
+		t.Run(fixture.Name, func(t *testing.T) {
+			raw := fixture.Value
+			if fixture.Raw != "" {
+				raw = []byte(fixture.Raw)
+			}
+			if fixture.Repeat != nil {
+				raw = repeatFixture(t, raw, fixture.Repeat.Path, fixture.Repeat.Text, fixture.Repeat.Count)
+			}
+			var value any
+			if err := json.Unmarshal(raw, &value); err != nil {
+				t.Fatal(err)
+			}
+			valid := definitions[fixture.Definition].Validate(value) == nil
+			if valid != fixture.Valid {
+				t.Fatalf("valid = %t, want %t", valid, fixture.Valid)
+			}
+			seen := coverage[fixture.Definition]
+			seen[0], seen[1] = seen[0] || fixture.Valid, seen[1] || !fixture.Valid
+			coverage[fixture.Definition] = seen
+		})
+	}
+	for definition := range definitions {
+		if coverage[definition] != [2]bool{true, true} {
+			t.Errorf("definition %s lacks valid and invalid fixtures", definition)
+		}
+	}
+}
+
+func TestClosedTypesMatchSchemaFixtures(t *testing.T) {
+	var fixtures fixtureFile
+	raw, err := os.ReadFile("session.fixtures.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &fixtures); err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range fixtures.Cases {
+		fixture := fixture
+		t.Run(fixture.Name, func(t *testing.T) {
+			raw := fixture.Value
+			if fixture.Raw != "" {
+				raw = []byte(fixture.Raw)
+			}
+			if fixture.Repeat != nil {
+				raw = repeatFixture(t, raw, fixture.Repeat.Path, fixture.Repeat.Text, fixture.Repeat.Count)
+			}
+			err := validateClosedFixture(fixture.Definition, raw)
+			if (err == nil) != fixture.Valid {
+				t.Fatalf("closed type valid = %t, want %t: %v", err == nil, fixture.Valid, err)
+			}
+		})
+	}
+}
+
+func validateClosedFixture(definition string, raw []byte) error {
+	params := map[string]string{
+		"SessionHelloRequest": "session.hello", "SessionSupersededRequest": "session.superseded", "SessionListRequest": "session.list",
+		"MessageSendRequest": "message.send", "MessageDeliverRequest": "message.deliver", "LaneDescribeRequest": "lane.describe",
+		"LaneSpawnRequest": "lane.spawn", "SessionOpenRequest": "session.open", "TurnRunRequest": "turn.run",
+		"TurnInterruptRequest": "turn.interrupt", "SessionCloseRequest": "session.close",
+	}
+	results := map[string]string{
+		"SessionHelloResult": "session.hello", "SessionSupersededResult": "session.superseded", "SessionListResult": "session.list",
+		"MessageSendResult": "message.send", "MessageDeliverResult": "message.deliver", "DeliveryReceipt": "message.deliver",
+		"LaneDescribeResult": "lane.describe", "LaneSpawnResult": "lane.spawn", "SessionOpenResult": "session.open",
+		"TurnRunResult": "turn.run", "TurnInterruptResult": "turn.interrupt", "SessionCloseResult": "session.close",
+	}
+	if method := params[definition]; method != "" {
+		_, err := DecodeParams(method, raw)
+		return err
+	}
+	if method := results[definition]; method != "" {
+		_, err := DecodeResult(method, raw)
+		return err
+	}
+	switch definition {
+	case "HostProducts":
+		_, err := DecodeResult("session.list", wrap(`{"sessions":[],"hosts":[`, raw, `]}`))
+		return err
+	case "SessionSummary":
+		_, err := DecodeResult("session.list", wrap(`{"sessions":[`, raw, `]}`))
+		return err
+	case "MessageSendDelivery":
+		_, err := DecodeResult("message.send", wrap(`{"message_id":"m","deliveries":[`, raw, `]}`))
+		return err
+	case "DeliverySource":
+		_, err := DecodeParams("message.deliver", wrap(`{"message_id":"m","from":`, raw, `,"body":""}`))
+		return err
+	case "ExtraArgument":
+		_, err := DecodeResult("lane.describe", wrap(`{"product":"p","supported_open_fields":[],"extra_arguments":[`, raw, `]}`))
+		return err
+	case "SessionOpenOptions":
+		_, err := DecodeParams("session.open", wrap(`{"name":"n","groups":[],"open":`, raw, `}`))
+		return err
+	case "RPCError":
+		_, err := DecodeError(raw)
+		return err
+	case "SpawnFailedData":
+		_, err := DecodeError(wrap(`{"code":-32009,"message":"spawn_failed","data":`, raw, `}`))
+		return err
+	case "RPCErrorResponse":
+		_, err := DecodeFrame(raw)
+		return err
+	default:
+		return errors.New("unmapped fixture definition " + definition)
+	}
+}
+
+func wrap(before string, raw []byte, after string) []byte {
+	return append(append([]byte(before), raw...), after...)
+}
+
+func TestSchemaDefinitions(t *testing.T) {
+	var root struct {
+		Definitions map[string]json.RawMessage `json:"$defs"`
+	}
+	if err := json.Unmarshal(SessionSchema, &root); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"DeliveryReceipt", "DeliverySource", "ExtraArgument", "HostProducts", "LaneDescribeRequest", "LaneDescribeResult", "LaneSpawnRequest", "LaneSpawnResult", "MessageDeliverRequest", "MessageDeliverResult", "MessageSendDelivery", "MessageSendRequest", "MessageSendResult", "RPCError", "RPCErrorResponse", "SessionCloseRequest", "SessionCloseResult", "SessionHelloRequest", "SessionHelloResult", "SessionListRequest", "SessionListResult", "SessionOpenOptions", "SessionOpenRequest", "SessionOpenResult", "SessionSummary", "SessionSupersededRequest", "SessionSupersededResult", "SpawnFailedData", "TurnInterruptRequest", "TurnInterruptResult", "TurnRunRequest", "TurnRunResult"}
+	got := make([]string, 0, len(root.Definitions))
+	for name := range root.Definitions {
+		got = append(got, name)
+	}
+	slicesSort(got)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("definitions = %v", got)
+	}
+}
+
+func TestGeneratedProtocolMatchesDesign(t *testing.T) {
+	design, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "designs", "UNIVERSAL-SESSION-PROTOCOL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := section(t, string(design), "## 1. Wire\n", "## 2. Daemon\n")
+	kit := section(t, string(design), "### 3.1 Product contract\n", "### 3.2 Full-duplex lifecycle\n")
+	want := wire + strings.TrimSuffix(kit, "\n")
+	got, err := os.ReadFile(filepath.Join("..", "..", "docs", "PROTOCOL.md"))
+	if err != nil || string(got) != want {
+		t.Fatal("bus/docs/PROTOCOL.md drifted")
+	}
+}
+
+func repeatFixture(t *testing.T, raw []byte, path []string, text string, count int) []byte {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatal(err)
+	}
+	current := value.(map[string]any)
+	for _, key := range path[:len(path)-1] {
+		current = current[key].(map[string]any)
+	}
+	current[path[len(path)-1]] = strings.Repeat(text, count)
+	result, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func section(t *testing.T, document, start, end string) string {
+	from, to := strings.Index(document, start), strings.Index(document, end)
+	if from < 0 || to <= from {
+		t.Fatal("protocol section missing")
+	}
+	return document[from:to]
+}
+
+func slicesSort(values []string) {
+	for i := range values {
+		for j := i + 1; j < len(values); j++ {
+			if values[j] < values[i] {
+				values[i], values[j] = values[j], values[i]
+			}
+		}
+	}
+}

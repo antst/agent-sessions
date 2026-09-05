@@ -1,18 +1,18 @@
 {
   "cases": [
-    {"name":"ready-open-commit","proof":["hello_after_ready","precommit_rejected","postcommit_allowed"]},
-    {"name":"describe-eof","proof":["open_zero","close_zero"]},
-    {"name":"terminal-results","proof":["completed","interrupted","failed","empty_result","character_truncation"]},
-    {"name":"one-run","proof":["second_busy","run_calls_one"]},
-    {"name":"one-interrupt","proof":["coalesced","close_joins","interrupt_calls_one"]},
-    {"name":"full-duplex","proof":["deliver_while_running","worker_method_while_running"]},
-    {"name":"close-during-run","proof":["run_response_before_close_response"]},
-    {"name":"eof-during-run","proof":["callbacks_cancelled","pending_failed","close_once"]},
-    {"name":"peer-lifetime","proof":["eof_reconnect","superseded_terminal","same_id_rehello","changed_groups_rejected","different_id_replaced","worker_rehello_rejected"]},
-    {"name":"invalid-frames","proof":["malformed","unknown","oversized","unsafe_id","callbacks_zero"]},
-    {"name":"terminal-before-interrupt","proof":["interrupt_calls_zero"]},
-    {"name":"idle-close-deliver","proof":["rejected_closing","deliver_calls_zero"]},
-    {"name":"callback-originated-method","proof":["response_received"]},
-    {"name":"environment","proof":["endpoint_order","secrets_read_once","secrets_scrubbed","connect_once","no_reconnect"]}
+    {"name":"ready-open-commit", "calls":[1,1,0,0,0,0]},
+    {"name":"describe-eof", "calls":[1,0,0,0,0,0]},
+    {"name":"terminal-results", "calls":[1,1,5,0,0,0]},
+    {"name":"one-run", "calls":[1,1,1,0,0,0]},
+    {"name":"one-interrupt", "calls":[1,1,1,1,0,0]},
+    {"name":"full-duplex", "calls":[1,1,1,0,1,0]},
+    {"name":"close-during-run", "calls":[1,1,1,1,0,1]},
+    {"name":"eof-during-run", "calls":[1,1,1,0,0,1]},
+    {"name":"peer-lifetime", "calls":[1,0,0,0,0,0]},
+    {"name":"invalid-frames", "calls":[4,0,0,0,0,0]},
+    {"name":"terminal-before-interrupt", "calls":[1,1,0,0,0,0]},
+    {"name":"idle-close-deliver", "calls":[1,1,0,0,0,1]},
+    {"name":"callback-originated-method", "calls":[1,1,1,0,1,0]},
+    {"name":"environment", "calls":[0,0,0,0,0,0]}
   ]
 }

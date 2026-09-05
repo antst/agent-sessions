@@ -7,7 +7,57 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { CLIENT_OPERATIONS, METHOD_DEFINITIONS, InactiveError, LiveSessionClient, compileSessionSchema, readConfiguration, renderDelivery } = require("./live-session.js");
+const { CLIENT_OPERATIONS, METHOD_DEFINITIONS, InactiveError, LiveSessionClient, readConfiguration, renderDelivery } = require("./live-session.js");
+
+const SESSION_SCHEMA_KEYS = new Set(["$ref", "type", "additionalProperties", "required", "properties", "allOf", "if", "then", "else", "not", "items", "uniqueItems", "enum", "const", "minLength", "maxLength", "minimum"]);
+
+function compileSessionSchema(root) {
+  const defs = root && Object.getPrototypeOf(root) === Object.prototype && root.$defs;
+  if (!defs || Object.getPrototypeOf(defs) !== Object.prototype || Object.keys(defs).length === 0) throw new Error("invalid session schema root");
+  for (const [name, node] of Object.entries(defs)) checkSessionSchemaNode(root, node, name);
+  return {
+    definitions: Object.keys(defs).sort(),
+    validate(name, value) {
+      if (!Object.hasOwn(defs, name)) throw new Error(`unknown session schema definition ${name}`);
+      return validSessionSchemaNode(root, defs[name], value);
+    },
+  };
+}
+
+function checkSessionSchemaNode(root, node, at) {
+  if (!node || Object.getPrototypeOf(node) !== Object.prototype) throw new Error(`schema node ${at} is not an object`);
+  for (const [key, value] of Object.entries(node)) {
+    if (!SESSION_SCHEMA_KEYS.has(key)) throw new Error(`unsupported schema keyword ${key}`);
+    if (key === "$ref" && (!value.startsWith("#/$defs/") || !Object.hasOwn(root.$defs, value.slice(8)))) throw new Error(`unknown schema reference ${value}`);
+    if (key === "properties") for (const [name, child] of Object.entries(value)) checkSessionSchemaNode(root, child, `${at}.${name}`);
+    else if (["items", "if", "then", "else", "not"].includes(key)) checkSessionSchemaNode(root, value, `${at}.${key}`);
+    else if (key === "allOf") value.forEach((child, index) => checkSessionSchemaNode(root, child, `${at}.allOf[${index}]`));
+  }
+}
+
+function validSessionSchemaNode(root, node, value) {
+  if (node.$ref) return validSessionSchemaNode(root, root.$defs[node.$ref.slice(8)], value);
+  if (node.type === "object" && (!value || Array.isArray(value) || typeof value !== "object")) return false;
+  if (node.type === "array" && !Array.isArray(value)) return false;
+  if (node.type === "string" && typeof value !== "string") return false;
+  if (node.type === "boolean" && typeof value !== "boolean") return false;
+  if (node.type === "integer" && (!Number.isFinite(value) || !Number.isInteger(value))) return false;
+  if (Object.hasOwn(node, "const") && JSON.stringify(value) !== JSON.stringify(node.const)) return false;
+  if (node.enum && !node.enum.some((item) => JSON.stringify(value) === JSON.stringify(item))) return false;
+  if (typeof value === "string" && (node.minLength > [...value].length || node.maxLength < [...value].length)) return false;
+  if (typeof value === "number" && node.minimum > value) return false;
+  if (value && !Array.isArray(value) && typeof value === "object") {
+    if (node.required?.some((key) => !Object.hasOwn(value, key))) return false;
+    if (node.additionalProperties === false && Object.keys(value).some((key) => !Object.hasOwn(node.properties ?? {}, key))) return false;
+    if (node.properties && !Object.entries(node.properties).every(([key, child]) => !Object.hasOwn(value, key) || validSessionSchemaNode(root, child, value[key]))) return false;
+  }
+  if (Array.isArray(value) && node.items && !value.every((item) => validSessionSchemaNode(root, node.items, item))) return false;
+  if (Array.isArray(value) && node.uniqueItems && new Set(value.map(JSON.stringify)).size !== value.length) return false;
+  if (node.allOf && !node.allOf.every((child) => validSessionSchemaNode(root, child, value))) return false;
+  if (node.not && validSessionSchemaNode(root, node.not, value)) return false;
+  if (node.if) return validSessionSchemaNode(root, node.if, value) ? !node.then || validSessionSchemaNode(root, node.then, value) : !node.else || validSessionSchemaNode(root, node.else, value);
+  return true;
+}
 
 test("universal session schema accepts the shared fixtures", () => {
   const root = JSON.parse(fs.readFileSync(path.join(__dirname, "../../bus/internal/protocol/session.schema.json"), "utf8"));
