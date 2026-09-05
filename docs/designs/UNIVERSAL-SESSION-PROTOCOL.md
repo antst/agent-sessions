@@ -778,26 +778,26 @@ or error. Its table is the only home of a spawned row; the origin later exposes
 its already-canonical identities through a federation summary. An unconnected
 explicit or canonical host returns `unknown_host` before product or session lookup.
 
-The hub's private forwarding envelope contains only the TLS-authenticated
-originating host, connection-derived source identity and groups, target host,
-correlation ID, and unchanged public request. A host may assert only identities
-qualified by its own authenticated host name. The target daemon authorizes the
-captured source against its own local visibility; the hub does not decide
-authorization. A federated turn is one outstanding RPC at each hop; caller loss
-has the same sink-only effect, and the authoritative daemon drains and discards
-a result whose origin reply sink has disappeared. Transport loss before a
-forwarded response returns `forward_lost`: the request may or may not have been
-applied and is never retried.
+A forwarded request is exactly
+`{from:{session_id:<id@host>,groups:[...]},request:<unchanged public request>}`.
+The originating host is the authenticated TLS connection and correlation is
+the enclosing JSON-RPC ID. The target applies its ordinary visibility check
+using the carried groups; the hub does not decide authorization. A federated
+turn is one outstanding RPC at each hop; caller loss has the same sink-only
+effect, and the authoritative daemon drains and discards a result whose origin
+reply sink has disappeared. Transport loss before a forwarded response returns
+`forward_lost`: the request may or may not have been applied and is never
+retried.
 
-Snapshot frame bytes, outstanding forwarded calls, and per-host outbound bytes
-have fixed implementation bounds. Exceeding any bound disconnects that host and
-fails its pending forwarded calls as `forward_lost`; it never drops or partially
-applies a snapshot. All forwarding is one function of at most 60 logical lines:
-resolve either form of host address, forward the identical request once, and
-return the identical response or error. It stores no remote durable state and
-never retries. Replay, durable hub rows, distributed locks, automatic host
-placement, multi-hop routes, and capability negotiation that gates PATH launch
-are explicitly outside the design.
+`maxPendingForwardedPerHost = 256` is the one federation-flow cap. Overflow
+closes that host connection and fails its pending forwarded calls as
+`forward_lost`; the ordinary 1 MiB frame limit already bounds snapshots and
+requests. All forwarding is one function of at most 60 logical lines: resolve
+either form of host address, forward the identical request once, and return the
+identical response or error. It stores no remote durable state and never
+retries. Replay, durable hub rows, distributed locks, automatic host placement,
+multi-hop routes, and capability negotiation that gates PATH launch are
+explicitly outside the design.
 
 ### 2.6 Package boundary
 
@@ -1533,10 +1533,10 @@ check.
 | Identity | Every local and remote summary emits the same canonical `id@host` and `name@host`; no separate host field or receiving-side relabeling exists. A standalone daemon uses `local`, and a federated daemon requires a configured non-`local` unique host name. |
 | Visibility | The authoritative daemon filters by groups; the receiving daemon trusts that assertion and never persists a remote row. |
 | Messaging | One canonical remote message is forwarded once, produces one receipt, and is never retried or duplicated after federation reconnect. Bare input selects the caller's own host; qualified input is split only at the last `@`. |
-| Control and creation | The capped function forwards canonical remote resume/run/interrupt/close and explicit-host spawn/describe exactly one hop in the private envelope `{TLS-authenticated origin host, connection-derived source identity/groups, target host, correlation id, unchanged public request}`. The target authorizes locally, a host may assert only its own identities, caller loss removes only the reply sink, and transport loss returns `forward_lost` without retry. |
+| Control and creation | The capped function forwards canonical remote resume/run/interrupt/close and explicit-host spawn/describe exactly one hop as `{from:{session_id:id@host,groups},request}`; the TLS connection identifies the origin and the JSON-RPC ID correlates it. The target applies ordinary visibility, caller loss removes only the reply sink, and transport loss returns `forward_lost` without retry. |
 | Federation authentication | `agent-sessions secret` produces 32 random bytes in base64; either side rejects a decoded secret shorter than 32 bytes. A correct host/secret pair federates; a wrong secret, unknown or reserved `local` name, duplicate host, or name/key mismatch fails the TLS handshake. Changing one side's secret disconnects that host until both configurations match; no separate expiry or revocation exists, and secret-bearing config is mode 0600. |
 | Optional local encryption | A keyed daemon rejects a keyless client; a keyed client fails truthfully against a plain daemon; matching keys connect; and a spawned lane receives and scrubs both `AGENT_SESSIONS_LAUNCH_TOKEN` and `AGENT_SESSIONS_LOCAL_KEY`. |
-| Reconnect | A per-host snapshot replaces its predecessor atomically and is followed by ordered live updates. Snapshot bytes, pending calls, and per-host outbound bytes are bounded; overflow disconnects that host. Disconnect removes its entire transient contribution and fails pending one-hop calls once as `forward_lost`; reconnect publishes a fresh snapshot and never replays a request. |
+| Reconnect | A per-host snapshot replaces its predecessor atomically and is followed by ordered live updates. `maxPendingForwardedPerHost = 256` is the sole flow cap and the existing 1 MiB frame limit bounds snapshots; overflow disconnects that host. Disconnect removes its entire transient contribution and fails pending one-hop calls once as `forward_lost`; reconnect publishes a fresh snapshot and never replays a request. |
 | Refused federation machinery | The hub has no replay, durable rows, distributed locks, automatic placement, multi-hop routing, or capability negotiation that gates PATH launch. |
 
 ### 5.8 Test rehoming
