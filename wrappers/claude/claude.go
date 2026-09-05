@@ -159,9 +159,6 @@ func (p *Wrapper) start(ctx context.Context, prompt string) (host.Turn, error) {
 	t := &turn{owner: p, done: make(chan struct{})}
 	p.active = t
 	err := p.write(prompt)
-	if err == nil {
-		t.write = p.writes
-	}
 	needsInit := !p.init
 	p.mu.Unlock()
 	if err == nil && needsInit {
@@ -195,6 +192,9 @@ func (p *Wrapper) write(prompt string) error {
 		return err
 	}
 	p.writes++
+	if p.active != nil {
+		p.active.write, p.active.consumed = p.writes, false
+	}
 	return nil
 }
 
@@ -285,12 +285,14 @@ func (p *Wrapper) receive(item frame) {
 			p.failLocked(fmt.Errorf("Claude result changed native session from %q to %q", p.expected, item.SessionID))
 			return
 		}
-		if p.active != nil && p.active.consumed {
-			t := p.active
-			p.active = nil
-			t.result = terminal(item)
-			close(t.done)
+		if p.active != nil {
+			p.active.result = terminal(item)
 		}
+	}
+	if p.active != nil && p.active.consumed && p.active.result.Outcome != "" {
+		t := p.active
+		p.active = nil
+		close(t.done)
 	}
 }
 

@@ -163,6 +163,28 @@ func TestStreamRunDeliveryAndInterrupt(t *testing.T) {
 	check(t, result.Outcome == "interrupted", "terminal = %#v", result)
 }
 
+func TestResultWaitsForInjectedReplay(t *testing.T) {
+	p, writes := newStream()
+	native, err := p.start(context.Background(), "caller")
+	must(t, err)
+	<-writes.wrote
+	p.receive(frame{Type: "user", IsReplay: true})
+	receipt, err := p.Deliver(context.Background(), delivery("injected"))
+	must(t, err)
+	check(t, receipt.Disposition == "injected", "receipt = %#v", receipt)
+	<-writes.wrote
+	p.receive(frame{Type: "result", Subtype: "success", SessionID: fixtureID, Result: "includes delivery"})
+	select {
+	case <-native.(*turn).done:
+		t.Fatal("result completed before the injected frame replay")
+	default:
+	}
+	p.receive(frame{Type: "user", IsReplay: true})
+	result, err := native.Wait(context.Background())
+	must(t, err)
+	check(t, result.Result == "includes delivery", "terminal = %#v", result)
+}
+
 func TestTerminalTable(t *testing.T) {
 	for _, test := range []struct {
 		name string
