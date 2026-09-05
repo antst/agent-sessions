@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"sync"
 
@@ -39,7 +38,6 @@ type Conn struct {
 	closed           bool
 	next, last       int64
 	pending          map[int64]pending
-	logged           sync.Once
 }
 
 func New(fd net.Conn, client bool, handler func(context.Context, *Request)) *Conn {
@@ -217,7 +215,7 @@ func (c *Conn) receiveResponse(frame protocol.Frame) {
 	}
 	c.stateMu.Unlock()
 	if !ok {
-		c.logged.Do(func() { log.Printf("agentbus: dropping unmatched response id %d", frame.ID) })
+		c.close(errors.New("unmatched response"))
 		return
 	}
 	err := error(frame.Error)

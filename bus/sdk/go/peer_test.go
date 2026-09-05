@@ -120,6 +120,59 @@ func TestPeerReconnectsButSupersededStops(t *testing.T) {
 	}
 }
 
+func TestPeerReplaceSettlesOldRunAndReconnectsAsNewIdentity(t *testing.T) {
+	connections := make(chan net.Conn, 2)
+	usePeerDialer(t, func(string, string) (net.Conn, error) {
+		select {
+		case fd := <-connections:
+			return fd, nil
+		default:
+			return nil, errors.New("offline")
+		}
+	})
+	requests1, server1, client1 := peerPipe(t)
+	connections <- client1
+	peer, err := ConnectPeer(Identity{Product: "fixture-client", SessionID: "old", Name: "old", Groups: []string{"old"}, Info: map[string]any{}}, acceptDelivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := <-requests1
+	mustRPC(t, server1.Result(hello, struct{}{}))
+	await(t, peer.Ready(), "peer ready")
+	started, err := peer.Caller.Start(TurnRunRequest{SessionID: "lane@local", Input: "block"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := <-requests1
+	replaced := make(chan error, 1)
+	next := Identity{Product: "fixture-client", SessionID: "new", Name: "new", Groups: []string{"new"}, Info: map[string]any{}}
+	go func() { replaced <- peer.Replace(context.Background(), next) }()
+	replacement := <-requests1
+	status, err := peer.Caller.Wait(WaitRequest{TurnID: started.TurnID})
+	if err != nil || status.State != "unavailable" || status.Reason != "-32002 not_connected" {
+		t.Fatalf("old run = %#v, %v", status, err)
+	}
+	mustRPC(t, server1.Error(run, protocol.NotConnected, nil))
+	mustRPC(t, server1.Result(replacement, struct{}{}))
+	mustRPC(t, <-replaced)
+	peer.mu.Lock()
+	current := peer.identity.SessionID
+	peer.mu.Unlock()
+	if current != "new" {
+		t.Fatalf("identity = %q", current)
+	}
+	requests2, server2, client2 := peerPipe(t)
+	connections <- client2
+	mustRPC(t, server1.Close())
+	reconnected := <-requests2
+	if got := reconnected.Params.(*protocol.PeerHello).SessionID; got != "new" {
+		t.Fatalf("reconnect identity = %q", got)
+	}
+	mustRPC(t, server2.Result(reconnected, struct{}{}))
+	peer.Shutdown()
+	await(t, peer.Closed(), "peer closed")
+}
+
 func TestCallerReportsRealDaemonEOF(t *testing.T) {
 	fixtures := loadCallerFixtures(t)
 	directory := t.TempDir()
