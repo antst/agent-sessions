@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"math"
-	"strconv"
 	"unicode/utf8"
 )
 
@@ -14,6 +13,7 @@ type Frame struct {
 	Method         string
 	Params, Result json.RawMessage
 	Error          *RPCError
+	Request        bool
 }
 
 type wireFrame struct {
@@ -29,6 +29,7 @@ func DecodeFrame(body []byte) (frame Frame, err error) {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(body, &fields) == nil {
 		frame.ID, _ = numericID(fields["id"])
+		frame.Request = fields["method"] != nil || fields["params"] != nil
 		_ = json.Unmarshal(fields["method"], &frame.Method)
 	}
 	var wire wireFrame
@@ -111,11 +112,10 @@ func numericID(raw []byte) (int64, bool) {
 	if len(raw) == 0 || null(raw) {
 		return 0, false
 	}
-	var number json.Number
-	if json.Unmarshal(raw, &number) != nil {
+	var value float64
+	if json.Unmarshal(raw, &value) != nil {
 		return 0, false
 	}
-	value, err := strconv.ParseFloat(number.String(), 64)
-	return int64(value), err == nil && value >= 1 && value <= MaxRequestID && math.Trunc(value) == value
+	return int64(value), value >= 1 && value <= MaxRequestID && math.Trunc(value) == value
 }
 func null(raw []byte) bool { return bytes.Equal(bytes.TrimSpace(raw), []byte("null")) }

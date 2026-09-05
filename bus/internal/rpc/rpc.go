@@ -139,14 +139,14 @@ func (c *Conn) read() {
 		}
 		frame, err := protocol.DecodeFrame(body[:len(body)-1])
 		if err != nil {
-			if frame.ID > 0 && frame.Method != "" {
+			if frame.ID > 0 && frame.Request {
 				c.reject(frame, protocol.InvalidFrame)
 			} else {
 				c.close(err)
 			}
 			return
 		}
-		if frame.Method != "" {
+		if frame.Request {
 			c.receiveRequest(frame)
 		} else {
 			c.receiveResponse(frame)

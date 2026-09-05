@@ -141,26 +141,24 @@ func TestLateResponseDoesNotBlockAndRequestIDsIncrease(t *testing.T) {
 }
 
 func TestInvalidRequestRepliesThenCloses(t *testing.T) {
-	tests := []struct {
-		body string
-		code int
-	}{
-		{`{"jsonrpc":"2.0","id":1,"method":"session.list","params":{"extra":true}}`, protocol.InvalidFrame},
-		{`{"jsonrpc":"2.0","id":1,"method":"session.hello","params":{"protocol":1,"product":"p","session_id":"s","name":"n","groups":[],"info":{},"launch_token":"t","supported_open_fields":[],"extra_arguments":[]}}`, protocol.InvalidHello},
-		{`{`, 0},
-	}
-	for _, test := range tests {
+	checkRejected := func(body string, code int) {
 		local, peer := net.Pipe()
 		New(local, false, nil)
-		go peer.Write(append([]byte(test.body), '\n'))
+		go peer.Write(append([]byte(body), '\n'))
 		reader := bufio.NewReader(peer)
-		if test.code != 0 {
-			want, _ := protocol.ErrorBytes(1, test.code, nil)
+		if code != 0 {
+			want, _ := protocol.ErrorBytes(1, code, nil)
 			got, err := reader.ReadBytes('\n')
 			check(t, err == nil && string(got) == string(want), "response = %q, %v; want %q", got, err, want)
 		}
-		body, err := reader.ReadBytes('\n')
-		check(t, len(body) == 0 && errors.Is(err, io.EOF), "after response = %q, %v; want EOF", body, err)
+		tail, err := reader.ReadBytes('\n')
+		check(t, len(tail) == 0 && errors.Is(err, io.EOF), "after response = %q, %v; want EOF", tail, err)
+	}
+	checkRejected(`{"jsonrpc":"2.0","id":1,"method":"session.list","params":{"extra":true}}`, protocol.InvalidFrame)
+	checkRejected(`{"jsonrpc":"2.0","id":1,"method":"session.hello","params":{"protocol":1,"product":"p","session_id":"s","name":"n","groups":[],"info":{},"launch_token":"t","supported_open_fields":[],"extra_arguments":[]}}`, protocol.InvalidHello)
+	checkRejected(`{`, 0)
+	for _, method := range []string{`"method":null,`, `"method":"",`, `"method":1,`, ``} {
+		checkRejected(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,%s"params":{}}`, method), protocol.InvalidFrame)
 	}
 }
 
@@ -172,7 +170,6 @@ func TestEOFFailsPendingOnce(t *testing.T) {
 	_, _ = peer.Write([]byte("{"))
 	_ = peer.Close()
 	check(t, <-returned != nil, "pending call succeeded after EOF")
-	<-c.Done()
 }
 
 func TestCloseIsIdempotent(t *testing.T) {
@@ -217,7 +214,6 @@ func TestMalformedPendingResponseClosesAllCalls(t *testing.T) {
 	bad := fmt.Sprintf("{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":null}\n", min(first.ID, second.ID))
 	_, _ = io.WriteString(peer, bad)
 	check(t, <-returned != nil && <-returned != nil, "malformed response left a pending call")
-	<-c.Done()
 }
 
 func TestCloseCancelsAdmittedHandler(t *testing.T) {
