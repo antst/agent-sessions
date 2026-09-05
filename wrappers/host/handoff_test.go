@@ -2,18 +2,25 @@ package host
 
 import (
 	"context"
+	"errors"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
 )
 
 type fakeTurn struct {
-	done      chan struct{}
-	waiting   chan struct{}
-	injected  chan string
-	interrupt chan struct{}
-	active    bool
+	done       chan struct{}
+	waiting    chan struct{}
+	injected   chan string
+	interrupt  chan struct{}
+	injecting  chan struct{}
+	inject     chan struct{}
+	active     atomic.Bool
+	outcome    string
+	interrupts atomic.Int32
 }
 
 func (t *fakeTurn) Wait(context.Context) (sessionkit.TurnResult, error) {
@@ -21,15 +28,23 @@ func (t *fakeTurn) Wait(context.Context) (sessionkit.TurnResult, error) {
 		close(t.waiting)
 	}
 	<-t.done
-	return sessionkit.TurnResult{Outcome: "completed", Result: "done"}, nil
+	return sessionkit.TurnResult{Outcome: value(t.outcome, "completed"), Result: "done"}, nil
 }
 func (t *fakeTurn) Inject(_ context.Context, message string) (bool, error) {
-	if t.active {
+	if t.injecting != nil {
+		close(t.injecting)
+		<-t.inject
+	}
+	if t.active.Load() {
 		t.injected <- message
 	}
-	return t.active, nil
+	return t.active.Load(), nil
 }
-func (t *fakeTurn) Interrupt(context.Context) error { close(t.interrupt); return nil }
+func (t *fakeTurn) Interrupt(context.Context) error {
+	t.interrupts.Add(1)
+	close(t.interrupt)
+	return nil
+}
 
 func TestHandoffDeliveryTable(t *testing.T) {
 	for _, test := range []struct {
@@ -42,7 +57,7 @@ func TestHandoffDeliveryTable(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			h := &Handoff{}
-			turn := &fakeTurn{done: make(chan struct{}), waiting: make(chan struct{}), injected: make(chan string, 1), interrupt: make(chan struct{}), active: true}
+			turn := newFakeTurn(true)
 			started, release := make(chan struct{}), make(chan struct{})
 			var run <-chan sessionkit.TurnResult
 			if test.phase != "idle" {
@@ -84,48 +99,113 @@ func TestHandoffDeliveryTable(t *testing.T) {
 
 func TestHandoffQueueAndInterrupt(t *testing.T) {
 	h := &Handoff{}
-	receipt, err := h.Deliver(context.Background(), delivery("queued"))
-	must(t, err)
-	if receipt.Disposition != "queued_for_next_turn" {
-		t.Fatalf("receipt = %#v", receipt)
-	}
+	_, _ = h.Deliver(context.Background(), delivery("queued"))
+	turn := newFakeTurn(true)
+	turn.outcome = "interrupted"
 	started := make(chan string, 1)
 	release := make(chan struct{})
-	run := asyncRun(h, func(ctx context.Context, prompt string) (Turn, error) {
-		started <- prompt
-		<-ctx.Done()
-		close(release)
-		return nil, ctx.Err()
+	run := asyncRun(h, func(context.Context, string) (Turn, error) {
+		started <- "started"
+		<-release
+		return turn, nil
 	})
-	prompt := <-started
-	if !strings.Contains(prompt, "queued") || !strings.HasSuffix(prompt, "\ninput") {
-		t.Fatalf("prompt = %q", prompt)
+	<-started
+	_, _ = h.Deliver(context.Background(), delivery("late"))
+	interrupted := asyncInterrupt(h)
+	select {
+	case <-interrupted:
+		t.Fatal("interrupt did not wait for creation")
+	default:
 	}
-	must(t, h.Interrupt(context.Background()))
-	<-release
+	waitStartingInterrupt(h)
+	close(release)
+	<-turn.interrupt
+	must(t, <-interrupted)
+	close(turn.done)
+	if result := <-run; result.Outcome != "interrupted" || turn.interrupts.Load() != 1 {
+		t.Fatalf("result = %#v, interrupts = %d", result, turn.interrupts.Load())
+	}
+	var nextPrompt string
+	nextTurn := newFakeTurn(false)
+	next := asyncRun(h, func(_ context.Context, prompt string) (Turn, error) {
+		nextPrompt = prompt
+		return nextTurn, nil
+	})
+	close(nextTurn.done)
+	<-next
+	if strings.Contains(nextPrompt, "queued") || !strings.Contains(nextPrompt, "late") {
+		t.Fatalf("commit removed wrong queue entries: %q", nextPrompt)
+	}
+}
+
+func TestHandoffFailedCreationKeepsFullQueue(t *testing.T) {
+	h := &Handoff{queue: make([]string, MaxQueuedDeliveries), queueSize: MaxQueuedDeliveries - 1}
+	started := make(chan struct{})
+	run := asyncRun(h, func(context.Context, string) (Turn, error) {
+		close(started)
+		waitStartingInterrupt(h)
+		return nil, errors.New("failed")
+	})
+	<-started
+	receipt, err := h.Deliver(context.Background(), delivery("overflow"))
+	must(t, err)
+	if receipt.Reason != "queue_full" {
+		t.Fatalf("receipt = %#v", receipt)
+	}
+	interrupted := asyncInterrupt(h)
+	select {
+	case <-interrupted:
+		t.Fatal("interrupt did not wait for failed creation")
+	default:
+	}
 	if result := <-run; result.Outcome != "interrupted" {
 		t.Fatalf("result = %#v", result)
 	}
-	var nextPrompt string
-	turn := &fakeTurn{done: make(chan struct{}), injected: make(chan string, 1), interrupt: make(chan struct{})}
-	next := asyncRun(h, func(_ context.Context, prompt string) (Turn, error) { nextPrompt = prompt; return turn, nil })
+	must(t, <-interrupted)
+	if len(h.queue) != MaxQueuedDeliveries {
+		t.Fatalf("queue length = %d", len(h.queue))
+	}
+}
+
+func TestHandoffTerminalInjectionRace(t *testing.T) {
+	h := &Handoff{}
+	turn := newFakeTurn(true)
+	turn.injecting, turn.inject = make(chan struct{}), make(chan struct{})
+	run := asyncRun(h, func(context.Context, string) (Turn, error) { return turn, nil })
+	<-turn.waiting
+	delivered := asyncDeliver(h, "racing")
+	<-turn.injecting
+	turn.active.Store(false)
 	close(turn.done)
+	close(turn.inject)
+	if receipt := <-delivered; receipt.Disposition != "queued_for_next_turn" {
+		t.Fatalf("receipt = %#v", receipt)
+	}
+	<-run
+	_, _ = h.Deliver(context.Background(), delivery("after"))
+	var prompt string
+	nextTurn := newFakeTurn(false)
+	next := asyncRun(h, func(_ context.Context, input string) (Turn, error) { prompt = input; return nextTurn, nil })
+	close(nextTurn.done)
 	<-next
-	if !strings.Contains(nextPrompt, "queued") {
-		t.Fatalf("aborted creation lost queue: %q", nextPrompt)
+	if strings.Count(prompt, "racing") != 1 || strings.Index(prompt, "racing") > strings.Index(prompt, "after") {
+		t.Fatalf("queued prompt = %q", prompt)
 	}
 }
 
 func TestHandoffPendingInterrupt(t *testing.T) {
 	h := &Handoff{}
 	must(t, h.Interrupt(context.Background()))
+	turn := newFakeTurn(true)
+	turn.outcome = "interrupted"
 	called := false
-	result, err := h.Run(context.Background(), "input", func(context.Context, string) (Turn, error) {
+	run := asyncRun(h, func(ctx context.Context, prompt string) (Turn, error) {
 		called = true
-		return nil, nil
+		return turn, nil
 	})
-	must(t, err)
-	if called || result.Outcome != "interrupted" {
+	<-turn.interrupt
+	close(turn.done)
+	if result := <-run; !called || result.Outcome != "interrupted" {
 		t.Fatalf("start called = %v, result = %#v", called, result)
 	}
 }
@@ -159,10 +239,47 @@ func asyncRun(h *Handoff, start StartTurn) <-chan sessionkit.TurnResult {
 	return done
 }
 
+func asyncInterrupt(h *Handoff) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- h.Interrupt(context.Background()) }()
+	return done
+}
+
+func asyncDeliver(h *Handoff, body string) <-chan sessionkit.DeliveryReceipt {
+	done := make(chan sessionkit.DeliveryReceipt, 1)
+	go func() { receipt, _ := h.Deliver(context.Background(), delivery(body)); done <- receipt }()
+	return done
+}
+
+func newFakeTurn(active bool) *fakeTurn {
+	turn := &fakeTurn{done: make(chan struct{}), waiting: make(chan struct{}), injected: make(chan string, 1), interrupt: make(chan struct{})}
+	turn.active.Store(active)
+	return turn
+}
+
+func value(got, fallback string) string {
+	if got != "" {
+		return got
+	}
+	return fallback
+}
+
+func waitStartingInterrupt(h *Handoff) {
+	for {
+		h.mu.Lock()
+		interrupted := h.starting != nil && h.starting.interrupted
+		h.mu.Unlock()
+		if interrupted {
+			return
+		}
+		runtime.Gosched()
+	}
+}
+
 func delivery(body string) sessionkit.DeliveryRequest {
 	return sessionkit.DeliveryRequest{
 		MessageID: "message", Body: body,
-		From: sessionkit.DeliverySource{SessionID: "peer@local", Name: "peer@local", Product: "codex", Groups: []string{"project"}},
+		From: sessionkit.DeliverySource{SessionID: "peer@local", Name: "peer@local", Product: "example", Groups: []string{"project"}},
 	}
 }
 

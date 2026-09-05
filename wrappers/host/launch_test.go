@@ -21,7 +21,7 @@ func TestLaneModeUsesTokenPresence(t *testing.T) {
 }
 
 func TestInteractivePlan(t *testing.T) {
-	plan, err := InteractivePlan("claude", []string{
+	plan, err := InteractivePlan("example", []string{
 		"--model", "-g", "-g", "project", "--group=review", "--", "-g", "literal",
 	}, []string{"PATH=/bin", GroupsEnv + "=[\"old\"]"}, PeerIdentity{SessionID: "id", Name: "name"}, func(option string) bool { return option == "--model" })
 	must(t, err)
