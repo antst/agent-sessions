@@ -7,9 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync/atomic"
 	"syscall"
-	"time"
 )
 
 const stderrLimit = 64 << 10
@@ -22,7 +20,6 @@ type processDetails struct {
 type Process struct {
 	cmd     *exec.Cmd
 	done    chan struct{}
-	stop    atomic.Bool
 	details processDetails
 }
 
@@ -52,7 +49,6 @@ func Start(path string, environment []string) (*Process, error) {
 			exit = command.ProcessState.ExitCode()
 		}
 		p.details = processDetails{stderr: splitLines(raw), exit: exit}
-		p.signal(syscall.SIGKILL)
 		close(p.done)
 	}()
 	return p, nil
@@ -109,26 +105,14 @@ func (p *Process) signal(signal syscall.Signal) {
 	}
 }
 
-func (p *Process) Stop(bound time.Duration) {
+func (p *Process) Stop() {
 	if p == nil {
 		return
 	}
-	if p.stop.CompareAndSwap(false, true) {
-		p.signal(syscall.SIGTERM)
-		timer := time.NewTimer(bound)
-		select {
-		case <-p.done:
-			timer.Stop()
-		case <-timer.C:
-			p.signal(syscall.SIGKILL)
-			<-p.done
-		}
-		return
-	}
+	p.signal(syscall.SIGTERM)
+	p.signal(syscall.SIGKILL)
 	<-p.done
 }
-
-func (p *Process) KillAndWait() { p.Stop(0) }
 
 func Environment(base []string, values map[string]string) []string {
 	result := make([]string, 0, len(base)+len(values))

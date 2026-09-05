@@ -18,7 +18,6 @@ func (s *session) startLane(start *launch, helloFrame protocol.Frame, hello prot
 		result := answer{value: &hello}
 		if unsupportedField != "" {
 			result = answer{code: protocol.UnsupportedOpen}
-			s.daemon.directory.releaseLaunch(start, false)
 		}
 		s.launchResult, s.stopping = &result, true
 		return
@@ -50,7 +49,7 @@ func (s *session) beginOpen() {
 func (s *session) finishOpen(frame protocol.Frame) {
 	s.openID = 0
 	if frame.Error != nil {
-		s.abortLaunch(answer{code: frame.Error.Code})
+		s.abortLaunch(errorAnswer(frame.Error))
 		s.orderlyStop()
 		return
 	}
@@ -107,7 +106,8 @@ func (s *session) beginClose(request routedRequest) {
 		s.hardStop()
 		return
 	}
-	s.pending[s.nextOut] = pendingCall{request: request}
+	s.daemon.directory.admitted(s.identity, request.method)
+	s.pending[s.nextOut] = request
 	s.closeTimer = time.NewTimer(closeBound)
 }
 
@@ -136,7 +136,7 @@ func (s *session) handleProcess(event processEvent) {
 	if s.owned > 0 {
 		s.owned--
 	}
-	if !s.closed && s.closeTimer == nil {
+	if s.committed && !s.closed && s.closeTimer == nil {
 		s.closeTimer = time.NewTimer(closeBound)
 	}
 	if event.err != nil && s.launchResult == nil && !s.committed {
@@ -149,7 +149,6 @@ func (s *session) abortLaunch(value answer) {
 		return
 	}
 	s.launchResult = &value
-	s.daemon.directory.releaseLaunch(s.launch, false)
 }
 
 func (s *session) orderlyStop() {
@@ -177,6 +176,9 @@ func (s *session) finishLane() {
 	s.launch.timer.Stop()
 	if s.closeTimer != nil {
 		s.closeTimer.Stop()
+	}
+	if !s.committed {
+		s.daemon.directory.releaseLaunch(s.launch)
 	}
 	if s.launchResult != nil {
 		s.launch.reply <- *s.launchResult

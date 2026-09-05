@@ -36,6 +36,9 @@ func openTable(path string) (*table, []row, error) {
 	var rows []row
 	ids, names := map[string]bool{}, map[string]bool{}
 	for _, file := range files {
+		if filepath.Ext(file.Name()) != ".json" {
+			continue
+		}
 		if file.IsDir() {
 			return nil, nil, errors.New("invalid durable session table")
 		}

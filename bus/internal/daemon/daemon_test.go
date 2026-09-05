@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antst/agent-sessions/bus/internal/conn"
 	"github.com/antst/agent-sessions/bus/internal/protocol"
 	"github.com/antst/agent-sessions/bus/internal/rpc"
 	"github.com/antst/agent-sessions/bus/internal/structuredprocess"
@@ -51,7 +53,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "parent exited while descendant held stderr")
 		os.Exit(7)
 	}
-	if strings.HasPrefix(name, "fixture-worker") || strings.HasPrefix(name, "open-exit-worker") || strings.HasPrefix(name, "fixed-worker") {
+	if strings.HasPrefix(name, "fixture-worker") || strings.HasPrefix(name, "open-exit-worker") || strings.HasPrefix(name, "fixed-worker") || strings.HasPrefix(name, "error-worker") {
 		worker := sessionkit.NewWorker(&fixtureProduct{product: name})
 		_ = worker.Serve(context.Background())
 		os.Exit(0)
@@ -65,6 +67,13 @@ func TestMain(m *testing.M) {
 	}
 	if strings.HasPrefix(name, "sequence-worker") {
 		if err := runSequenceWorker(name); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(8)
+		}
+		os.Exit(0)
+	}
+	if strings.HasPrefix(name, "racing-worker") {
+		if err := runRacingWorker(name); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(8)
 		}
@@ -154,6 +163,36 @@ func runRehelloWorker(product string) error {
 	return nil
 }
 
+func runRacingWorker(product string) error {
+	fd, err := net.Dial("unix", os.Getenv("AGENTBUS_SOCKET"))
+	if err != nil {
+		return err
+	}
+	var wire *rpc.Conn
+	wire = rpc.New(fd, true, func(_ context.Context, request *rpc.Request) {
+		switch request.Method {
+		case "session.open":
+			_ = os.WriteFile(os.Getenv("RACE_READY"), []byte("ready"), 0o600)
+			for {
+				if _, err := os.Stat(os.Getenv("RACE_RELEASE")); err == nil {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			_ = wire.Result(request, protocol.OpenResult{SessionID: "shared-id"})
+		case "session.close":
+			_ = wire.Result(request, struct{}{})
+			_ = wire.Close()
+		}
+	})
+	hello := protocol.WorkerHello{Protocol: 1, LaunchToken: os.Getenv("AGENTBUS_LAUNCH_TOKEN"), HelloDescription: protocol.HelloDescription{Product: product, SupportedOpenFields: []string{}, ExtraArguments: []protocol.ExtraArgument{}}}
+	if err = wire.Call(context.Background(), "session.hello", hello, &struct{}{}); err != nil {
+		return err
+	}
+	<-wire.Done()
+	return nil
+}
+
 type fixtureProduct struct {
 	product string
 	mu      sync.Mutex
@@ -169,6 +208,9 @@ func (p *fixtureProduct) Open(_ context.Context, request sessionkit.OpenRequest)
 	}
 	if request.Name == "" || len(request.Groups) < 2 {
 		return sessionkit.OpenResult{}, errors.New("identity missing")
+	}
+	if strings.HasPrefix(p.product, "error-worker") {
+		return sessionkit.OpenResult{}, errors.New("open rejected")
 	}
 	if path := os.Getenv("OPEN_LOG"); path != "" {
 		raw, err := json.Marshal(request.Open)
@@ -437,6 +479,41 @@ func TestPeerHelloRehelloReplacementAndSupersession(t *testing.T) {
 	_ = daemon
 }
 
+func TestSupersessionDoesNotWaitForNonReadingPeer(t *testing.T) {
+	_, socket := startDaemon(t)
+	slow, err := net.Dial("unix", socket)
+	must(t, err)
+	t.Cleanup(func() { _ = slow.Close() })
+	hello := protocol.PeerHello{Protocol: 1, Product: "fixture-client", SessionID: "slow", Name: "slow", Groups: []string{"team"}, Info: map[string]any{"blob": strings.Repeat("x", 512<<10)}}
+	body, err := protocol.RequestBytes(1, "session.hello", hello)
+	must(t, err)
+	_, err = slow.Write(body)
+	must(t, err)
+	reader := bufio.NewReader(slow)
+	_, err = reader.ReadBytes('\n')
+	must(t, err)
+	body, err = protocol.RequestBytes(2, "session.list", protocol.SessionListRequest{})
+	must(t, err)
+	_, err = slow.Write(body)
+	must(t, err)
+
+	started := time.Now()
+	replacement := connectPeer(t, socket, "slow", "replacement", "team")
+	if time.Since(started) >= supersedeWriteBound {
+		t.Fatal("replacement waited for the displaced peer")
+	}
+	time.Sleep(supersedeWriteBound + 50*time.Millisecond)
+	_ = slow.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err = io.Copy(io.Discard, reader); err != nil {
+		t.Fatalf("displaced peer did not close after the write bound: %v", err)
+	}
+	var listed protocol.SessionListResult
+	must(t, replacement.call("session.list", protocol.SessionListRequest{SessionID: "slow"}, &listed))
+	if len(listed.Sessions) != 1 || listed.Sessions[0].Name != "replacement@local" {
+		t.Fatalf("current peer = %#v", listed.Sessions)
+	}
+}
+
 func TestWorkerHelloIsSingleUseAndUncommitted(t *testing.T) {
 	directory := t.TempDir()
 	installFixture(t, directory, "rehello-worker")
@@ -609,15 +686,38 @@ func TestVisibilityDeliveryAndLaneIdentityCollision(t *testing.T) {
 
 func TestPeerAndFreshLaneCannotClaimOneID(t *testing.T) {
 	directory := t.TempDir()
-	installFixture(t, directory, "fixed-worker")
+	installFixture(t, directory, "racing-worker")
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ready := filepath.Join(directory, "ready")
+	release := filepath.Join(directory, "release")
+	t.Setenv("RACE_READY", ready)
+	t.Setenv("RACE_RELEASE", release)
 	_, socket := startDaemon(t)
-	_ = connectPeer(t, socket, "shared-id", "holder", "shared")
 	parent := connectPeer(t, socket, "parent", "parent", "shared")
-	var spawned protocol.LaneSpawnResult
-	code := rpcCode(parent.call("lane.spawn", protocol.LaneSpawnRequest{Name: "child", Product: "fixed-worker", Open: &protocol.OpenOptions{}}, &spawned))
-	if code != protocol.SpawnFailed {
-		t.Fatalf("lane reused peer id: %d", code)
+	spawnResult := make(chan error, 1)
+	go func() {
+		spawnResult <- parent.call("lane.spawn", protocol.LaneSpawnRequest{Name: "child", Product: "racing-worker", Open: &protocol.OpenOptions{}}, &protocol.LaneSpawnResult{})
+	}()
+	waitFile(t, ready)
+	fd, err := net.Dial("unix", socket)
+	must(t, err)
+	peer := rpc.New(fd, true, nil)
+	t.Cleanup(func() { _ = peer.Close() })
+	helloResult := make(chan error, 1)
+	start := make(chan struct{})
+	go func() {
+		<-start
+		hello := protocol.PeerHello{Protocol: 1, Product: "fixture-client", SessionID: "shared-id", Name: "holder", Groups: []string{"shared"}, Info: map[string]any{}}
+		helloResult <- peer.Call(context.Background(), "session.hello", hello, &struct{}{})
+	}()
+	go func() {
+		<-start
+		_ = os.WriteFile(release, []byte("release"), 0o600)
+	}()
+	close(start)
+	peerCode, spawnCode := rpcCode(<-helloResult), rpcCode(<-spawnResult)
+	if !(peerCode == 0 && spawnCode == protocol.SpawnFailed || peerCode == protocol.InvalidHello && spawnCode == 0) {
+		t.Fatalf("identity race: peer=%d spawn=%d", peerCode, spawnCode)
 	}
 }
 
@@ -642,6 +742,47 @@ func TestOpenCommitPrecedesNextWorkerFrame(t *testing.T) {
 
 func TestSpawnDecisionAndExitDuringOpen(t *testing.T) {
 	directory := t.TempDir()
+	d := &Daemon{host: "local", table: &table{path: filepath.Join(directory, "sessions")}, shutdown: make(chan struct{})}
+	d.directory = newDirectory(d, nil)
+	start := newLaunch("worker", false, true)
+	item, code := d.directory.reserveFresh(row{Product: "worker", Name: "parent/child@local", Groups: []string{"parent", "child"}}, start)
+	if code != 0 {
+		t.Fatal(code)
+	}
+	start.owner = newSession(d)
+	s := start.owner
+	s.launch, s.identity, s.openID, s.processExited = start, item, 1, true
+	local, peer := net.Pipe()
+	s.wire = conn.Start(local, s.inbox, &d.group)
+	finished := make(chan struct{})
+	go func() {
+		s.run()
+		close(finished)
+	}()
+	result, err := json.Marshal(protocol.OpenResult{SessionID: "winner"})
+	must(t, err)
+	start.timer.Stop()
+	start.timer.Reset(time.Nanosecond)
+	s.inbox <- conn.Frame{Value: protocol.Frame{ID: 1, Result: result}}
+	select {
+	case outcome := <-start.reply:
+		if outcome.code != 0 && outcome.code != protocol.Timeout {
+			t.Fatalf("outcome = %#v", outcome)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("open and timeout produced no winner")
+	}
+	s.wire.Close()
+	_ = peer.Close()
+	<-finished
+	d.group.Done()
+	d.group.Wait()
+	select {
+	case duplicate := <-start.reply:
+		t.Fatalf("second transaction outcome = %#v", duplicate)
+	default:
+	}
+
 	installFixture(t, directory, "open-exit-worker")
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
 	_, socket := startDaemon(t)
@@ -649,6 +790,35 @@ func TestSpawnDecisionAndExitDuringOpen(t *testing.T) {
 	var spawned protocol.LaneSpawnResult
 	if code := rpcCode(parent.call("lane.spawn", protocol.LaneSpawnRequest{Name: "exit", Product: "open-exit-worker", Open: &protocol.OpenOptions{}}, &spawned)); code != protocol.SpawnFailed {
 		t.Fatalf("exit during open code = %d", code)
+	}
+}
+
+func TestOpenFailurePreservesSpawnDataAndInvalidProductDoesNotExec(t *testing.T) {
+	directory := t.TempDir()
+	installFixture(t, directory, "error-worker")
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, socket := startDaemon(t)
+	parent := connectPeer(t, socket, "parent", "parent", "team")
+	request := protocol.LaneSpawnRequest{Name: "error", Product: "error-worker", Open: &protocol.OpenOptions{}}
+	var spawned protocol.LaneSpawnResult
+	err := parent.call("lane.spawn", request, &spawned)
+	var rpcError *protocol.RPCError
+	if !errors.As(err, &rpcError) || rpcError.Code != protocol.SpawnFailed {
+		t.Fatalf("open error = %v", err)
+	}
+	var data protocol.SpawnFailedData
+	must(t, json.Unmarshal(rpcError.Data, &data))
+	if !slices.Contains(data.StderrTail, "open rejected") {
+		t.Fatalf("spawn data = %#v", data)
+	}
+	request.Name, request.Product = "invalid", "../worker"
+	if code := rpcCode(parent.call("lane.spawn", request, &spawned)); code != protocol.UnknownProduct {
+		t.Fatalf("invalid product code = %d", code)
+	}
+	longName := connectPeer(t, socket, "long-parent", strings.Repeat("p", 128), "team")
+	request.Name, request.Product = "leaf", "error-worker"
+	if code := rpcCode(longName.call("lane.spawn", request, &spawned)); code != protocol.InvalidFrame {
+		t.Fatalf("overlong composed name code = %d", code)
 	}
 }
 

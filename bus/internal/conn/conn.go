@@ -54,8 +54,6 @@ func (c *Conn) Post(event any) bool {
 	}
 }
 
-func (c *Conn) PostOwned(event any) { c.inbox <- event }
-
 // Send is called only by the connection's owner loop.
 func (c *Conn) Send(frame []byte) bool {
 	if c.finishing {
@@ -132,7 +130,6 @@ func (c *Conn) write() {
 		case frame, ok := <-c.outbox:
 			if !ok {
 				c.Close()
-				<-c.done
 				return
 			}
 			if err := writeFull(c.fd, frame); err != nil {

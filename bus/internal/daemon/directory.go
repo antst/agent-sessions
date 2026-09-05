@@ -97,6 +97,32 @@ func (d *directory) finishRun(item *entry, owner *session) {
 	}
 }
 
+func (d *directory) admit(item *entry, owner *session, method string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if item.attachment != owner {
+		return protocol.NotConnected
+	}
+	if method == "turn.run" && item.running || method == "session.close" && item.claimed {
+		return protocol.Busy
+	}
+	if method == "turn.interrupt" && !item.running {
+		return protocol.NotRunning
+	}
+	return 0
+}
+
+func (d *directory) admitted(item *entry, method string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if method == "turn.run" {
+		item.running = true
+	}
+	if method == "session.close" {
+		item.claimed = true
+	}
+}
+
 func (d *directory) detach(item *entry, owner *session) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -202,7 +228,7 @@ func (d *directory) publish(start *launch, owner *session, createdAt time.Time) 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	item := start.entry
-	if d.entries[item.row.SessionID] != item || !item.claimed || item.attachment != nil {
+	if d.closing || d.entries[item.row.SessionID] != item || !item.claimed || item.attachment != nil {
 		return false
 	}
 	item.claimed = false
@@ -213,18 +239,25 @@ func (d *directory) publish(start *launch, owner *session, createdAt time.Time) 
 	return true
 }
 
-func (d *directory) releaseLaunch(start *launch, unclaimed bool) bool {
+func (d *directory) revokeLaunch(start *launch) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if unclaimed && (start.owner != nil || d.tokens[start.token] != start) {
+	if start.owner != nil || d.tokens[start.token] != start {
 		return false
 	}
+	delete(d.tokens, start.token)
+	return true
+}
+
+func (d *directory) releaseLaunch(start *launch) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.tokens[start.token] == start {
 		delete(d.tokens, start.token)
 	}
 	item := start.entry
 	if item == nil || !item.claimed {
-		return true
+		return
 	}
 	item.claimed = false
 	d.end(item)
@@ -234,12 +267,10 @@ func (d *directory) releaseLaunch(start *launch, unclaimed bool) bool {
 			delete(d.entries, item.row.SessionID)
 		}
 	}
-	return true
 }
 
 func (d *directory) visible(groups []string) []view {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	items := make([]view, 0, len(d.entries))
 	for _, item := range d.entries {
 		if !visibleTo(item, groups) {
@@ -252,6 +283,7 @@ func (d *directory) visible(groups []string) []view {
 		items = append(items, view{entry: item, id: item.row.SessionID, name: item.row.Name,
 			kind: kind, product: item.row.Product, groups: append([]string(nil), item.row.Groups...), info: maps.Clone(item.info), connected: item.attachment != nil, running: item.running})
 	}
+	d.mu.Unlock()
 	sort.Slice(items, func(left, right int) bool { return items[left].id < items[right].id })
 	return items
 }
@@ -290,6 +322,12 @@ func (d *directory) routeLabel(value, host string, groups []string, method strin
 	return item, false, d.routeLocked(item, method, request)
 }
 
+func (d *directory) route(item *entry, method string, request routedRequest) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.routeLocked(item, method, request)
+}
+
 func (d *directory) routeLocked(item *entry, method string, request routedRequest) int {
 	if item == nil || d.entries[item.row.SessionID] != item || item.attachment == nil {
 		return protocol.NotConnected
@@ -297,31 +335,9 @@ func (d *directory) routeLocked(item *entry, method string, request routedReques
 	if item.peer && method != "message.deliver" {
 		return protocol.UnknownSession
 	}
-	switch method {
-	case "turn.run":
-		if item.running {
-			return protocol.Busy
-		}
-		item.running = true
-	case "turn.interrupt":
-		if !item.running {
-			return protocol.NotRunning
-		}
-	case "session.close":
-		if item.claimed {
-			return protocol.Busy
-		}
-		item.claimed = true
-	}
 	request.destination = item
 	if item.attachment.wire.Post(request) {
 		return 0
-	}
-	if method == "turn.run" {
-		item.running = false
-	}
-	if method == "session.close" {
-		item.claimed = false
 	}
 	select {
 	case <-item.attachment.wire.Done():

@@ -42,71 +42,61 @@ func (d *Daemon) startProduct(start *launch) {
 		defer d.group.Done()
 		path, err := exec.LookPath(start.product)
 		if err != nil {
-			d.launchFailed(start, answer{code: protocol.UnknownProduct}, processEvent{launch: start, err: err, exited: true})
+			if !d.finishUnclaimed(start, nil, answer{code: protocol.UnknownProduct}) {
+				start.owner.inbox <- processEvent{launch: start, err: err, exited: true}
+			}
 			return
 		}
 		environment := structuredprocess.Environment(os.Environ(), map[string]string{"AGENTBUS_LAUNCH_TOKEN": start.token, "AGENTBUS_SOCKET": d.config.SocketPath})
 		child, err := structuredprocess.Start(path, environment)
 		if err != nil {
-			d.launchFailed(start, answer{code: protocol.SpawnFailed, data: failure(nil, err.Error())}, processEvent{launch: start, err: err, exited: true})
+			if !d.finishUnclaimed(start, nil, answer{code: protocol.SpawnFailed, data: failure(nil, err.Error())}) {
+				start.owner.inbox <- processEvent{launch: start, err: err, exited: true}
+			}
 			return
 		}
 		started := processEvent{launch: start, child: child}
 		select {
 		case <-start.claimed:
 			start.owner.inbox <- started
-			d.followProcess(start, child)
+			<-child.Done()
+			child.Stop()
+			start.owner.inbox <- processEvent{launch: start, child: child, exited: true}
 		case <-child.Done():
-			if d.directory.releaseLaunch(start, true) {
-				start.reply <- answer{code: protocol.SpawnFailed, data: failure(child, "worker exited before hello")}
-			} else {
+			if !d.finishUnclaimed(start, child, answer{code: protocol.SpawnFailed, data: failure(child, "worker exited before hello")}) {
+				child.Stop()
 				start.owner.inbox <- started
 				start.owner.inbox <- processEvent{launch: start, child: child, exited: true}
 			}
 		case <-start.timer.C:
-			if d.directory.releaseLaunch(start, true) {
-				child.Stop(0)
-				start.reply <- answer{code: protocol.Timeout}
-			} else {
+			if !d.finishUnclaimed(start, child, answer{code: protocol.Timeout}) {
 				start.owner.inbox <- started
 				start.owner.inbox <- spawnTimeout{launch: start}
-				d.waitProcess(start, child)
+				<-child.Done()
+				child.Stop()
+				start.owner.inbox <- processEvent{launch: start, child: child, exited: true}
 			}
 		case <-d.shutdown:
-			if d.directory.releaseLaunch(start, true) {
-				child.Stop(0)
-				start.reply <- answer{code: protocol.Internal}
-			} else {
+			if !d.finishUnclaimed(start, child, answer{code: protocol.Internal}) {
 				start.owner.inbox <- started
-				d.waitProcess(start, child)
+				<-child.Done()
+				child.Stop()
+				start.owner.inbox <- processEvent{launch: start, child: child, exited: true}
 			}
 		}
 	}()
 }
 
-func (d *Daemon) followProcess(start *launch, child *structuredprocess.Process) {
-	select {
-	case <-child.Done():
-		start.owner.inbox <- processEvent{launch: start, child: child, exited: true}
-	case <-start.timer.C:
-		start.owner.inbox <- spawnTimeout{launch: start}
-		d.waitProcess(start, child)
-	case <-d.shutdown:
-		d.waitProcess(start, child)
+func (d *Daemon) finishUnclaimed(start *launch, child *structuredprocess.Process, result answer) bool {
+	if !d.directory.revokeLaunch(start) {
+		return false
 	}
-}
-
-func (d *Daemon) waitProcess(start *launch, child *structuredprocess.Process) {
-	<-child.Done()
-	start.owner.inbox <- processEvent{launch: start, child: child, exited: true}
-}
-
-func (d *Daemon) launchFailed(start *launch, unclaimed answer, claimed processEvent) {
-	if d.directory.releaseLaunch(start, true) {
-		start.reply <- unclaimed
-	} else {
-		start.owner.inbox <- claimed
+	if child != nil {
+		child.Stop()
 	}
+	d.directory.releaseLaunch(start)
+	start.reply <- result
+	return true
 }
 
 func failure(child *structuredprocess.Process, message string) protocol.SpawnFailedData {

@@ -28,10 +28,6 @@ type routedRequest struct {
 	reply       chan answer
 }
 
-type pendingCall struct {
-	request routedRequest
-}
-
 type replyEvent struct {
 	requestID int64
 	leg       int
@@ -47,7 +43,7 @@ type session struct {
 	identity      *entry
 	lastIn        int64
 	nextOut       int64
-	pending       map[int64]pendingCall
+	pending       map[int64]routedRequest
 	requests      map[int64]*requestState
 	owned         int
 	stopping      bool
@@ -69,7 +65,7 @@ func newSession(daemon *Daemon) *session {
 	return &session{
 		daemon:   daemon,
 		inbox:    make(chan any, conn.OutboxSize),
-		pending:  map[int64]pendingCall{},
+		pending:  map[int64]routedRequest{},
 		requests: map[int64]*requestState{},
 	}
 }
@@ -87,11 +83,18 @@ func (s *session) run() {
 		if s.closeTimer != nil {
 			closeTimer = s.closeTimer.C
 		}
+		var spawnTimer <-chan time.Time
+		if s.launch != nil && !s.committed {
+			spawnTimer = s.launch.timer.C
+		}
 		select {
 		case event := <-s.inbox:
 			s.handleEvent(event)
 		case <-closeTimer:
 			s.closeTimer = nil
+			s.hardStop()
+		case <-spawnTimer:
+			s.abortLaunch(answer{code: protocol.Timeout})
 			s.hardStop()
 		case <-shutdown:
 			shutdown = nil
@@ -120,8 +123,6 @@ func (s *session) handleEvent(event any) {
 	case routedRequest:
 		if s.stopping || value.destination != s.identity || s.launch != nil && !s.committed {
 			value.reply <- answer{code: protocol.NotConnected}
-		} else if value.method == "session.close" && s.launch != nil {
-			s.beginClose(value)
 		} else {
 			s.issue(value)
 		}
@@ -227,17 +228,26 @@ func (s *session) issue(request routedRequest) {
 		request.reply <- answer{code: protocol.Busy}
 		return
 	}
+	if code := s.daemon.directory.admit(s.identity, s, request.method); code != 0 {
+		request.reply <- answer{code: code}
+		return
+	}
+	if request.method == "session.close" {
+		s.beginClose(request)
+		return
+	}
 	s.nextOut++
 	body, err := protocol.RequestBytes(s.nextOut, request.method, request.params)
 	if err != nil || !s.wire.Send(body) {
 		request.reply <- answer{code: protocol.NotConnected}
 		return
 	}
-	s.pending[s.nextOut] = pendingCall{request: request}
+	s.daemon.directory.admitted(s.identity, request.method)
+	s.pending[s.nextOut] = request
 }
 
 func (s *session) receiveResponse(frame protocol.Frame) {
-	call, ok := s.pending[frame.ID]
+	request, ok := s.pending[frame.ID]
 	if !ok {
 		if !s.logged {
 			log.Printf("agentbus: dropping unmatched response id %d", frame.ID)
@@ -246,28 +256,32 @@ func (s *session) receiveResponse(frame protocol.Frame) {
 		return
 	}
 	delete(s.pending, frame.ID)
-	if call.request.method == "turn.run" {
+	if request.method == "turn.run" {
 		s.daemon.directory.finishRun(s.identity, s)
 	}
-	if call.request.method == "session.close" {
+	if request.method == "session.close" {
 		s.finishCloseResponse(frame)
 		return
 	}
 	if frame.Error != nil {
-		var data any
-		if len(frame.Error.Data) != 0 {
-			_ = json.Unmarshal(frame.Error.Data, &data)
-		}
-		call.request.reply <- answer{code: frame.Error.Code, data: data}
+		request.reply <- errorAnswer(frame.Error)
 		return
 	}
-	value, err := protocol.DecodeResult(call.request.method, frame.Result)
+	value, err := protocol.DecodeResult(request.method, frame.Result)
 	if err != nil {
 		s.wire.Close()
-		call.request.reply <- answer{code: protocol.NotConnected}
+		request.reply <- answer{code: protocol.NotConnected}
 		return
 	}
-	call.request.reply <- answer{value: value}
+	request.reply <- answer{value: value}
+}
+
+func errorAnswer(value *protocol.RPCError) answer {
+	result := answer{code: value.Code}
+	if len(value.Data) != 0 {
+		_ = json.Unmarshal(value.Data, &result.data)
+	}
+	return result
 }
 
 func (s *session) connectionClosed() {
@@ -277,18 +291,22 @@ func (s *session) connectionClosed() {
 	s.stopping, s.closed = true, true
 	s.wire.OwnerClosed()
 	s.daemon.directory.detach(s.identity, s)
-	for id, call := range s.pending {
-		delete(s.pending, id)
-		if call.request.method == "turn.run" {
-			s.daemon.directory.finishRun(s.identity, s)
-		}
-		if s.closeCall != nil && call.request.reply == s.closeCall.reply {
-			continue
-		}
-		call.request.reply <- answer{code: protocol.NotConnected}
-	}
+	s.settlePending(protocol.NotConnected)
 	for id := range s.requests {
 		delete(s.requests, id)
+	}
+}
+
+func (s *session) settlePending(code int) {
+	for id, request := range s.pending {
+		delete(s.pending, id)
+		if request.method == "turn.run" {
+			s.daemon.directory.finishRun(s.identity, s)
+		}
+		if s.closeCall != nil && request.reply == s.closeCall.reply {
+			continue
+		}
+		request.reply <- answer{code: code}
 	}
 }
 
@@ -343,9 +361,7 @@ func (s *session) supersede() {
 
 func (s *session) await(requestID int64, leg int, reply <-chan answer, lifetime <-chan struct{}) {
 	s.owned++
-	s.daemon.group.Add(1)
 	go func() {
-		defer s.daemon.group.Done()
 		value := answer{code: protocol.NotConnected}
 		select {
 		case value = <-reply:

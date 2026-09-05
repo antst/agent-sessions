@@ -8,6 +8,8 @@ import (
 
 type requestState struct {
 	frame      protocol.Frame
+	target     *entry
+	held       *answer
 	pending    int
 	deliveries []protocol.MessageSendDelivery
 	messageID  string
@@ -49,6 +51,7 @@ func (s *session) peerHello(frame protocol.Frame, hello *protocol.PeerHello) {
 		return
 	}
 	if ended != nil {
+		s.settlePending(protocol.NotConnected)
 		s.detachRequests(protocol.Superseded)
 	}
 	s.identity = item
@@ -66,26 +69,8 @@ func (s *session) list(frame protocol.Frame, input *protocol.SessionListRequest)
 			s.reject(frame, code)
 			return
 		}
-		var match *entry
-		for _, item := range items {
-			if item.id == canonical {
-				match = item.entry
-				break
-			}
-		}
-		if match == nil {
-			for _, item := range items {
-				if item.name != canonical {
-					continue
-				}
-				if match != nil {
-					match = nil
-					break
-				}
-				match = item.entry
-			}
-		}
-		if code != 0 || match == nil {
+		match, ambiguous := resolveView(items, canonical)
+		if code != 0 || match == nil || ambiguous {
 			if code == 0 {
 				code = protocol.UnknownSession
 			}
@@ -126,7 +111,7 @@ func (s *session) route(frame protocol.Frame, label string, params any) {
 		s.error(frame, code, nil)
 		return
 	}
-	s.requests[frame.ID] = &requestState{frame: frame, pending: 1}
+	s.requests[frame.ID] = &requestState{frame: frame, target: item, pending: 1}
 	s.await(frame.ID, 0, reply, s.identity.done)
 }
 
@@ -136,7 +121,7 @@ func (s *session) describe(frame protocol.Frame, input *protocol.LaneDescribeReq
 		return
 	}
 	if !validHost(input.Product) {
-		s.reject(frame, protocol.InvalidFrame)
+		s.error(frame, protocol.UnknownProduct, nil)
 		return
 	}
 	start := newLaunch(input.Product, true, false)
@@ -154,43 +139,46 @@ func (s *session) spawn(frame protocol.Frame, input *protocol.LaneSpawnRequest) 
 		s.error(frame, protocol.UnknownHost, nil)
 		return
 	}
-	start := newLaunch(input.Product, false, input.ResumeSessionID == "")
 	if input.ResumeSessionID != "" {
 		id, code := canonicalInput(input.ResumeSessionID, s.daemon.host)
 		if code == protocol.InvalidFrame {
-			start.timer.Stop()
 			s.reject(frame, code)
 			return
 		}
 		if code != 0 {
-			start.timer.Stop()
 			s.error(frame, code, nil)
 			return
 		}
+		start := newLaunch("", false, false)
 		_, code = s.daemon.directory.reserveResume(id, s.identity.row.Groups, start)
 		if code != 0 {
 			start.timer.Stop()
 			s.error(frame, code, nil)
 			return
 		}
-	} else {
-		if !validPart(input.Name) || !validHost(input.Product) || input.Open == nil {
-			start.timer.Stop()
-			s.reject(frame, protocol.InvalidFrame)
-			return
-		}
-		parentName := unqualify(s.identity.row.Name)
-		name := qualify(parentName+"/"+input.Name, s.daemon.host)
-		parentGroup := privateGroup(s.identity)
-		private := parentGroup + "/" + input.Name
-		groups := unique(append([]string{parentGroup, private}, input.ExtraGroups...))
-		value := row{Product: input.Product, Name: name, Groups: groups, Open: *input.Open}
-		_, code := s.daemon.directory.reserveFresh(value, start)
-		if code != 0 {
-			start.timer.Stop()
-			s.error(frame, code, nil)
-			return
-		}
+		s.launchRequest(frame, start)
+		return
+	}
+	if !validHost(input.Product) {
+		s.error(frame, protocol.UnknownProduct, nil)
+		return
+	}
+	parentName := unqualify(s.identity.row.Name)
+	composedName := parentName + "/" + input.Name
+	if !validPart(input.Name) || !validPart(composedName) || input.Open == nil {
+		s.reject(frame, protocol.InvalidFrame)
+		return
+	}
+	parentGroup := privateGroup(s.identity)
+	private := parentGroup + "/" + input.Name
+	groups := unique(append([]string{parentGroup, private}, input.ExtraGroups...))
+	value := row{Product: input.Product, Name: qualify(composedName, s.daemon.host), Groups: groups, Open: *input.Open}
+	start := newLaunch(input.Product, false, true)
+	_, code := s.daemon.directory.reserveFresh(value, start)
+	if code != 0 {
+		start.timer.Stop()
+		s.error(frame, code, nil)
+		return
 	}
 	s.launchRequest(frame, start)
 }
@@ -206,14 +194,7 @@ func (s *session) send(frame protocol.Frame, input *protocol.MessageSendRequest)
 	if input.Target != "" {
 		labels = []string{input.Target}
 	}
-	if input.Group == "" {
-		for _, label := range labels {
-			if _, code := canonicalInput(label, s.daemon.host); code == protocol.InvalidFrame {
-				s.reject(frame, code)
-				return
-			}
-		}
-	} else {
+	if input.Group != "" {
 		labels = nil
 		for _, item := range s.daemon.directory.visible(s.identity.row.Groups) {
 			if item.entry != s.identity && slices.Contains(item.groups, input.Group) {
@@ -222,42 +203,75 @@ func (s *session) send(frame protocol.Frame, input *protocol.MessageSendRequest)
 		}
 	}
 	state := &requestState{frame: frame, messageID: randomID("message")}
+	items := s.daemon.directory.visible(s.identity.row.Groups)
+	targets := make([]*entry, 0, len(labels))
+	seen := map[*entry]bool{}
+	for _, label := range labels {
+		delivery := protocol.MessageSendDelivery{Target: label}
+		canonical, code := canonicalInput(label, s.daemon.host)
+		if code == protocol.InvalidFrame {
+			s.reject(frame, code)
+			return
+		}
+		item, ambiguous := resolveView(items, canonical)
+		if ambiguous {
+			delivery.Disposition, delivery.Reason = "rejected", "ambiguous"
+		} else if code != 0 || item == nil {
+			delivery.Disposition, delivery.Reason = "rejected", reason(code, "unknown_session")
+		} else if seen[item] {
+			continue
+		} else {
+			seen[item] = true
+		}
+		state.deliveries = append(state.deliveries, delivery)
+		targets = append(targets, item)
+	}
 	deliveryRequest := protocol.DeliveryRequest{
 		MessageID: state.messageID,
 		From: protocol.DeliverySource{SessionID: s.identity.row.SessionID, Name: s.identity.row.Name,
 			Product: s.identity.row.Product, Groups: append([]string(nil), s.identity.row.Groups...)},
 		Body: input.Message,
 	}
-	seen := map[string]bool{}
-	for _, label := range labels {
-		delivery := protocol.MessageSendDelivery{Target: label}
+	for index, item := range targets {
+		if item == nil {
+			continue
+		}
 		reply := make(chan answer, 1)
 		request := routedRequest{method: "message.deliver", params: deliveryRequest, reply: reply}
-		item, ambiguous, code := s.daemon.directory.routeLabel(label, s.daemon.host, s.identity.row.Groups, request.method, request)
-		if ambiguous {
-			delivery.Disposition, delivery.Reason = "rejected", "ambiguous"
-		} else if item == nil {
-			delivery.Disposition, delivery.Reason = "rejected", reason(code, "unknown_session")
-		} else if seen[item.row.SessionID] {
+		code := s.daemon.directory.route(item, request.method, request)
+		if code != 0 {
+			state.deliveries[index].Disposition = "rejected"
+			state.deliveries[index].Reason = reason(code, "no_receipt")
 			continue
-		} else {
-			seen[item.row.SessionID] = true
-			delivery.SessionID, delivery.DeliveryID = item.row.SessionID, randomID("delivery")
-			if code != 0 {
-				delivery.Disposition = "rejected"
-				delivery.Reason = reason(code, "no_receipt")
-			} else {
-				state.pending++
-				s.await(frame.ID, len(state.deliveries), reply, s.identity.done)
-			}
 		}
-		state.deliveries = append(state.deliveries, delivery)
+		state.deliveries[index].SessionID = item.row.SessionID
+		state.deliveries[index].DeliveryID = randomID("delivery")
+		state.pending++
+		s.await(frame.ID, index, reply, s.identity.done)
 	}
 	if state.pending == 0 {
 		s.result(frame, protocol.MessageSendResult{MessageID: state.messageID, Deliveries: state.deliveries})
 		return
 	}
 	s.requests[frame.ID] = state
+}
+
+func resolveView(items []view, canonical string) (*entry, bool) {
+	for _, item := range items {
+		if item.id == canonical {
+			return item.entry, false
+		}
+	}
+	var match *entry
+	for _, item := range items {
+		if item.name == canonical {
+			if match != nil {
+				return nil, true
+			}
+			match = item.entry
+		}
+	}
+	return match, false
 }
 
 func (s *session) consumeReply(event replyEvent) {
@@ -285,12 +299,40 @@ func (s *session) consumeReply(event replyEvent) {
 		s.result(state.frame, protocol.MessageSendResult{MessageID: state.messageID, Deliveries: state.deliveries})
 		return
 	}
-	delete(s.requests, event.requestID)
-	if event.answer.code != 0 {
-		s.error(state.frame, event.answer.code, event.answer.data)
-	} else {
-		s.result(state.frame, event.answer.value)
+	if state.frame.Method == "session.close" && s.runPending(state.target) {
+		value := event.answer
+		state.held = &value
+		return
 	}
+	s.finishRequest(event.requestID, state, event.answer)
+}
+
+func (s *session) finishRequest(id int64, state *requestState, result answer) {
+	delete(s.requests, id)
+	if result.code != 0 {
+		s.error(state.frame, result.code, result.data)
+	} else {
+		s.result(state.frame, result.value)
+	}
+	if state.frame.Method != "turn.run" {
+		return
+	}
+	for closeID, closeState := range s.requests {
+		if closeState.frame.Method == "session.close" && closeState.target == state.target && closeState.held != nil {
+			value := *closeState.held
+			s.finishRequest(closeID, closeState, value)
+			return
+		}
+	}
+}
+
+func (s *session) runPending(target *entry) bool {
+	for _, state := range s.requests {
+		if state.frame.Method == "turn.run" && state.target == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *session) detachRequests(code int) {

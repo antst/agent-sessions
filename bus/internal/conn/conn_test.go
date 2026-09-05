@@ -166,26 +166,6 @@ func TestInvalidFrameIsPostedBeforeClose(t *testing.T) {
 	_ = peer.Close()
 }
 
-func TestOwnedPostSurvivesSocketClose(t *testing.T) {
-	local, peer := net.Pipe()
-	inbox := make(chan any, OutboxSize)
-	var group sync.WaitGroup
-	c := Start(local, inbox, &group)
-	c.Close()
-	c.PostOwned("released")
-	seen := map[string]bool{}
-	for len(seen) != 2 {
-		switch event := (<-inbox).(type) {
-		case string:
-			seen[event] = true
-		case Closed:
-			seen["closed"] = true
-		}
-	}
-	group.Wait()
-	_ = peer.Close()
-}
-
 func TestOversizeFrameHardCloses(t *testing.T) {
 	local, peer := net.Pipe()
 	inbox := make(chan any, OutboxSize)
