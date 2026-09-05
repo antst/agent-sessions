@@ -44,7 +44,7 @@ func (p *fixtureProduct) Run(ctx context.Context, input string) (TurnResult, err
 	case "fail":
 		return TurnResult{}, errors.New("failed exactly")
 	case "long":
-		return TurnResult{Outcome: "completed", Result: strings.Repeat("x", maxTextCharacters+1)}, nil
+		return TurnResult{Outcome: "completed", Result: strings.Repeat("x", 262145)}, nil
 	case "interrupted":
 		return TurnResult{Outcome: "interrupted"}, nil
 	case "invalid":
@@ -78,7 +78,7 @@ type workerHarness struct {
 	request chan livepresence.Frame
 }
 
-func newWorkerHarness(t *testing.T, product *fixtureProduct) *workerHarness {
+func newWorkerHarness(t *testing.T, product *fixtureProduct, beforeHelloAck ...bool) *workerHarness {
 	setWorkerEnvironment(t, "launch-secret", "")
 	workerSide, daemonSide := net.Pipe()
 	w := NewWorker(product, func(context.Context, string, string) (net.Conn, error) { return workerSide, nil })
@@ -97,7 +97,12 @@ func newWorkerHarness(t *testing.T, product *fixtureProduct) *workerHarness {
 		}
 	}()
 	go func() { _ = w.Serve(context.Background()) }()
-	must(t, rpc.Result(h.next("session.hello"), struct{}{}))
+	hello := h.next("session.hello")
+	if len(beforeHelloAck) != 0 {
+		_ = rpc.Close()
+	} else {
+		must(t, rpc.Result(hello, struct{}{}))
+	}
 	t.Cleanup(func() { _ = rpc.Close(); <-w.Closed() })
 	return h
 }
@@ -194,7 +199,7 @@ func proveConcurrentRun(t *testing.T) []string {
 		var result TurnResult
 		must(t, h.call("turn.run", turn(input), &result))
 		check(t, input != "fail" || result.Outcome == "failed", "failed result = %+v", result)
-		check(t, input != "long" || result.Truncated && len([]rune(result.Result)) == maxTextCharacters, "truncated result = %+v", result)
+		check(t, input != "long" || result.Truncated && len([]rune(result.Result)) == 262144, "truncated result = %+v", result)
 	}
 	_ = h.call("turn.interrupt", sessionID(), &struct{}{})
 	check(t, p.calls[2].Load() == 0, "terminal turn reached native interrupt")
@@ -228,7 +233,7 @@ func proveConcurrentRun(t *testing.T) []string {
 
 func proveDescribeEOF(t *testing.T) []string {
 	p := &fixtureProduct{}
-	h := newWorkerHarness(t, p)
+	h := newWorkerHarness(t, p, true)
 	_ = h.daemon.Close()
 	<-h.worker.Closed()
 	check(t, p.calls[0].Load() == 0 && p.calls[4].Load() == 0, "unexpected open or close")

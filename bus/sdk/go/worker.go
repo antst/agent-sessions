@@ -14,8 +14,6 @@ import (
 	"github.com/antst/agent-sessions/bus/internal/stateroot"
 )
 
-const maxTextCharacters = 262144
-
 // WorkerCallbacks is the six-callback surface implemented by a native product.
 type WorkerCallbacks interface {
 	Hello(context.Context) (HelloDescription, error)
@@ -86,18 +84,14 @@ func (w *Worker) Serve(ctx context.Context) error {
 	}
 	w.rpc = rpc
 	w.root, w.cancel = context.WithCancel(ctx)
-	readErr := make(chan error, 1)
-	go func() { readErr <- w.read() }()
+	go func() { w.finish(w.read()) }()
 	request := struct {
 		Protocol    int    `json:"protocol"`
 		LaunchToken string `json:"launch_token"`
 		HelloDescription
 	}{1, token, hello}
 	if err = rpc.Call(ctx, true, "session.hello", request, &struct{}{}); err == nil {
-		select {
-		case err = <-readErr:
-		case err = <-w.fatal:
-		}
+		err = <-w.fatal
 	}
 	w.cancel()
 	_ = rpc.Close()
@@ -247,17 +241,12 @@ func (w *Worker) handleClose(frame livepresence.Frame, slot *runSlot, owner, int
 			<-slot.runDone
 		}
 		err := w.closeProduct()
-		w.mu.Lock()
 		slot.closeErr = err
 		close(slot.closeDone)
-		w.mu.Unlock()
 	}
 	<-slot.closeDone
-	w.mu.Lock()
-	closeErr := slot.closeErr
-	w.mu.Unlock()
 	var replyErr error
-	if closeErr != nil {
+	if slot.closeErr != nil {
 		replyErr = w.rpc.Error(frame, livepresence.SessionInternal, "internal", nil)
 	} else {
 		replyErr = w.rpc.Result(frame, struct{}{})
@@ -311,8 +300,8 @@ func plainDial(ctx context.Context, endpoint, _ string) (net.Conn, error) {
 
 func truncate(text string) (string, bool) {
 	characters := []rune(text)
-	if len(characters) <= maxTextCharacters {
+	if len(characters) <= 262144 {
 		return text, false
 	}
-	return string(characters[:maxTextCharacters]), true
+	return string(characters[:262144]), true
 }
