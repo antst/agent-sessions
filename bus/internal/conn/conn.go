@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/antst/agent-sessions/bus/internal/protocol"
@@ -29,12 +28,11 @@ type Conn struct {
 	inbox     chan any
 	outbox    chan []byte
 	done      chan struct{}
-	closed    atomic.Bool
 	finishing bool
 }
 
-func Start(fd net.Conn, group *sync.WaitGroup) *Conn {
-	c := &Conn{fd: fd, inbox: make(chan any, OutboxSize), outbox: make(chan []byte, OutboxSize), done: make(chan struct{})}
+func Start(fd net.Conn, inbox chan any, group *sync.WaitGroup) *Conn {
+	c := &Conn{fd: fd, inbox: inbox, outbox: make(chan []byte, OutboxSize), done: make(chan struct{})}
 	group.Add(2)
 	go func() { defer group.Done(); c.read() }()
 	go func() { defer group.Done(); c.write() }()
@@ -42,11 +40,11 @@ func Start(fd net.Conn, group *sync.WaitGroup) *Conn {
 }
 
 func (c *Conn) Done() <-chan struct{} { return c.done }
-func (c *Conn) Inbox() <-chan any     { return c.inbox }
-
 func (c *Conn) Post(event any) bool {
-	if c.closed.Load() {
+	select {
+	case <-c.done:
 		return false
+	default:
 	}
 	select {
 	case c.inbox <- event:
@@ -56,10 +54,17 @@ func (c *Conn) Post(event any) bool {
 	}
 }
 
+func (c *Conn) PostOwned(event any) { c.inbox <- event }
+
 // Send is called only by the connection's owner loop.
 func (c *Conn) Send(frame []byte) bool {
-	if c.closed.Load() || c.finishing {
+	if c.finishing {
 		return false
+	}
+	select {
+	case <-c.done:
+		return false
+	default:
 	}
 	select {
 	case c.outbox <- frame:
@@ -73,8 +78,13 @@ func (c *Conn) Send(frame []byte) bool {
 // Finish queues the last frame, bounds its write, then closes the outbox.
 // It is called only by the connection's owner loop.
 func (c *Conn) Finish(frame []byte, bound time.Duration) bool {
-	if c.finishing || c.closed.Load() {
+	if c.finishing {
 		return false
+	}
+	select {
+	case <-c.done:
+		return false
+	default:
 	}
 	c.finishing = true
 	_ = c.fd.SetWriteDeadline(time.Now().Add(bound))
@@ -89,9 +99,13 @@ func (c *Conn) Finish(frame []byte, bound time.Duration) bool {
 }
 
 func (c *Conn) Close() {
-	if c.closed.CompareAndSwap(false, true) {
-		close(c.done)
-		_ = c.fd.Close()
+	_ = c.fd.Close()
+}
+
+func (c *Conn) OwnerClosed() {
+	if !c.finishing {
+		c.finishing = true
+		close(c.outbox)
 	}
 }
 
@@ -101,6 +115,7 @@ func (c *Conn) read() {
 		body, err := reader.ReadSlice('\n')
 		if err != nil {
 			c.Close()
+			close(c.done)
 			c.inbox <- Closed{Connection: c, Cause: err}
 			return
 		}
@@ -117,6 +132,7 @@ func (c *Conn) write() {
 		case frame, ok := <-c.outbox:
 			if !ok {
 				c.Close()
+				<-c.done
 				return
 			}
 			if err := writeFull(c.fd, frame); err != nil {

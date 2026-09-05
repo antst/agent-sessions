@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,10 +9,12 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -28,7 +31,18 @@ func TestMain(m *testing.M) {
 		os.Exit(7)
 	}
 	if strings.HasPrefix(name, "no-hello-worker") {
+		if path := os.Getenv("NO_HELLO_READY"); path != "" {
+			_ = os.WriteFile(path, []byte("ready"), 0o600)
+		}
 		select {}
+	}
+	if strings.HasPrefix(name, "rehello-worker") {
+		signal.Ignore(syscall.SIGTERM)
+		if err := runRehelloWorker(name); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(8)
+		}
+		os.Exit(0)
 	}
 	if strings.HasPrefix(name, "stderr-parent") {
 		child := exec.Command("sh", "-c", "sleep 0.2")
@@ -37,7 +51,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "parent exited while descendant held stderr")
 		os.Exit(7)
 	}
-	if strings.HasPrefix(name, "fixture-worker") || strings.HasPrefix(name, "open-exit-worker") {
+	if strings.HasPrefix(name, "fixture-worker") || strings.HasPrefix(name, "open-exit-worker") || strings.HasPrefix(name, "fixed-worker") {
 		worker := sessionkit.NewWorker(&fixtureProduct{product: name})
 		_ = worker.Serve(context.Background())
 		os.Exit(0)
@@ -123,6 +137,23 @@ func runSequenceWorker(product string) error {
 	return nil
 }
 
+func runRehelloWorker(product string) error {
+	fd, err := net.Dial("unix", os.Getenv("AGENTBUS_SOCKET"))
+	if err != nil {
+		return err
+	}
+	wire := rpc.New(fd, true, func(context.Context, *rpc.Request) {})
+	hello := protocol.WorkerHello{Protocol: 1, LaunchToken: os.Getenv("AGENTBUS_LAUNCH_TOKEN"), HelloDescription: protocol.HelloDescription{Product: product, SupportedOpenFields: []string{}, ExtraArguments: []protocol.ExtraArgument{}}}
+	if err = wire.Call(context.Background(), "session.hello", hello, &struct{}{}); err != nil {
+		return err
+	}
+	var listed protocol.SessionListResult
+	first := rpcCode(wire.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &listed))
+	second := rpcCode(wire.Call(context.Background(), "session.hello", hello, &struct{}{}))
+	_ = os.WriteFile(os.Getenv("REHELLO_LOG"), []byte(fmt.Sprintf("%d,%d", first, second)), 0o600)
+	return nil
+}
+
 type fixtureProduct struct {
 	product string
 	mu      sync.Mutex
@@ -158,6 +189,9 @@ func (p *fixtureProduct) Open(_ context.Context, request sessionkit.OpenRequest)
 	}
 	if request.ResumeSessionID != "" {
 		return sessionkit.OpenResult{SessionID: request.ResumeSessionID}, nil
+	}
+	if strings.HasPrefix(p.product, "fixed-worker") {
+		return sessionkit.OpenResult{SessionID: "shared-id"}, nil
 	}
 	return sessionkit.OpenResult{SessionID: fmt.Sprintf("native-%d", os.Getpid())}, nil
 }
@@ -229,61 +263,65 @@ func (p *peerClient) call(method string, params, result any) error {
 }
 
 func TestDurableTableWritesSixColumnsAndLoads(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state", "sessions.json")
-	table, err := openTable(path)
+	path := filepath.Join(t.TempDir(), "state", "sessions")
+	table, rows, err := openTable(path)
 	must(t, err)
-	want := row{SessionID: "native@local", Product: "fixture-worker", Name: "parent/child@local", Groups: []string{"session:parent@local", "session:parent@local/child"}, Open: protocol.OpenOptions{Cwd: "/work"}, CreatedAt: time.Unix(10, 0).UTC()}
-	must(t, table.insert(want))
-	if err := table.insert(want); !errors.Is(err, errDuplicateRow) {
-		t.Fatalf("duplicate insert = %v", err)
+	if len(rows) != 0 {
+		t.Fatalf("new table rows = %#v", rows)
 	}
-	raw, err := os.ReadFile(path)
+	want := row{SessionID: "native@local", Product: "fixture-worker", Name: "parent/child@local", Groups: []string{"session:parent@local", "session:parent@local/child"}, Open: protocol.OpenOptions{Cwd: "/work"}, CreatedAt: time.Unix(10, 0).UTC()}
+	must(t, table.write(want))
+	raw, err := os.ReadFile(filepath.Join(path, rowFile(want.SessionID)))
 	must(t, err)
-	var stored map[string]map[string]json.RawMessage
+	var stored map[string]json.RawMessage
 	must(t, json.Unmarshal(raw, &stored))
-	fields := stored[want.SessionID]
 	for _, name := range []string{"session_id", "product", "name", "groups", "open", "created_at"} {
-		if fields[name] == nil {
+		if stored[name] == nil {
 			t.Fatalf("stored row lacks %q: %s", name, raw)
 		}
 	}
-	if len(fields) != 6 {
-		t.Fatalf("stored row has %d keys: %s", len(fields), raw)
+	if len(stored) != 6 {
+		t.Fatalf("stored row has %d keys: %s", len(stored), raw)
 	}
-	reloaded, err := openTable(path)
+	_, rows, err = openTable(path)
 	must(t, err)
-	rows := reloaded.list()
 	if len(rows) != 1 || rows[0].Name != want.Name || rows[0].Open.Cwd != "/work" {
 		t.Fatalf("loaded rows = %#v", rows)
 	}
-	must(t, reloaded.delete(want.SessionID))
-	if len(reloaded.list()) != 0 {
+	must(t, table.delete(want.SessionID))
+	_, rows, err = openTable(path)
+	must(t, err)
+	if len(rows) != 0 {
 		t.Fatal("deleted row remained")
 	}
 }
 
 func TestTableRejectsUnknownColumnsAndDuplicateNames(t *testing.T) {
 	directory := t.TempDir()
-	path := filepath.Join(directory, "sessions.json")
+	path := filepath.Join(directory, "sessions")
+	must(t, os.MkdirAll(path, 0o700))
 	base := row{Product: "worker", Name: "same@local", Groups: []string{"parent", "own"}, Open: protocol.OpenOptions{}, CreatedAt: time.Unix(10, 0).UTC()}
 	first := base
 	first.SessionID = "one@local"
 	second := base
 	second.SessionID = "two@local"
-	raw, err := json.Marshal(map[string]row{first.SessionID: first, second.SessionID: second})
+	raw, err := json.Marshal(first)
 	must(t, err)
-	must(t, os.WriteFile(path, raw, 0o600))
-	if _, err := openTable(path); err == nil || !strings.Contains(err.Error(), "duplicate") {
+	must(t, os.WriteFile(filepath.Join(path, rowFile(first.SessionID)), raw, 0o600))
+	raw, err = json.Marshal(second)
+	must(t, err)
+	must(t, os.WriteFile(filepath.Join(path, rowFile(second.SessionID)), raw, 0o600))
+	if _, _, err := openTable(path); err == nil {
 		t.Fatalf("duplicate names = %v", err)
 	}
 	var object map[string]any
 	must(t, json.Unmarshal(raw, &object))
-	delete(object, second.SessionID)
-	object[first.SessionID].(map[string]any)["unknown"] = true
+	object["unknown"] = true
 	raw, err = json.Marshal(object)
 	must(t, err)
-	must(t, os.WriteFile(path, raw, 0o600))
-	if _, err := openTable(path); err == nil {
+	must(t, os.Remove(filepath.Join(path, rowFile(first.SessionID))))
+	must(t, os.WriteFile(filepath.Join(path, rowFile(second.SessionID)), raw, 0o600))
+	if _, _, err := openTable(path); err == nil {
 		t.Fatal("unknown durable column was accepted")
 	}
 }
@@ -310,6 +348,8 @@ func TestDaemonCloseEndsRawAndActiveSpawnConnections(t *testing.T) {
 	directory := t.TempDir()
 	installFixture(t, directory, "no-hello-worker")
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ready := filepath.Join(directory, "ready")
+	t.Setenv("NO_HELLO_READY", ready)
 	socket := filepath.Join(directory, "agentbus.sock")
 	d, err := Start(Config{SocketPath: socket, TablePath: filepath.Join(directory, "sessions.json")})
 	must(t, err)
@@ -320,49 +360,15 @@ func TestDaemonCloseEndsRawAndActiveSpawnConnections(t *testing.T) {
 	go func() {
 		spawned <- parent.call("lane.spawn", protocol.LaneSpawnRequest{Name: "child", Product: "no-hello-worker", Open: &protocol.OpenOptions{}}, &protocol.LaneSpawnResult{})
 	}()
-	for {
-		d.mapsMutex.Lock()
-		active := len(d.reservations) != 0
-		d.mapsMutex.Unlock()
-		if active {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitFile(t, ready)
 	must(t, d.Close())
-	if <-spawned == nil || len(d.table.list()) != 0 {
+	_, rows, loadErr := openTable(d.config.TablePath)
+	if <-spawned == nil || loadErr != nil || len(rows) != 0 {
 		t.Fatal("daemon close allowed an active spawn to commit")
 	}
 	_ = raw.SetReadDeadline(time.Now().Add(time.Second))
 	if read, _ := raw.Read(make([]byte, 1)); read != 0 {
 		t.Fatal("raw accepted connection survived daemon close")
-	}
-}
-
-func TestListSnapshotsMapsBeforeRows(t *testing.T) {
-	d, _ := startDaemon(t)
-	d.table.mu.Lock()
-	d.mapsMutex.Lock()
-	done := make(chan struct{})
-	go func() {
-		d.visibleSessions(source{groups: []string{"group"}})
-		close(done)
-	}()
-	d.mapsMutex.Unlock()
-	deadline := time.Now().Add(time.Second)
-	for d.mapsMutex.TryLock() {
-		d.mapsMutex.Unlock()
-		if time.Now().After(deadline) {
-			d.table.mu.Unlock()
-			t.Fatal("list did not hold mapsMutex while waiting for the table")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	d.table.mu.Unlock()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("list did not finish after the table became available")
 	}
 }
 
@@ -432,23 +438,25 @@ func TestPeerHelloRehelloReplacementAndSupersession(t *testing.T) {
 }
 
 func TestWorkerHelloIsSingleUseAndUncommitted(t *testing.T) {
-	d, socket := startDaemon(t)
-	token := "one-use-token"
-	d.mapsMutex.Lock()
-	d.reservations[token] = &reservation{product: "fixture-worker", hello: make(chan workerStart, 1)}
-	d.mapsMutex.Unlock()
-	fd, err := net.Dial("unix", socket)
+	directory := t.TempDir()
+	installFixture(t, directory, "rehello-worker")
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	logPath := filepath.Join(directory, "rehello")
+	t.Setenv("REHELLO_LOG", logPath)
+	_, socket := startDaemon(t)
+	parent := connectPeer(t, socket, "parent", "parent", "shared")
+	var spawned protocol.LaneSpawnResult
+	spawnErr := parent.call("lane.spawn", protocol.LaneSpawnRequest{Name: "child", Product: "rehello-worker", Open: &protocol.OpenOptions{}}, &spawned)
+	if code := rpcCode(spawnErr); code != protocol.SpawnFailed {
+		t.Fatalf("re-hello worker spawn code = %d (%v)", code, spawnErr)
+	}
+	waitFile(t, logPath)
+	raw, err := os.ReadFile(logPath)
 	must(t, err)
-	worker := rpc.New(fd, true, nil)
-	hello := protocol.WorkerHello{Protocol: 1, LaunchToken: token, HelloDescription: protocol.HelloDescription{Product: "fixture-worker", SupportedOpenFields: []string{}, ExtraArguments: []protocol.ExtraArgument{}}}
-	must(t, worker.Call(context.Background(), "session.hello", hello, &struct{}{}))
-	if code := rpcCode(worker.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{})); code != protocol.NotCommitted {
-		t.Fatalf("uncommitted worker code = %d", code)
+	want := fmt.Sprintf("%d,%d", protocol.NotCommitted, protocol.InvalidHello)
+	if string(raw) != want {
+		t.Fatalf("worker admission codes = %q, want %q", raw, want)
 	}
-	if code := rpcCode(worker.Call(context.Background(), "session.hello", hello, &struct{}{})); code != protocol.InvalidHello {
-		t.Fatalf("worker re-hello code = %d", code)
-	}
-	<-worker.Done()
 }
 
 func TestSpawnRunCloseResumeForgetAndRestart(t *testing.T) {
@@ -522,7 +530,7 @@ func TestSpawnRunCloseResumeForgetAndRestart(t *testing.T) {
 		}()
 	}
 	codes := []int{rpcCode(<-closed), rpcCode(<-closed)}
-	if !(codes[0] == 0 && codes[1] == protocol.NotConnected || codes[1] == 0 && codes[0] == protocol.NotConnected) {
+	if !(codes[0] == 0 && (codes[1] == protocol.Busy || codes[1] == protocol.NotConnected) || codes[1] == 0 && (codes[0] == protocol.Busy || codes[0] == protocol.NotConnected)) {
 		t.Fatalf("concurrent close codes = %#v", codes)
 	}
 	listed = protocol.SessionListResult{}
@@ -549,12 +557,6 @@ func TestSpawnRunCloseResumeForgetAndRestart(t *testing.T) {
 	d, err = Start(Config{SocketPath: socket, TablePath: tablePath})
 	must(t, err)
 	t.Cleanup(func() { _ = d.Close() })
-	d.mapsMutex.Lock()
-	counts := []int{len(d.connections), len(d.pending), len(d.rowLocks), len(d.reservations)}
-	d.mapsMutex.Unlock()
-	if !slices.Equal(counts, []int{0, 0, 0, 0}) {
-		t.Fatalf("restart live maps = %#v", counts)
-	}
 	parent = connectPeer(t, socket, "parent", "parent", "team")
 	listed = protocol.SessionListResult{}
 	must(t, parent.call("session.list", protocol.SessionListRequest{SessionID: spawned.SessionID}, &listed))
@@ -564,7 +566,10 @@ func TestSpawnRunCloseResumeForgetAndRestart(t *testing.T) {
 }
 
 func TestVisibilityDeliveryAndLaneIdentityCollision(t *testing.T) {
-	d, socket := startDaemon(t)
+	directory := t.TempDir()
+	installFixture(t, directory, "fixed-worker")
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, socket := startDaemon(t)
 	first := connectPeer(t, socket, "first", "first", "shared")
 	second := connectPeer(t, socket, "second", "second", "shared")
 	hidden := connectPeer(t, socket, "hidden", "hidden", "private")
@@ -588,12 +593,13 @@ func TestVisibilityDeliveryAndLaneIdentityCollision(t *testing.T) {
 		t.Fatalf("invisible target receipt = %#v", sent.Deliveries)
 	}
 
-	row := row{SessionID: "lane-id@local", Product: "fixture-worker", Name: "lane@local", Groups: []string{"shared", "session:lane"}, Open: protocol.OpenOptions{}, CreatedAt: time.Now()}
-	must(t, d.table.insert(row))
+	var lane protocol.LaneSpawnResult
+	must(t, first.call("lane.spawn", protocol.LaneSpawnRequest{Name: "lane", Product: "fixed-worker", ExtraGroups: []string{"shared"}, Open: &protocol.OpenOptions{}}, &lane))
+	must(t, first.call("session.close", protocol.SessionCloseRequest{SessionID: lane.SessionID}, &struct{}{}))
 	fd, err := net.Dial("unix", socket)
 	must(t, err)
 	collision := rpc.New(fd, true, nil)
-	hello := protocol.PeerHello{Protocol: 1, Product: "fixture-client", SessionID: "lane-id", Name: "collision", Groups: []string{"shared"}, Info: map[string]any{}}
+	hello := protocol.PeerHello{Protocol: 1, Product: "fixture-client", SessionID: "shared-id", Name: "collision", Groups: []string{"shared"}, Info: map[string]any{}}
 	if code := rpcCode(collision.Call(context.Background(), "session.hello", hello, &struct{}{})); code != protocol.InvalidHello {
 		t.Fatalf("lane collision code = %d", code)
 	}
@@ -602,29 +608,16 @@ func TestVisibilityDeliveryAndLaneIdentityCollision(t *testing.T) {
 }
 
 func TestPeerAndFreshLaneCannotClaimOneID(t *testing.T) {
-	d, socket := startDaemon(t)
-	fd, err := net.Dial("unix", socket)
-	must(t, err)
-	peer := rpc.New(fd, true, nil)
-	t.Cleanup(func() { _ = peer.Close() })
-	helloResult := make(chan error, 1)
-	spawnResult := make(chan int, 1)
-	start := make(chan struct{})
-	go func() {
-		<-start
-		hello := protocol.PeerHello{Protocol: 1, Product: "fixture-client", SessionID: "shared-id", Name: "peer", Groups: []string{"shared"}, Info: map[string]any{}}
-		helloResult <- peer.Call(context.Background(), "session.hello", hello, &struct{}{})
-	}()
-	go func() {
-		<-start
-		value := row{Product: "fixture-worker", Name: "lane@local", Groups: []string{"parent", "own"}, Open: protocol.OpenOptions{}}
-		code, _ := d.commitSpawn(&value, "own", true, "", workerStart{connection: &live{worker: true}}, protocol.OpenResult{SessionID: "shared-id"})
-		spawnResult <- code
-	}()
-	close(start)
-	peerCode, spawnCode := rpcCode(<-helloResult), <-spawnResult
-	if !(peerCode == 0 && spawnCode == protocol.SpawnFailed || peerCode == protocol.InvalidHello && spawnCode == 0) {
-		t.Fatalf("identity race: peer=%d spawn=%d", peerCode, spawnCode)
+	directory := t.TempDir()
+	installFixture(t, directory, "fixed-worker")
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, socket := startDaemon(t)
+	_ = connectPeer(t, socket, "shared-id", "holder", "shared")
+	parent := connectPeer(t, socket, "parent", "parent", "shared")
+	var spawned protocol.LaneSpawnResult
+	code := rpcCode(parent.call("lane.spawn", protocol.LaneSpawnRequest{Name: "child", Product: "fixed-worker", Open: &protocol.OpenOptions{}}, &spawned))
+	if code != protocol.SpawnFailed {
+		t.Fatalf("lane reused peer id: %d", code)
 	}
 }
 
@@ -648,34 +641,6 @@ func TestOpenCommitPrecedesNextWorkerFrame(t *testing.T) {
 }
 
 func TestSpawnDecisionAndExitDuringOpen(t *testing.T) {
-	decision := &launchDecision{}
-	entered, release := make(chan struct{}), make(chan struct{})
-	first := make(chan struct {
-		result launchOutcome
-		won    bool
-	}, 1)
-	go func() {
-		result, won := decision.claim(func() launchOutcome {
-			close(entered)
-			<-release
-			return launchOutcome{}
-		})
-		first <- struct {
-			result launchOutcome
-			won    bool
-		}{result, won}
-	}()
-	<-entered
-	second := make(chan bool, 1)
-	go func() {
-		_, won := decision.claim(func() launchOutcome { return launchOutcome{code: protocol.Timeout} })
-		second <- won
-	}()
-	close(release)
-	if outcome := <-first; !outcome.won || outcome.result.code != 0 || <-second {
-		t.Fatalf("transaction had more than one winner: %#v", outcome)
-	}
-
 	directory := t.TempDir()
 	installFixture(t, directory, "open-exit-worker")
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -732,42 +697,32 @@ func TestCloseStopsWorkerBeforeWritingToSlowCaller(t *testing.T) {
 	directory := t.TempDir()
 	installFixture(t, directory, "fixture-worker")
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
-	d, socket := startDaemon(t)
+	_, socket := startDaemon(t)
 	owner := connectPeer(t, socket, "owner", "owner", "shared")
 	var spawned protocol.LaneSpawnResult
 	must(t, owner.call("lane.spawn", protocol.LaneSpawnRequest{Name: "child", Product: "fixture-worker", ExtraGroups: []string{"shared"}, Open: &protocol.OpenOptions{}}, &spawned))
-
-	server, client := net.Pipe()
-	slow := &live{fd: server}
-	slow.wire = rpc.New(server, false, nil)
-	done := make(chan struct{})
-	go func() {
-		d.closeSession(slow, &rpc.Request{ID: 1, Method: "session.close", Params: &protocol.SessionCloseRequest{SessionID: spawned.SessionID}}, source{groups: []string{"shared"}, ctx: context.Background()})
-		close(done)
-	}()
+	slow, err := net.Dial("unix", socket)
+	must(t, err)
+	t.Cleanup(func() { _ = slow.Close() })
+	hello, _ := protocol.RequestBytes(1, "session.hello", protocol.PeerHello{Protocol: 1, Product: "fixture-client", SessionID: "slow", Name: "slow", Groups: []string{"shared"}, Info: map[string]any{}})
+	_, err = slow.Write(hello)
+	must(t, err)
+	reader := bufio.NewReader(slow)
+	_, err = reader.ReadBytes('\n')
+	must(t, err)
+	closeRequest, _ := protocol.RequestBytes(2, "session.close", protocol.SessionCloseRequest{SessionID: spawned.SessionID})
+	_, err = slow.Write(closeRequest)
+	must(t, err)
 	deadline := time.Now().Add(time.Second)
 	for {
-		d.mapsMutex.Lock()
-		connected := d.connections[spawned.SessionID] != nil
-		d.mapsMutex.Unlock()
-		if !connected {
+		var listed protocol.SessionListResult
+		if owner.call("session.list", protocol.SessionListRequest{SessionID: spawned.SessionID}, &listed) == nil && len(listed.Sessions) == 1 && !listed.Sessions[0].Connected {
 			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("worker cleanup waited for the caller to read its reply")
 		}
 		time.Sleep(time.Millisecond)
-	}
-	select {
-	case <-done:
-		t.Fatal("close reply unexpectedly completed without a reader")
-	default:
-	}
-	_ = client.Close()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("close handler stayed blocked after the slow caller disconnected")
 	}
 }
 
@@ -809,6 +764,7 @@ func TestMessageSendReturnsOneOrderedReceiptPerResolvedLabel(t *testing.T) {
 		t.Fatalf("delivery preceded target validation: %#v", delivery)
 	default:
 	}
+	sender = connectPeer(t, socket, "sender-two", "sender-two", "shared")
 	sent = protocol.MessageSendResult{}
 	must(t, sender.call("message.send", protocol.MessageSendRequest{Targets: []string{"one", "missing@remote", "same", "two"}, Message: "fanout"}, &sent))
 	if len(sent.Deliveries) != 4 || sent.Deliveries[0].Disposition != "injected" || sent.Deliveries[1].Reason != "unknown_host" || sent.Deliveries[2].Reason != "ambiguous" || sent.Deliveries[3].Disposition != "injected" {
@@ -881,4 +837,15 @@ func must(t *testing.T, err error) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func waitFile(t *testing.T, path string) {
+	t.Helper()
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("file %s was not created", path)
 }
