@@ -185,7 +185,6 @@ func TestCloseIsIdempotent(t *testing.T) {
 	}
 	group.Wait()
 	check(t, counted.closes.Load() == 1 && <-returned != nil, "closes = %d", counted.closes.Load())
-	_ = peer.Close()
 }
 
 func TestOversizeFrameClosesAtBound(t *testing.T) {
@@ -235,26 +234,34 @@ func TestCloseCancelsAdmittedHandler(t *testing.T) {
 	check(t, <-cancelled, "handler was not cancelled or wrote after close")
 }
 
-func TestConcurrentHandlersWriteCompleteFrames(t *testing.T) {
+func TestHandlersRunInFrameOrderAndWriteCompleteFrames(t *testing.T) {
 	local, peer := net.Pipe()
-	ready, release := sync.WaitGroup{}, make(chan struct{})
-	ready.Add(2)
+	release, order := make(chan struct{}), make(chan int64, 2)
 	var c *Conn
-	c = New(local, true, func(_ context.Context, request *Request) { ready.Done(); <-release; _ = c.Result(request, struct{}{}) })
+	c = New(local, true, func(_ context.Context, request *Request) {
+		order <- request.ID
+		if request.ID == 1 {
+			<-release
+		}
+		go func() { _ = c.Result(request, struct{}{}) }()
+	})
 	first, _ := protocol.RequestBytes(1, "session.superseded", struct{}{})
 	second, _ := protocol.RequestBytes(2, "session.superseded", struct{}{})
 	go peer.Write(append(first, second...))
-	ready.Wait()
+	check(t, <-order == 1, "first handler was reordered")
+	select {
+	case id := <-order:
+		t.Fatalf("later handler ran while first was active: %d", id)
+	default:
+	}
 	close(release)
+	check(t, <-order == 2, "second handler was reordered")
 	reader := bufio.NewReader(peer)
 	for range 2 {
 		body, err := reader.ReadBytes('\n')
-		must(t, err)
-		_, err = protocol.DecodeFrame(body[:len(body)-1])
-		must(t, err)
+		check(t, err == nil && json.Valid(body), "interleaved response = %q, %v", body, err)
 	}
 	_ = c.Close()
-	_ = peer.Close()
 }
 
 type pauseWriteConn struct {
@@ -293,7 +300,6 @@ func (r *pausedResult) UnmarshalJSON(raw []byte) error {
 }
 
 func readFrame(t *testing.T, connection net.Conn) protocol.Frame {
-	t.Helper()
 	body, err := bufio.NewReader(connection).ReadBytes('\n')
 	must(t, err)
 	frame, err := protocol.DecodeFrame(body[:len(body)-1])
