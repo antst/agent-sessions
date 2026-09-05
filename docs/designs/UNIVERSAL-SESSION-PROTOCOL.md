@@ -1228,8 +1228,9 @@ without blocking the reader. Go also exports one thin no-hello client:
 `Dial(socket)`, `Call(ctx, method, params)`, and `Close`; the caller kit and a
 wrapper's private lane socket use that one framed implementation.
 
-`start`, `status`, and `wait` are caller conveniences, not wire methods, and
-have one shared Go/JavaScript shape:
+`start`, `status`, and `wait` are caller conveniences for resident callers such
+as plugins and the shared MCP server. They are not wire methods or
+`agentbus-call` subcommands, and have one shared Go/JavaScript shape:
 
 | Call | Result and local rule |
 | --- | --- |
@@ -1610,7 +1611,7 @@ against installed products is permitted only on `umka-dev1`.
 | Reference | Closed behavior |
 | --- | --- |
 | Reference worker | PATH-resolved `example-peer` started with the one-use launch token in its environment and empty argv; worker hello declares all five open fields, open returns a deterministic product session ID, run can echo/block/fail or never settle, interrupt and close can independently never settle, deliver is scriptable to `injected`, `queued_for_next_turn`, or `rejected`, and worker-originated session methods are scriptable. It imports no product package. |
-| Reference caller | Up to two peer connections plus the shared caller kit. They can issue every client-to-daemon method, deliberately abandon reply sinks, supersede or re-hello an identity, prove second-visible-peer and invisible-peer authorization, and script delivery responses. They contain no product condition. |
+| Reference caller | `bus/cmd/agentbus-call [-name <name>] [-g a,b] [-socket <path>] <method> [<params-json>]` opens one peer connection, sends exactly one raw client-to-daemon request, prints its result or error object on stdout, and exits 0 for a result, 1 for an error, or 2 for usage. `turn.run` waits for its terminal; deliveries during the call are JSON lines on stderr and receive `injected`. Separate invocations supply a second peer or abandon a reply sink. The binary has no configuration file, stdin protocol, product condition, or local turn registry. |
 | Worker invocation | The worker suite accepts only a product token and invokes that exact PATH binary with empty argv and a launch token in its environment; every vendor and `example-peer` run the identical trace. |
 | Caller invocation | The caller suite invokes the product's installed Agent Sessions tool, not a private test API; every product runs the identical trace against the reference worker. |
 
