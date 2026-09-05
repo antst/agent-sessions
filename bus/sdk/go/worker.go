@@ -26,11 +26,13 @@ type Run struct {
 	Native      any
 	context     context.Context
 	cancel      context.CancelFunc
-	done        chan struct{}
+	done        <-chan struct{}
+	finish      context.CancelFunc
 	interrupted atomic.Bool
 }
 
-func (r *Run) Interrupted() bool { return r.interrupted.Load() }
+func (r *Run) Interrupted() bool     { return r.interrupted.Load() }
+func (r *Run) Done() <-chan struct{} { return r.done }
 
 type Worker struct {
 	product WorkerCallbacks
@@ -76,6 +78,11 @@ func (w *Worker) Serve(ctx context.Context) error {
 		err = rpc.ErrClosed
 	}
 	_ = w.conn.Close()
+	w.mu.Lock()
+	if w.run != nil && w.run.finish != nil {
+		w.run.finish()
+	}
+	w.mu.Unlock()
 	w.closeProduct(w.conn.Context())
 	return err
 }
@@ -84,13 +91,16 @@ func (w *Worker) Call(ctx context.Context, method string, params, result any) er
 	return w.conn.Call(ctx, method, params, result)
 }
 
+func (w *Worker) Shutdown() {
+	_ = w.conn.Close()
+}
+
 func (w *Worker) handle(_ context.Context, request *rpc.Request) {
-	ctx := w.context
 	switch request.Method {
 	case "session.superseded":
 		go func() { w.reply(w.conn.Result(request, struct{}{})); _ = w.conn.Close() }()
 	case "session.open":
-		go w.open(ctx, request)
+		go w.open(w.context, request)
 	case "turn.run":
 		w.mu.Lock()
 		if !w.opened.Load() || w.run != nil {
@@ -98,11 +108,12 @@ func (w *Worker) handle(_ context.Context, request *rpc.Request) {
 			go w.answer(request, nil, protocol.Busy)
 			return
 		}
-		runCtx, cancel := context.WithCancel(ctx)
-		slot := &Run{context: runCtx, cancel: cancel, done: make(chan struct{})}
+		runCtx, cancel := context.WithCancel(w.context)
+		done, finish := context.WithCancel(context.Background())
+		slot := &Run{context: runCtx, cancel: cancel, done: done.Done(), finish: finish}
 		w.run = slot
 		w.mu.Unlock()
-		go w.runTurn(ctx, request, slot)
+		go w.runTurn(w.context, request, slot)
 	case "turn.interrupt":
 		w.mu.Lock()
 		if w.run == nil {
@@ -127,7 +138,7 @@ func (w *Worker) handle(_ context.Context, request *rpc.Request) {
 			go w.answer(request, DeliveryReceipt{Disposition: "rejected", Reason: "closing"}, 0)
 			return
 		}
-		go w.deliver(ctx, request)
+		go w.deliver(w.context, request)
 	case "session.close":
 		w.mu.Lock()
 		slot := w.run
@@ -140,7 +151,7 @@ func (w *Worker) handle(_ context.Context, request *rpc.Request) {
 		w.run.interrupted.Store(true)
 		interrupt := slot != nil && slot.context.Err() == nil && slot.interrupted.CompareAndSwap(false, true)
 		w.mu.Unlock()
-		go w.close(ctx, request, slot, interrupt)
+		go w.close(w.context, request, slot, interrupt)
 	}
 }
 
@@ -170,9 +181,11 @@ func (w *Worker) runTurn(_ context.Context, request *rpc.Request, slot *Run) {
 	if err == nil && w.run == slot {
 		w.run = nil
 	}
-	close(slot.done)
+	if err != nil {
+		_ = w.conn.Close()
+	}
+	slot.finish()
 	w.mu.Unlock()
-	w.reply(err)
 }
 
 func (w *Worker) interrupt(request *rpc.Request, run *Run, call bool) {

@@ -1,5 +1,4 @@
-{
-  "cases": [
+[
     {"name":"ready-open-commit", "calls":[1,1,0,0,0,0]},
     {"name":"describe-eof", "calls":[1,0,0,0,0,0]},
     {"name":"terminal-results", "calls":[1,1,5,0,0,0]},
@@ -13,6 +12,8 @@
     {"name":"terminal-before-interrupt", "calls":[1,1,1,0,0,0]},
     {"name":"idle-close-deliver", "calls":[1,1,0,0,1,1]},
     {"name":"callback-originated-method", "calls":[1,1,1,0,1,0]},
-    {"name":"environment", "calls":[0,0,0,0,0,0]}
-  ]
-}
+    {"name":"environment", "calls":[0,0,0,0,0,0]},
+    {"name":"run-done", "calls":[1,1,1,0,0,0]},
+    {"name":"shutdown", "calls":[1,0,0,0,0,0]},
+    {"name":"run-done-write-failure", "calls":[1,1,1,0,0,1]}
+]

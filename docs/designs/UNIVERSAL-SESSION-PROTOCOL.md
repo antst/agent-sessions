@@ -1038,6 +1038,9 @@ reads the slot under the same lock. Whichever side observes the other performs
 the one native interrupt. Once `run()` returns, the kit issues no new native
 interrupt, including while it writes the terminal result. A product or wrapper
 keeps no second starting, active, or interrupt-requested lifecycle bits.
+`Run.Done()` closes after the terminal response has been written and the run
+slot has been cleared, or after the connection has entered its single close
+path when no terminal can be written. It never closes before either boundary.
 
 Before mutating an existing session, a native product must acquire exclusivity
 that excludes any competing process and hold it through native cleanup. A
@@ -1091,7 +1094,9 @@ interrupt returns `{}` without another product call.
 The kit owns final process ordering: it calls `close()`, writes the close
 response, closes its socket, and then resolves its `closed` signal. The product
 awaits that signal before process exit; `closed` is a kit signal, not a seventh
-callback.
+callback. `Worker.Shutdown()` lets the product invoke the same single close path
+when its native child dies; it is idempotent, closes the socket, and resolves
+`closed` without adding another lifecycle state.
 
 The three stop paths are distinct. `interrupt()` asks the current run to stop;
 orderly `session.close` follows the preceding close sequence; control EOF first
@@ -1165,7 +1170,13 @@ kits. The lifecycle cases are:
     and
 14. endpoint selection plus single launch-token/local-key reads and secret
     environment removal, followed by connect failure and process exit without
-    reconnect.
+    reconnect;
+15. `Run.Done()` remaining open until the terminal response is written and the
+    run slot is cleared; and
+16. product-requested `Worker.Shutdown()` resolving `closed`, with a second call
+    doing nothing; and
+17. a failed terminal write entering the connection close path, closing
+    `Run.Done()`, and emitting no terminal frame.
 
 There are no product names, product IDs, clocks, sleeps, or network sockets in
 the fixture data. Tests control every callback and frame boundary
@@ -1470,7 +1481,7 @@ owner-controlled.
 | ---: | --- | --- | --- |
 | 0 | Signed document, `bus/internal/protocol` schema and shared fixtures re-exported by the public SDKs, generated protocol, architecture boundaries, and deletion ledger. | Schema fixtures pass in Go and JavaScript; method/error tables are byte-identical; deletion counts reproduce from c5b280d; `bus/` has no wrapper import or product token. | No installed daemon or product runtime. |
 | 1 | `bus/sdk/go` worker kit, universal daemon, durable lane table, Go caller kit, reference caller, and token-selected `bus/cmd/example-peer` reference worker. | Daemon caps hold; unit/race/vet/build green; an in-process restart with durable rows proves every row loads offline with empty maps/reservations and no spawn; old actor/driver/control packages are absent; contract learned nothing from adapters: **yes**. | Installed-daemon integration runs only on `umka-dev1`, against an empty universal table. |
-| 2 | JavaScript worker kit, JavaScript caller kit, then the unified DSH plugin/profile. | All 14 shared lifecycle fixtures pass in both worker kits; DSH passes both cells in Section 5.5. | DSH installed-product proof only on `umka-dev1`; no other product is enabled. |
+| 2 | JavaScript worker kit, JavaScript caller kit, then the unified DSH plugin/profile. | All 17 shared lifecycle fixtures pass in both worker kits; DSH passes both cells in Section 5.5. | DSH installed-product proof only on `umka-dev1`; no other product is enabled. |
 | 3 | `wrappers/` resident lane binaries and peer integrations in order: Claude, Codex, Grok, Qwen, OpenCode, Kilo, Pi, OMP. | Each product meets its size/exception ledger and passes its two conformance cells before the next product is enabled. | Product runtime proof only on `umka-dev1`; failures do not enable a compatibility path. |
 | 4 | CLI rendering, package projections, install/remove inventory, documentation, and federation. | Full unit/race/vet/build/package gates; federation assertions follow Section 5.7; all 18 cells pass in one clean candidate run. | The sole full runtime matrix runs on `umka-dev1`; no install elsewhere. |
 | 5 | Release candidate. | Universal state starts empty; no old protocol endpoint, actor, driver, launcher process, socket, or compatibility package remains; the c5 catalog file's SHA-256 is recorded before and after the install and full run on `umka-dev1` and must be identical. | Production installation requires owner authorization after the clean `umka-dev1` evidence is sealed. |
@@ -1604,7 +1615,7 @@ check.
 | Daemon lane actors, registries, projections, collectors, archives, timers, product dispatch, and argv reparse | Router/table tests drive the eleven methods over a real connection and assert only rows, current pointers, pending calls, and supervisor ownership. |
 | Presence, messaging, federation, roster, names, and notices | Daemon visibility/resolution tests plus the federation gate; no test constructs a private actor or product driver. |
 | Product lane drivers and peer launchers | Each Section 4 wrapper test drives its six callbacks and exact native transcript; the shared wrapper-host unit suite proves the FIFO cap of 64 deliveries / 1 MiB rendered bytes, overflow `queue_full`, stale lock files do not block, a live inherited flock survives wrapper death until the child exits, interrupt at native-turn creation, first-turn/terminal delivery handoff races, and child death with a non-empty FIFO invents no receipt while leaving the row resumable; peer exec-plan tests stop at product config and never claim socket ownership. |
-| Go/JavaScript lifecycle duplication | The one 14-row fixture table runs unchanged through both native kits and the reference worker. |
+| Go/JavaScript lifecycle duplication | The one 17-row fixture table runs unchanged through both native kits and the reference worker. |
 | Connector and plugin tool tests | Caller-kit conformance C1-C9 through the installed peer MCP/plugin entry, with product-private transport tested only at its local boundary. |
 | Packaging and release projections | Package tests assert one schema/kit projection, correct peer and lane entry forms, no deleted compatibility artifact, and byte-identical installed assets. |
 | Protocol and design documentation | Generate `bus/docs/PROTOCOL.md` from Sections 1 and 3.1 verbatim, with this document as the sole source and `bus/internal/protocol` as the sole embedded schema/fixture authority re-exported by the public SDKs. Delete every superseded lane-convergence, presence-supersession, adapter-boundary, and DSH-adapter note under `docs/designs`; do not retain archived or paraphrased protocol authorities. |
