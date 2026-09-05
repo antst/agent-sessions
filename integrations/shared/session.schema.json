@@ -57,7 +57,19 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["sessions"],
-      "properties": {"sessions": {"type": "array", "items": {"$ref": "#/$defs/SessionSummary"}}}
+      "properties": {
+        "sessions": {"type": "array", "items": {"$ref": "#/$defs/SessionSummary"}},
+        "hosts": {"type": "array", "items": {"$ref": "#/$defs/HostProducts"}}
+      }
+    },
+    "HostProducts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "products"],
+      "properties": {
+        "host": {"type": "string", "minLength": 1},
+        "products": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
     },
     "SessionSummary": {
       "type": "object",
@@ -98,9 +110,10 @@
       "additionalProperties": false,
       "required": ["input", "outcome", "result", "finished_at"],
       "properties": {
-        "input": {"type": "string", "minLength": 1},
+        "input": {"type": "string", "minLength": 1, "maxLength": 262144},
         "outcome": {"enum": ["completed", "interrupted", "failed"]},
-        "result": {"type": "string"},
+        "result": {"type": "string", "maxLength": 262144},
+        "truncated": {"type": "boolean"},
         "native_stop_reason": {"type": "string", "minLength": 1},
         "finished_at": {"type": "integer", "minimum": 0}
       }
@@ -118,7 +131,7 @@
           "allOf": [{"not": {"const": []}}]
         },
         "group": {"type": "string", "minLength": 1},
-        "message": {"type": "string", "minLength": 1}
+        "message": {"type": "string", "minLength": 1, "maxLength": 262144}
       },
       "allOf": [
         {
@@ -186,7 +199,7 @@
       "properties": {
         "message_id": {"type": "string", "minLength": 1},
         "from": {"$ref": "#/$defs/DeliverySource"},
-        "body": {"type": "string"}
+        "body": {"type": "string", "maxLength": 262144}
       }
     },
     "MessageDeliverResult": {"$ref": "#/$defs/DeliveryReceipt"},
@@ -221,7 +234,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["product"],
-      "properties": {"product": {"type": "string", "minLength": 1}}
+      "properties": {"product": {"type": "string", "minLength": 1}, "host": {"type": "string", "minLength": 1}}
     },
     "LaneDescribeResult": {
       "type": "object",
@@ -265,6 +278,7 @@
       "properties": {
         "name": {"type": "string", "minLength": 1},
         "product": {"type": "string", "minLength": 1},
+        "host": {"type": "string", "minLength": 1},
         "resume_session_id": {"type": "string", "minLength": 1},
         "extra_groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
         "open": {"$ref": "#/$defs/SessionOpenOptions"}
@@ -277,7 +291,7 @@
               {"not": {"required": ["product"]}},
               {"not": {"required": ["name"]}},
               {"not": {"required": ["extra_groups"]}},
-              {"not": {"required": ["open"]}}
+              {"not": {"required": ["open"]}}, {"not": {"required": ["host"]}}
             ]
           },
           "else": {"required": ["name", "product", "open"]}
@@ -317,7 +331,7 @@
       "required": ["session_id", "input"],
       "properties": {
         "session_id": {"type": "string", "minLength": 1},
-        "input": {"type": "string", "minLength": 1}
+        "input": {"type": "string", "minLength": 1, "maxLength": 262144}
       }
     },
     "TurnRunResult": {
@@ -326,7 +340,8 @@
       "required": ["outcome", "result"],
       "properties": {
         "outcome": {"enum": ["completed", "interrupted", "failed"]},
-        "result": {"type": "string"},
+        "result": {"type": "string", "maxLength": 262144},
+        "truncated": {"type": "boolean"},
         "native_stop_reason": {"type": "string", "minLength": 1}
       }
     },
@@ -359,8 +374,8 @@
       "additionalProperties": false,
       "required": ["code", "message"],
       "properties": {
-        "code": {"enum": [-32600, -32602, -32603, -32001, -32002, -32003, -32004, -32005, -32006, -32007, -32008, -32009, -32010, -32011, -32012, -32013]},
-        "message": {"enum": ["invalid_frame", "invalid_hello", "internal", "unknown_session", "not_connected", "busy", "not_running", "already_connected", "closed", "unknown_product", "unsupported_open_field", "spawn_failed", "timeout", "not_committed", "superseded", "name_taken"]},
+        "code": {"enum": [-32600, -32602, -32603, -32001, -32002, -32003, -32004, -32005, -32006, -32007, -32008, -32009, -32010, -32011, -32012, -32013, -32014]},
+        "message": {"enum": ["invalid_frame", "invalid_hello", "internal", "unknown_session", "not_connected", "busy", "not_running", "already_connected", "closed", "unknown_product", "unsupported_open_field", "spawn_failed", "timeout", "not_committed", "superseded", "name_taken", "unknown_host"]},
         "data": {"$ref": "#/$defs/SpawnFailedData"}
       },
       "allOf": [
@@ -377,7 +392,7 @@
         {"if": {"properties": {"code": {"const": -32009}}}, "then": {"properties": {"message": {"const": "spawn_failed"}}}},
         {"if": {"properties": {"code": {"const": -32010}}}, "then": {"properties": {"message": {"const": "timeout"}}}},
         {"if": {"properties": {"code": {"const": -32011}}}, "then": {"properties": {"message": {"const": "not_committed"}}}},
-        {"if": {"properties": {"code": {"const": -32012}}}, "then": {"properties": {"message": {"const": "superseded"}}}}, {"if": {"properties": {"code": {"const": -32013}}}, "then": {"properties": {"message": {"const": "name_taken"}}}}, {"if": {"properties": {"code": {"const": -32603}}}, "then": {"properties": {"message": {"const": "internal"}}}},
+        {"if": {"properties": {"code": {"const": -32012}}}, "then": {"properties": {"message": {"const": "superseded"}}}}, {"if": {"properties": {"code": {"const": -32013}}}, "then": {"properties": {"message": {"const": "name_taken"}}}}, {"if": {"properties": {"code": {"const": -32014}}}, "then": {"properties": {"message": {"const": "unknown_host"}}}}, {"if": {"properties": {"code": {"const": -32603}}}, "then": {"properties": {"message": {"const": "internal"}}}},
         {
           "if": {"properties": {"code": {"const": -32009}}, "required": ["code"]},
           "then": {"required": ["data"]},
