@@ -23,8 +23,8 @@ type WorkerCallbacks interface {
 }
 
 type runSlot struct {
-	done                chan struct{}
-	terminal, interrupt bool
+	done      chan struct{}
+	interrupt bool
 }
 
 type Worker struct {
@@ -32,6 +32,8 @@ type Worker struct {
 	dial    func(context.Context, string, string) (net.Conn, error)
 	mu      sync.Mutex
 	conn    *rpc.Conn
+	context context.Context
+	cancel  context.CancelFunc
 	run     *runSlot
 	opened  atomic.Bool
 	once    sync.Once
@@ -62,6 +64,7 @@ func (w *Worker) Serve(ctx context.Context) error {
 		return err
 	}
 	w.conn = rpc.New(fd, true, w.handle)
+	w.context, w.cancel = context.WithCancel(w.conn.Context())
 	request := protocol.WorkerHello{Protocol: 1, LaunchToken: token, HelloDescription: hello}
 	if err = w.conn.Call(ctx, "session.hello", request, &struct{}{}); err == nil {
 		<-w.conn.Done()
@@ -76,13 +79,14 @@ func (w *Worker) Call(ctx context.Context, method string, params, result any) er
 	return w.conn.Call(ctx, method, params, result)
 }
 
-func (w *Worker) handle(ctx context.Context, request *rpc.Request) {
+func (w *Worker) handle(_ context.Context, request *rpc.Request) {
+	ctx := w.context
 	switch request.Method {
 	case "session.superseded":
 		w.reply(w.conn.Result(request, struct{}{}))
 		_ = w.conn.Close()
 	case "session.open":
-		result, err := w.product.Open(ctx, request.Params.(OpenRequest))
+		result, err := w.product.Open(ctx, *request.Params.(*OpenRequest))
 		if err != nil {
 			w.reply(w.conn.Error(request, protocol.SpawnFailed, map[string]any{"stderr_tail": []string{err.Error()}}))
 			return
@@ -99,23 +103,22 @@ func (w *Worker) handle(ctx context.Context, request *rpc.Request) {
 		slot := &runSlot{done: make(chan struct{})}
 		w.run = slot
 		w.mu.Unlock()
-		result, err := w.product.Run(ctx, request.Params.(protocol.TurnRunRequest).Input)
+		result, err := w.product.Run(ctx, request.Params.(*protocol.TurnRunRequest).Input)
 		if err != nil {
 			result = TurnResult{Outcome: "failed", Result: err.Error()}
 		}
 		result.Result, result.Truncated = truncate(result.Result)
 		w.mu.Lock()
-		slot.terminal = true
-		w.mu.Unlock()
 		if _, err = protocol.EncodeResult("turn.run", result); err == nil {
-			w.mu.Lock()
+			err = w.conn.Result(request, result)
+		}
+		if err == nil {
 			if w.run == slot {
 				w.run = nil
 			}
-			w.mu.Unlock()
-			err = w.conn.Result(request, result)
 		}
 		close(slot.done)
+		w.mu.Unlock()
 		w.reply(err)
 	case "turn.interrupt":
 		w.mu.Lock()
@@ -124,7 +127,7 @@ func (w *Worker) handle(ctx context.Context, request *rpc.Request) {
 			w.reply(w.conn.Error(request, protocol.NotRunning, nil))
 			return
 		}
-		call := !w.run.terminal && !w.run.interrupt
+		call := !w.run.interrupt
 		w.run.interrupt = w.run.interrupt || call
 		w.mu.Unlock()
 		if call {
@@ -142,7 +145,7 @@ func (w *Worker) handle(ctx context.Context, request *rpc.Request) {
 			w.reply(w.conn.Result(request, DeliveryReceipt{Disposition: "rejected", Reason: "closing"}))
 			return
 		}
-		receipt, err := w.product.Deliver(ctx, request.Params.(DeliveryRequest))
+		receipt, err := w.product.Deliver(ctx, *request.Params.(*DeliveryRequest))
 		if err != nil {
 			receipt = DeliveryReceipt{Disposition: "rejected", Reason: err.Error()}
 		}
@@ -155,8 +158,8 @@ func (w *Worker) handle(ctx context.Context, request *rpc.Request) {
 			_ = w.conn.Close()
 			return
 		}
-		w.run = &runSlot{terminal: true}
-		interrupt := slot != nil && !slot.terminal && !slot.interrupt
+		w.run = &runSlot{}
+		interrupt := slot != nil && !slot.interrupt
 		if interrupt {
 			slot.interrupt = true
 		}
@@ -167,6 +170,7 @@ func (w *Worker) handle(ctx context.Context, request *rpc.Request) {
 		if slot != nil {
 			<-slot.done
 		}
+		w.cancel()
 		if err := w.closeProduct(ctx); err != nil {
 			w.reply(w.conn.Error(request, protocol.Internal, nil))
 		} else {

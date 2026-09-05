@@ -3,6 +3,7 @@ package rpc
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,9 @@ func TestCallRoundTripAndIncreasingIDs(t *testing.T) {
 			}
 			body, _ := protocol.ResultBytes(id, "session.list", protocol.SessionListResult{Sessions: []protocol.SessionSummary{}})
 			_, _ = peer.Write(body)
+			if id == 1 {
+				_, _ = peer.Write(body)
+			}
 		}
 	}()
 	for range 2 {
@@ -35,6 +39,45 @@ func TestCallRoundTripAndIncreasingIDs(t *testing.T) {
 		if err := c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &result); err != nil {
 			t.Fatal(err)
 		}
+	}
+	c.next = protocol.MaxRequestID
+	if err := c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}); err == nil {
+		t.Fatal("exhausted request id succeeded")
+	}
+}
+
+func TestResponseClaimsTargetBeforeCancelOrClose(t *testing.T) {
+	for _, action := range []string{"cancel", "close"} {
+		t.Run(action, func(t *testing.T) {
+			local, peer := net.Pipe()
+			c, ctx := New(local, true, nil), context.Background()
+			var cancel context.CancelFunc
+			if action == "cancel" {
+				ctx, cancel = context.WithCancel(ctx)
+			}
+			target := &pausedResult{entered: make(chan struct{}), release: make(chan struct{})}
+			done := make(chan error, 1)
+			go func() { done <- c.Call(ctx, "session.list", protocol.SessionListRequest{}, target) }()
+			request := readFrame(t, peer)
+			body, _ := protocol.ResultBytes(request.ID, "session.list", protocol.SessionListResult{Sessions: []protocol.SessionSummary{}})
+			go peer.Write(body)
+			<-target.entered
+			if cancel != nil {
+				cancel()
+			} else {
+				_ = c.Close()
+			}
+			select {
+			case <-done:
+				t.Fatal("call returned while its target was decoding")
+			default:
+			}
+			close(target.release)
+			if err := <-done; err != nil {
+				t.Fatalf("claimed response lost to %s: %v", action, err)
+			}
+			_ = peer.Close()
+		})
 	}
 }
 
@@ -58,7 +101,8 @@ func TestCloseBeforeWriteEmitsNothing(t *testing.T) {
 func TestCloseUnblocksWriter(t *testing.T) {
 	local, peer := net.Pipe()
 	entered := make(chan struct{})
-	c := New(&signalWriteConn{Conn: local, entered: entered}, true, nil)
+	blocked := &signalWriteConn{Conn: local, entered: entered}
+	c := New(blocked, true, nil)
 	returned := asyncCall(c, context.Background())
 	<-entered
 	closed := make(chan struct{})
@@ -70,6 +114,9 @@ func TestCloseUnblocksWriter(t *testing.T) {
 	}
 	if err := <-returned; err == nil {
 		t.Fatal("blocked call succeeded")
+	}
+	if blocked.closes.Load() != 1 {
+		t.Fatalf("closes = %d", blocked.closes.Load())
 	}
 	_ = peer.Close()
 }
@@ -88,7 +135,7 @@ func TestLateResponseDoesNotBlockAndRequestIDsIncrease(t *testing.T) {
 	go func() {
 		body, _ := protocol.ResultBytes(lost.ID, "session.list", protocol.SessionListResult{Sessions: []protocol.SessionSummary{}})
 		_, _ = peer.Write(body)
-		body, _ = protocol.RequestBytes(1, "session.open", protocol.OpenRequest{Name: "lane@local", Groups: []string{}, Open: protocol.OpenOptions{}})
+		body = []byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"unknown\",\"method\":\"session.open\",\"params\":{\"name\":\"lane@local\",\"groups\":[],\"open\":{}}}\n")
 		_, _ = peer.Write(body)
 	}()
 	select {
@@ -99,9 +146,15 @@ func TestLateResponseDoesNotBlockAndRequestIDsIncrease(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("reader blocked on late response")
 	}
-	body, _ := protocol.RequestBytes(1, "session.open", protocol.OpenRequest{Name: "again@local", Groups: []string{}, Open: protocol.OpenOptions{}})
-	go peer.Write(body)
+	bad := []byte("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.open\",\"params\":{\"name\":\"\xff\",\"groups\":[],\"open\":{}}}\n")
+	good, _ := protocol.RequestBytes(3, "session.open", protocol.OpenRequest{Name: "again@local", Groups: []string{}, Open: protocol.OpenOptions{}})
+	go peer.Write(append(bad, good...))
 	<-c.Done()
+	select {
+	case <-requests:
+		t.Fatal("frame after invalid input reached handler")
+	default:
+	}
 }
 
 func TestEOFFailsPendingOnce(t *testing.T) {
@@ -109,6 +162,7 @@ func TestEOFFailsPendingOnce(t *testing.T) {
 	c := New(local, true, nil)
 	returned := asyncCall(c, context.Background())
 	_ = readFrame(t, peer)
+	_, _ = peer.Write([]byte("{"))
 	_ = peer.Close()
 	if err := <-returned; err == nil {
 		t.Fatal("pending call succeeded after EOF")
@@ -188,22 +242,28 @@ func TestCloseCancelsAdmittedHandler(t *testing.T) {
 	}
 }
 
-func TestWriteErrorAndCloseShareTerminalPath(t *testing.T) {
+func TestConcurrentHandlersWriteCompleteFrames(t *testing.T) {
 	local, peer := net.Pipe()
-	entered, release := make(chan struct{}), make(chan struct{})
-	counted := &failingWriteConn{Conn: local, entered: entered, release: release}
-	c := New(counted, true, nil)
-	returned := asyncCall(c, context.Background())
-	<-entered
-	go c.Close()
+	ready, release := sync.WaitGroup{}, make(chan struct{})
+	ready.Add(2)
+	var c *Conn
+	c = New(local, true, func(_ context.Context, request *Request) { ready.Done(); <-release; _ = c.Result(request, struct{}{}) })
+	first, _ := protocol.RequestBytes(1, "session.superseded", struct{}{})
+	second, _ := protocol.RequestBytes(2, "session.superseded", struct{}{})
+	go peer.Write(append(first, second...))
+	ready.Wait()
 	close(release)
-	if <-returned == nil {
-		t.Fatal("write failure succeeded")
+	reader := bufio.NewReader(peer)
+	for range 2 {
+		body, err := reader.ReadBytes('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = protocol.DecodeFrame(body[:len(body)-1]); err != nil {
+			t.Fatal(err)
+		}
 	}
-	<-c.Done()
-	if counted.closes.Load() != 1 {
-		t.Fatalf("closes = %d", counted.closes.Load())
-	}
+	_ = c.Close()
 	_ = peer.Close()
 }
 
@@ -222,12 +282,14 @@ func (c *pauseWriteConn) Write(body []byte) (int, error) {
 type signalWriteConn struct {
 	net.Conn
 	entered chan struct{}
+	closes  atomic.Int32
 }
 
 func (c *signalWriteConn) Write(body []byte) (int, error) {
 	close(c.entered)
 	return c.Conn.Write(body)
 }
+func (c *signalWriteConn) Close() error { c.closes.Add(1); return c.Conn.Close() }
 
 type countCloseConn struct {
 	net.Conn
@@ -236,20 +298,16 @@ type countCloseConn struct {
 
 func (c *countCloseConn) Close() error { c.closes.Add(1); return c.Conn.Close() }
 
-type failingWriteConn struct {
-	net.Conn
-	entered chan struct{}
-	release chan struct{}
-	closes  atomic.Int32
+type pausedResult struct {
+	protocol.SessionListResult
+	entered, release chan struct{}
 }
 
-func (c *failingWriteConn) Write([]byte) (int, error) {
-	close(c.entered)
-	<-c.release
-	return 0, io.ErrClosedPipe
+func (r *pausedResult) UnmarshalJSON(raw []byte) error {
+	close(r.entered)
+	<-r.release
+	return json.Unmarshal(raw, &r.SessionListResult)
 }
-
-func (c *failingWriteConn) Close() error { c.closes.Add(1); return c.Conn.Close() }
 
 func readFrame(t *testing.T, connection net.Conn) protocol.Frame {
 	t.Helper()

@@ -3,7 +3,6 @@ package protocol
 import (
 	"encoding/json"
 	"math"
-	"strconv"
 )
 
 const (
@@ -39,8 +38,8 @@ type ExtraArgument struct {
 type Integer int
 
 func (value *Integer) UnmarshalJSON(raw []byte) error {
-	number, err := strconv.ParseFloat(string(raw), 64)
-	if err != nil || math.Trunc(number) != number {
+	var number float64
+	if json.Unmarshal(raw, &number) != nil || math.Trunc(number) != number {
 		return errInvalid
 	}
 	*value = Integer(number)

@@ -78,10 +78,11 @@ kits emit compact JSON with no insignificant whitespace.
 
 The closed parameter and result shapes are authoritative in
 `bus/internal/protocol/session.schema.json`, re-exported as bytes by each public
-SDK. An implementation decodes each frame into the closed types generated from
-the schema and rejects unknown fields, missing or null required fields, and
-out-of-range values before invoking product code. The schema is the published
-contract and the shared fixture file is its test, not a runtime component. Its
+SDK. An implementation validates each frame against that schema with a small
+interpreter and no validation library, then decodes it into the closed types.
+Unknown fields, missing or null required fields, and out-of-range values are
+rejected before product code runs. The shared fixture file tests the same
+definitions in Go and JavaScript. The schema's
 **440-line cap** includes the optional federated product-discovery and bounded
 turn-result shapes; this
 is list data, never launch authority.
@@ -1037,23 +1038,24 @@ request IDs correlate worker-originated session methods and inbound results, so
 `deliver`, `interrupt`, `session.close`, and those methods all proceed while
 `turn.run` is outstanding.
 
-The run slot is installed before `run()` starts and cleared immediately before
-its validated terminal response is written. A failed write closes the
-connection and cancels any run admitted in between. A second run receives
-`busy` without calling product code. Interrupt atomically marks that slot once
-and invokes `interrupt()` once; concurrent and later interrupt requests for the
-same run return `{}` without a second native call. No kit timeout is involved.
-
-If `run()` has returned but its response has not yet been written, interrupt
-returns `{}` without invoking native code. The run handler alone writes the run
+The run slot is installed before `run()` starts. Under one slot mutex, the run
+handler validates the terminal result, writes its response, and clears the
+slot. A failed write closes the connection and leaves the slot occupied. A
+second run receives `busy` while native work remains; one arriving during the
+terminal write waits on the mutex and is admitted after the slot clears.
+Interrupt marks the slot once and invokes `interrupt()` once; concurrent and
+later interrupt requests for the same run return `{}` without a second native
+call. After the terminal response and slot clear, interrupt returns
+`not_running`. No kit timeout is involved. The run handler alone writes the run
 response; close may await the slot's completion signal but never owns that
 response.
 
 The worker handles one `session.close`: it first claims an empty run slot or
 joins the existing run, invokes the shared interrupt once without awaiting that
-callback, awaits the run result when present, calls `close()` once, writes one
-response, and closes the socket. A second close frame is the protocol violation
-defined in Section 2.4. One `sync.Once` arbitrates the product's `close()` call
+callback, awaits the run result when present, cancels every callback context,
+calls `close()` once, writes one response, and closes the socket. A second close
+frame is the protocol violation defined in Section 2.4. One `sync.Once`
+arbitrates the product's `close()` call
 between this orderly path and EOF; there are no close waiters or stored close
 results. A hanging interrupt cannot hide an available terminal. This entire
 interrupt/terminal/native-close sequence must fit within the daemon's single
@@ -1101,15 +1103,17 @@ the shared fixtures; a later Python SDK is a translation of this surface, not a
 new contract.
 
 The Go host and JavaScript worker mode implement the preceding algorithm, not
-two interpretations of it. Both are tested against the published
+two interpretations of it. Each uses a small interpreter over the published
+schema with no external validation library. Both are tested against
 `bus/internal/protocol/session.fixtures.json`, and both run the same ordinary
 table-driven lifecycle cases with fake product callbacks and a fake duplex
-connection. The schema and fixtures are build artifacts for vendors to test
-their kits; neither is a runtime validator. The lifecycle cases are:
+connection. The schema and fixtures are published for vendors to test their
+kits. The lifecycle cases are:
 
 1. app-ready hello, one open, and worker-originated session methods rejected before the open
    result but accepted on the same connection after it;
-2. describe hello followed by EOF, proving open and close are never called;
+2. describe hello followed by EOF before its acknowledgement, proving open and
+   close are never called;
 3. completed, interrupted, and failed run results, including empty output and
    character-bounded truncation with the exact `truncated` flag;
 4. a blocked run plus a second run rejected before product code;
@@ -1124,11 +1128,11 @@ their kits; neither is a runtime validator. The lifecycle cases are:
    updating name/info with identical groups, changed-group rejection,
    different-ID identity replacement on the same socket, and worker re-hello
    rejection;
-10. malformed, unknown, oversized, and out-of-range-ID frames rejected before
-    a callback;
-11. a terminal returned before interrupt is decoded, proving no native
-    interrupt call;
-12. idle close followed by delivery, proving `closing` and zero delivery calls;
+10. a worker re-hello rejected before a product callback;
+11. a terminal response followed by interrupt, proving `not_running` and no
+    native interrupt call;
+12. delivery first and another delivery during close, proving cancellation of
+    the first callback and `closing` before a second product call;
 13. a non-run callback that originates a session method and receives its response;
     and
 14. endpoint selection plus single launch-token/local-key reads and secret

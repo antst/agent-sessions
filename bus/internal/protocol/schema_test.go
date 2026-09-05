@@ -186,6 +186,21 @@ func TestSchemaDefinitions(t *testing.T) {
 	}
 }
 
+func TestMinimalInterpreterRejectsUnknownKeywords(t *testing.T) {
+	if checkSchemaNode(schemaDefinitions, schemaNode{"pattern": "x"}) == nil {
+		t.Fatal("unknown keyword accepted")
+	}
+	if checkSchemaNode(schemaDefinitions, schemaNode{"$ref": "#/$defs/Missing"}) == nil {
+		t.Fatal("unknown reference accepted")
+	}
+	if !validSchemaNode(schemaNode{"type": "object", "minProperties": float64(1)}, map[string]any{"x": true}) || validSchemaNode(schemaNode{"type": "object", "minProperties": float64(1)}, map[string]any{}) {
+		t.Fatal("minProperties not enforced")
+	}
+	if !validSchemaNode(schemaNode{"type": "integer", "exclusiveMinimum": float64(1)}, float64(2)) || validSchemaNode(schemaNode{"type": "integer", "exclusiveMinimum": float64(1)}, float64(1)) {
+		t.Fatal("exclusiveMinimum not enforced")
+	}
+}
+
 func TestGeneratedProtocolMatchesDesign(t *testing.T) {
 	design, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "designs", "UNIVERSAL-SESSION-PROTOCOL.md"))
 	if err != nil {

@@ -72,10 +72,11 @@ kits emit compact JSON with no insignificant whitespace.
 
 The closed parameter and result shapes are authoritative in
 `bus/internal/protocol/session.schema.json`, re-exported as bytes by each public
-SDK. An implementation decodes each frame into the closed types generated from
-the schema and rejects unknown fields, missing or null required fields, and
-out-of-range values before invoking product code. The schema is the published
-contract and the shared fixture file is its test, not a runtime component. Its
+SDK. An implementation validates each frame against that schema with a small
+interpreter and no validation library, then decodes it into the closed types.
+Unknown fields, missing or null required fields, and out-of-range values are
+rejected before product code runs. The shared fixture file tests the same
+definitions in Go and JavaScript. The schema's
 **440-line cap** includes the optional federated product-discovery and bounded
 turn-result shapes; this
 is list data, never launch authority.

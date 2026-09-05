@@ -86,8 +86,10 @@ func (c *Conn) Call(ctx context.Context, method string, params, result any) erro
 	case err := <-p.done:
 		return err
 	case <-ctx.Done():
-		c.drop(id, p)
-		return ctx.Err()
+		if c.drop(id, p) {
+			return ctx.Err()
+		}
+		return <-p.done
 	}
 }
 
@@ -140,7 +142,7 @@ func (c *Conn) read() {
 			c.close(err)
 			return
 		}
-		if frame.Request {
+		if frame.Method != "" {
 			c.receiveRequest(frame)
 		} else {
 			c.receiveResponse(frame)
@@ -155,22 +157,25 @@ func (c *Conn) receiveRequest(frame protocol.Frame) {
 		c.last = frame.ID
 	}
 	c.stateMu.Unlock()
-	params, err := protocol.DecodeParams(frame.Method, frame.Params)
 	if !ordered {
 		c.close(errors.New("request id is not increasing"))
-	} else if err != nil || !protocol.Allows(frame.Method, !c.client) {
-		go func() {
-			_ = c.Error(&Request{ID: frame.ID, Method: frame.Method}, protocol.InvalidFrame, nil)
-			_ = c.Close()
-		}()
-	} else {
-		go c.handler(c.ctx, &Request{ID: frame.ID, Method: frame.Method, Params: params})
+		return
 	}
+	params, err := protocol.DecodeParams(frame.Method, frame.Params)
+	request := &Request{ID: frame.ID, Method: frame.Method, Params: params}
+	if err != nil || !protocol.Allows(frame.Method, !c.client) {
+		c.close(errors.New("invalid frame"))
+		return
+	}
+	go c.handler(c.ctx, request)
 }
 
 func (c *Conn) receiveResponse(frame protocol.Frame) {
 	c.stateMu.Lock()
 	p, ok := c.pending[frame.ID]
+	if ok {
+		delete(c.pending, frame.ID)
+	}
 	c.stateMu.Unlock()
 	if !ok {
 		c.logged.Do(func() { log.Printf("agentbus: dropping unmatched response id %d", frame.ID) })
@@ -180,12 +185,9 @@ func (c *Conn) receiveResponse(frame protocol.Frame) {
 	if frame.Error == nil {
 		if err = protocol.UnmarshalResult(p.method, frame.Result, p.result); err != nil {
 			c.close(err)
-			return
 		}
 	}
-	if c.drop(frame.ID, p) {
-		p.done <- err
-	}
+	p.done <- err
 }
 
 func (c *Conn) drop(id int64, want pending) bool {

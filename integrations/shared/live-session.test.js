@@ -9,7 +9,7 @@ const test = require("node:test");
 
 const { CLIENT_OPERATIONS, METHOD_DEFINITIONS, InactiveError, LiveSessionClient, readConfiguration, renderDelivery } = require("./live-session.js");
 
-const SESSION_SCHEMA_KEYS = new Set(["$ref", "type", "additionalProperties", "required", "properties", "allOf", "if", "then", "else", "not", "items", "uniqueItems", "enum", "const", "minLength", "maxLength", "minimum"]);
+const SESSION_SCHEMA_KEYS = new Set(["$ref", "type", "additionalProperties", "required", "properties", "allOf", "if", "then", "else", "not", "items", "uniqueItems", "enum", "const", "minProperties", "minLength", "maxLength", "minimum", "exclusiveMinimum"]);
 
 function compileSessionSchema(root) {
   const defs = root && Object.getPrototypeOf(root) === Object.prototype && root.$defs;
@@ -45,8 +45,9 @@ function validSessionSchemaNode(root, node, value) {
   if (Object.hasOwn(node, "const") && JSON.stringify(value) !== JSON.stringify(node.const)) return false;
   if (node.enum && !node.enum.some((item) => JSON.stringify(value) === JSON.stringify(item))) return false;
   if (typeof value === "string" && (node.minLength > [...value].length || node.maxLength < [...value].length)) return false;
-  if (typeof value === "number" && node.minimum > value) return false;
+  if (typeof value === "number" && (node.minimum > value || Object.hasOwn(node, "exclusiveMinimum") && node.exclusiveMinimum >= value)) return false;
   if (value && !Array.isArray(value) && typeof value === "object") {
+    if (Object.hasOwn(node, "minProperties") && Object.keys(value).length < node.minProperties) return false;
     if (node.required?.some((key) => !Object.hasOwn(value, key))) return false;
     if (node.additionalProperties === false && Object.keys(value).some((key) => !Object.hasOwn(node.properties ?? {}, key))) return false;
     if (node.properties && !Object.entries(node.properties).every(([key, child]) => !Object.hasOwn(value, key) || validSessionSchemaNode(root, child, value[key]))) return false;

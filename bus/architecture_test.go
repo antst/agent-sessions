@@ -39,6 +39,20 @@ func TestBusAndWrappersKeepTheSplitReadyBoundary(t *testing.T) {
 			t.Errorf("%s bypasses the public Go kit with %s", path, imported)
 		}
 	})
+	t.Run("wrapper imports", func(t *testing.T) {
+		sources := 0
+		if err := filepath.WalkDir(filepath.Join(repository, "wrappers"), func(path string, entry fs.DirEntry, err error) error {
+			if err == nil && !entry.IsDir() && filepath.Ext(path) == ".go" {
+				sources++
+			}
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if sources == 0 {
+			t.Skip("no wrapper sources yet")
+		}
+	})
 }
 
 func TestBusSourceContainsNoProductNames(t *testing.T) {
