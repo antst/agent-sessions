@@ -75,7 +75,8 @@ and sets `truncated:true`. Both
 kits emit compact JSON with no insignificant whitespace.
 
 The closed parameter and result shapes are authoritative in
-`bus/protocol/session.schema.json`. The schema uses only the shared
+`bus/internal/protocol/session.schema.json`, re-exported as bytes by each public
+SDK. The schema uses only the shared
 minimal validator vocabulary, including `maxLength` alongside `minLength`; both
 validator allowlists and their shared authority test name it. An implementation rejects a frame before invoking
 product code if the corresponding definition does not validate it. Its
@@ -752,7 +753,7 @@ response or error. It stores no remote state and never retries.
 
 The repository has two literal, split-ready top-level trees. `bus/` contains
 the daemon and hub commands, `bus/internal/daemon`, generic connection and
-process internals, `bus/protocol` as the single schema/fixture authority,
+process internals, `bus/internal/protocol` as the single schema/fixture authority,
 conformance references, and the public `bus/sdk/go` and `bus/sdk/js` kits.
 `wrappers/` contains every product-named launcher, resident wrapper, plugin,
 and packaging projection. A future repository split can use `git subtree`
@@ -779,7 +780,8 @@ boundary mechanically while leaving each SDK a clean public import path.
 An architecture test rejects every `bus/` import of `wrappers/`, every wrapper
 import of `bus/internal`, and every real product-name token under `bus/` source
 except opaque values in the optional products configuration and explanatory
-documentation. Both SDKs embed or consume the one authority in `bus/protocol`;
+documentation. Both SDKs consume the one authority in `bus/internal/protocol`
+through their public schema-byte exports;
 no schema or fixture copy exists.
 
 `internal/productruntime` dies completely. Its driver interfaces, per-product
@@ -1001,9 +1003,10 @@ delivery, and worker-originated session-method API are otherwise shared.
 ### 3.3 Go and JavaScript parity
 
 The Go host and JavaScript worker mode implement the preceding algorithm, not
-two interpretations of it. Both load `bus/protocol/session.schema.json` and
+two interpretations of it. Both load the schema through their public SDK,
+whose embedded authority is `bus/internal/protocol/session.schema.json`, and
 both run one declarative table,
-`bus/protocol/session-lifecycle.fixtures.json`. The table drives fake
+`bus/internal/protocol/session-lifecycle.fixtures.json`. The table drives fake
 product callbacks and a fake duplex connection; it contains at least these
 rows:
 
@@ -1330,7 +1333,7 @@ owner-controlled.
 
 | Phase | Source deliverable | Gate | Runtime rule |
 | ---: | --- | --- | --- |
-| 0 | Signed document, `bus/protocol` schema and shared validator fixtures, generated protocol, architecture boundaries, and deletion ledger. | Schema validates in Go and JavaScript; method/error tables are byte-identical; deletion counts reproduce from c5b280d; `bus/` has no wrapper import or product token. | No installed daemon or product runtime. |
+| 0 | Signed document, `bus/internal/protocol` schema and shared validator fixtures re-exported by the public SDKs, generated protocol, architecture boundaries, and deletion ledger. | Schema validates in Go and JavaScript; method/error tables are byte-identical; deletion counts reproduce from c5b280d; `bus/` has no wrapper import or product token. | No installed daemon or product runtime. |
 | 1 | `bus/sdk/go` worker kit, universal daemon, durable lane table, Go caller kit, reference caller, and token-selected `bus/cmd/example-peer` reference worker. | Daemon caps hold; unit/race/vet/build green; an in-process restart with durable rows proves every row loads offline with empty maps/reservations and no spawn; old actor/driver/control packages are absent; contract learned nothing from adapters: **yes**. | Installed-daemon integration runs only on `umka-dev1`, against an empty universal table. |
 | 2 | JavaScript worker kit, JavaScript caller kit, then the unified DSH plugin/profile. | All 14 shared lifecycle fixtures pass in both worker kits; DSH passes both cells in Section 5.5. | DSH installed-product proof only on `umka-dev1`; no other product is enabled. |
 | 3 | `wrappers/` resident lane binaries and peer integrations in order: Claude, Codex, Grok, Qwen, OpenCode, Kilo, Pi, OMP. | Each product meets its size/exception ledger and passes its two conformance cells before the next product is enabled. | Product runtime proof only on `umka-dev1`; failures do not enable a compatibility path. |
@@ -1462,7 +1465,7 @@ Before its conformance cells, each product has a named `umka-dev1` probe:
 | Go/JavaScript lifecycle duplication | The one 14-row fixture table runs unchanged through both native kits and the reference worker. |
 | Connector and plugin tool tests | Caller-kit conformance C1-C9 through the installed peer MCP/plugin entry, with product-private transport tested only at its local boundary. |
 | Packaging and release projections | Package tests assert one schema/kit projection, correct peer and lane entry forms, no deleted compatibility artifact, and byte-identical installed assets. |
-| Protocol and design documentation | Generate `bus/docs/PROTOCOL.md` from Sections 1 and 3.1 verbatim, with this document as the sole source and `bus/protocol` as the sole schema/fixture authority. Delete every superseded lane-convergence, presence-supersession, adapter-boundary, and DSH-adapter note under `docs/designs`; do not retain archived or paraphrased protocol authorities. |
+| Protocol and design documentation | Generate `bus/docs/PROTOCOL.md` from Sections 1 and 3.1 verbatim, with this document as the sole source and `bus/internal/protocol` as the sole embedded schema/fixture authority re-exported by the public SDKs. Delete every superseded lane-convergence, presence-supersession, adapter-boundary, and DSH-adapter note under `docs/designs`; do not retain archived or paraphrased protocol authorities. |
 
 Rehoming is mandatory proof, not permission to preserve a deleted abstraction
 under a new test helper. Every deleted test is named in the implementation
