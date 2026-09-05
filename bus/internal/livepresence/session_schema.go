@@ -35,7 +35,7 @@ func CompileSessionSchema(raw []byte) (*SessionSchema, error) {
 		return nil, errors.New("session schema has no definitions")
 	}
 	compiler := jsonschema.NewCompiler()
-	const resource = "https://agent-sessions.invalid/session.schema.json"
+	const resource = "https://agentbus.invalid/session.schema.json"
 	if err := compiler.AddResource(resource, bytes.NewReader(raw)); err != nil {
 		return nil, err
 	}

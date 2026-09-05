@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:agent-sessions:universal-session:v1",
+  "$id": "urn:agentbus:session:v1",
   "$defs": {
     "SessionHelloRequest": {
       "type": "object",
@@ -347,8 +347,8 @@
       "additionalProperties": false,
       "required": ["code", "message"],
       "properties": {
-        "code": {"enum": [-32600, -32602, -32603, -32001, -32002, -32003, -32004, -32005, -32007, -32008, -32009, -32010, -32011, -32012, -32013, -32014]},
-        "message": {"enum": ["invalid_frame", "invalid_hello", "internal", "unknown_session", "not_connected", "busy", "not_running", "already_connected", "unknown_product", "unsupported_open_field", "spawn_failed", "timeout", "not_committed", "superseded", "name_taken", "unknown_host"]},
+        "code": {"enum": [-32600, -32602, -32603, -32001, -32002, -32003, -32004, -32005, -32007, -32008, -32009, -32010, -32011, -32012, -32013, -32014, -32015]},
+        "message": {"enum": ["invalid_frame", "invalid_hello", "internal", "unknown_session", "not_connected", "busy", "not_running", "already_connected", "unknown_product", "unsupported_open_field", "spawn_failed", "timeout", "not_committed", "superseded", "name_taken", "unknown_host", "forward_lost"]},
         "data": {"$ref": "#/$defs/SpawnFailedData"}
       },
       "allOf": [
@@ -364,7 +364,7 @@
         {"if": {"properties": {"code": {"const": -32009}}}, "then": {"properties": {"message": {"const": "spawn_failed"}}}},
         {"if": {"properties": {"code": {"const": -32010}}}, "then": {"properties": {"message": {"const": "timeout"}}}},
         {"if": {"properties": {"code": {"const": -32011}}}, "then": {"properties": {"message": {"const": "not_committed"}}}},
-        {"if": {"properties": {"code": {"const": -32012}}}, "then": {"properties": {"message": {"const": "superseded"}}}}, {"if": {"properties": {"code": {"const": -32013}}}, "then": {"properties": {"message": {"const": "name_taken"}}}}, {"if": {"properties": {"code": {"const": -32014}}}, "then": {"properties": {"message": {"const": "unknown_host"}}}}, {"if": {"properties": {"code": {"const": -32603}}}, "then": {"properties": {"message": {"const": "internal"}}}},
+        {"if": {"properties": {"code": {"const": -32012}}}, "then": {"properties": {"message": {"const": "superseded"}}}}, {"if": {"properties": {"code": {"const": -32013}}}, "then": {"properties": {"message": {"const": "name_taken"}}}}, {"if": {"properties": {"code": {"const": -32014}}}, "then": {"properties": {"message": {"const": "unknown_host"}}}}, {"if": {"properties": {"code": {"const": -32015}}}, "then": {"properties": {"message": {"const": "forward_lost"}}}}, {"if": {"properties": {"code": {"const": -32603}}}, "then": {"properties": {"message": {"const": "internal"}}}},
         {
           "if": {"properties": {"code": {"const": -32009}}, "required": ["code"]},
           "then": {"required": ["data"]},

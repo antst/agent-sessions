@@ -1,5 +1,5 @@
 // Package sessionkit is the product-agnostic Go implementation of the
-// universal Agent Sessions worker contract.
+// universal Agentbus worker contract.
 package sessionkit
 
 import (
@@ -16,19 +16,9 @@ import (
 
 const maxTextCharacters = 262144
 
-type (
-	ExtraArgument   = livepresence.SessionExtraArgument
-	Hello           = livepresence.SessionHello
-	OpenRequest     = livepresence.SessionOpenRequest
-	OpenResult      = livepresence.SessionOpenResult
-	TurnResult      = livepresence.SessionTurnResult
-	DeliveryRequest = livepresence.SessionDeliveryRequest
-	DeliveryReceipt = livepresence.SessionDeliveryReceipt
-)
-
-// Product is the six-callback surface implemented by a native product.
-type Product interface {
-	Hello(context.Context) (Hello, error)
+// WorkerCallbacks is the six-callback surface implemented by a native product.
+type WorkerCallbacks interface {
+	Hello(context.Context) (HelloDescription, error)
 	Open(context.Context, OpenRequest) (OpenResult, error)
 	Run(context.Context, string) (TurnResult, error)
 	Interrupt(context.Context) error
@@ -39,41 +29,47 @@ type Product interface {
 type DialFunc func(context.Context, string, string) (net.Conn, error)
 
 type runSlot struct {
-	done                  chan struct{}
+	runDone, closeDone    chan struct{}
 	terminal, interrupted bool
+	closeErr              error
+	waiters               atomic.Int32
 }
 
 type Worker struct {
-	product Product
+	product WorkerCallbacks
 	dial    DialFunc
 
-	mu                  sync.Mutex
-	rpc                 *livepresence.SessionRPC
-	root                context.Context
-	cancel              context.CancelFunc
-	run                 *runSlot
-	openClaimed, opened atomic.Bool
-	closing             atomic.Bool
-	closeOnce, stopOnce sync.Once
-	closeErr            error
-	handlers            sync.WaitGroup
-	closed              chan struct{}
+	mu                    sync.Mutex
+	rpc                   *livepresence.SessionRPC
+	root                  context.Context
+	cancel                context.CancelFunc
+	run                   *runSlot
+	openClaimed           bool
+	opened                atomic.Bool
+	closeOnce, finishOnce sync.Once
+	closeErr              error
+	handlers              sync.WaitGroup
+	fatal                 chan error
+	closed                chan struct{}
 }
 
-func NewWorker(product Product, dial DialFunc) *Worker {
+func NewWorker(product WorkerCallbacks, dial DialFunc) *Worker {
 	if dial == nil {
 		dial = plainDial
 	}
-	return &Worker{product: product, dial: dial, closed: make(chan struct{})}
+	return &Worker{product: product, dial: dial, fatal: make(chan error, 1), closed: make(chan struct{})}
 }
 
 func (w *Worker) Closed() <-chan struct{} { return w.closed }
 
 func (w *Worker) Serve(ctx context.Context) error {
-	defer w.stop()
+	defer close(w.closed)
 	endpoint, token, key, err := workerEnvironment()
 	if err != nil {
 		return err
+	}
+	if key != "" {
+		return errors.New("local key transport not implemented in this build")
 	}
 	hello, err := w.product.Hello(ctx)
 	if err != nil {
@@ -95,17 +91,18 @@ func (w *Worker) Serve(ctx context.Context) error {
 	request := struct {
 		Protocol    int    `json:"protocol"`
 		LaunchToken string `json:"launch_token"`
-		Hello
+		HelloDescription
 	}{1, token, hello}
 	if err = rpc.Call(ctx, true, "session.hello", request, &struct{}{}); err == nil {
-		err = <-readErr
+		select {
+		case err = <-readErr:
+		case err = <-w.fatal:
+		}
 	}
 	w.cancel()
+	_ = rpc.Close()
 	w.handlers.Wait()
 	_ = w.closeProduct()
-	if w.closing.Load() {
-		return nil
-	}
 	return err
 }
 
@@ -123,57 +120,76 @@ func (w *Worker) read() error {
 			_ = w.rpc.Result(frame, struct{}{})
 			return errors.New("session superseded")
 		}
-		w.handlers.Add(1)
-		go func() { defer w.handlers.Done(); w.handle(frame) }()
+		w.mu.Lock()
+		switch frame.Method {
+		case "session.open":
+			invalid := w.openClaimed || w.run != nil
+			w.openClaimed = true
+			w.dispatch(func() { w.handleOpen(frame, invalid) })
+		case "turn.run":
+			busy := !w.opened.Load() || w.run != nil
+			var slot *runSlot
+			if !busy {
+				slot = &runSlot{runDone: make(chan struct{})}
+				w.run = slot
+			}
+			w.dispatch(func() { w.handleRun(frame, slot, busy) })
+		case "turn.interrupt":
+			missing := w.run == nil || w.run.runDone == nil
+			call := !missing && !w.run.terminal && !w.run.interrupted
+			if call {
+				w.run.interrupted = true
+			}
+			w.dispatch(func() { w.handleInterrupt(frame, call, missing) })
+		case "message.deliver":
+			closing := w.run != nil && w.run.closeDone != nil
+			w.dispatch(func() { w.handleDeliver(frame, closing) })
+		case "session.close":
+			if w.run == nil {
+				w.run = &runSlot{}
+			}
+			slot, owner := w.run, w.run.closeDone == nil
+			if owner {
+				slot.closeDone = make(chan struct{})
+			}
+			slot.waiters.Add(1)
+			interrupt := owner && slot.runDone != nil && !slot.terminal && !slot.interrupted
+			slot.interrupted = slot.interrupted || interrupt
+			w.dispatch(func() { w.handleClose(frame, slot, owner, interrupt) })
+		}
+		w.mu.Unlock()
 	}
 }
 
-func (w *Worker) handle(frame livepresence.Frame) {
-	switch frame.Method {
-	case "session.open":
-		w.handleOpen(frame)
-	case "turn.run":
-		w.handleRun(frame)
-	case "turn.interrupt":
-		w.handleInterrupt(frame)
-	case "message.deliver":
-		w.handleDeliver(frame)
-	case "session.close":
-		w.handleClose(frame)
-	}
+func (w *Worker) dispatch(callback func()) {
+	w.handlers.Add(1)
+	go func() { defer w.handlers.Done(); callback() }()
 }
 
-func (w *Worker) handleOpen(frame livepresence.Frame) {
+func (w *Worker) handleOpen(frame livepresence.Frame, invalid bool) {
 	var request OpenRequest
 	_ = livepresence.DecodeStrict(frame.Params, &request)
-	if !w.openClaimed.CompareAndSwap(false, true) || w.closing.Load() {
-		_ = w.rpc.Error(frame, livepresence.SessionInvalidFrame, "invalid_frame", nil)
+	if invalid {
+		w.reply(w.rpc.Error(frame, livepresence.SessionInvalidFrame, "invalid_frame", nil))
 		return
 	}
 	result, err := w.product.Open(w.root, request)
 	if err != nil {
-		_ = w.rpc.Error(frame, livepresence.SessionSpawnFailed, "spawn_failed", map[string]any{"stderr_tail": []string{err.Error()}})
+		w.reply(w.rpc.Error(frame, livepresence.SessionSpawnFailed, "spawn_failed", map[string]any{"stderr_tail": []string{err.Error()}}))
 		return
 	}
 	w.opened.Store(true)
-	_ = w.rpc.Result(frame, result)
+	w.reply(w.rpc.Result(frame, result))
 }
 
-func (w *Worker) handleRun(frame livepresence.Frame) {
+func (w *Worker) handleRun(frame livepresence.Frame, slot *runSlot, busy bool) {
 	var request struct {
 		SessionID string `json:"session_id"`
 		Input     string `json:"input"`
 	}
 	_ = livepresence.DecodeStrict(frame.Params, &request)
-	slot := &runSlot{done: make(chan struct{})}
-	w.mu.Lock()
-	busy := !w.opened.Load() || w.run != nil && !w.run.terminal || w.closing.Load()
-	if !busy {
-		w.run = slot
-	}
-	w.mu.Unlock()
 	if busy {
-		_ = w.rpc.Error(frame, livepresence.SessionBusy, "busy", nil)
+		w.reply(w.rpc.Error(frame, livepresence.SessionBusy, "busy", nil))
 		return
 	}
 	result, err := w.product.Run(w.root, request.Input)
@@ -183,41 +199,34 @@ func (w *Worker) handleRun(frame livepresence.Frame) {
 	result.Result, result.Truncated = truncate(result.Result)
 	w.mu.Lock()
 	slot.terminal = true
-	w.mu.Unlock()
-	_ = w.rpc.Result(frame, result)
-	w.mu.Lock()
-	if w.run == slot {
+	err = w.rpc.Result(frame, result)
+	close(slot.runDone)
+	if err == nil && w.run == slot && slot.closeDone == nil {
 		w.run = nil
 	}
-	close(slot.done)
 	w.mu.Unlock()
+	if err != nil {
+		w.finish(err)
+	}
 }
 
-func (w *Worker) handleInterrupt(frame livepresence.Frame) {
-	w.mu.Lock()
-	slot := w.run
-	if slot == nil {
-		w.mu.Unlock()
-		_ = w.rpc.Error(frame, livepresence.SessionNotRunning, "not_running", nil)
+func (w *Worker) handleInterrupt(frame livepresence.Frame, call, missing bool) {
+	if missing {
+		w.reply(w.rpc.Error(frame, livepresence.SessionNotRunning, "not_running", nil))
 		return
 	}
-	call := !slot.terminal && !slot.interrupted
-	if call {
-		slot.interrupted = true
-	}
-	w.mu.Unlock()
 	if call {
 		if err := w.product.Interrupt(w.root); err != nil {
-			_ = w.rpc.Error(frame, livepresence.SessionInternal, "internal", nil)
+			w.reply(w.rpc.Error(frame, livepresence.SessionInternal, "internal", nil))
 			return
 		}
 	}
-	_ = w.rpc.Result(frame, struct{}{})
+	w.reply(w.rpc.Result(frame, struct{}{}))
 }
 
-func (w *Worker) handleDeliver(frame livepresence.Frame) {
-	if w.closing.Load() {
-		_ = w.rpc.Result(frame, DeliveryReceipt{Disposition: "rejected", Reason: "closing"})
+func (w *Worker) handleDeliver(frame livepresence.Frame, closing bool) {
+	if closing {
+		w.reply(w.rpc.Result(frame, DeliveryReceipt{Disposition: "rejected", Reason: "closing"}))
 		return
 	}
 	var request DeliveryRequest
@@ -226,33 +235,50 @@ func (w *Worker) handleDeliver(frame livepresence.Frame) {
 	if err != nil {
 		receipt = DeliveryReceipt{Disposition: "rejected", Reason: err.Error()}
 	}
-	_ = w.rpc.Result(frame, receipt)
+	w.reply(w.rpc.Result(frame, receipt))
 }
 
-func (w *Worker) handleClose(frame livepresence.Frame) {
-	if !w.closing.CompareAndSwap(false, true) {
-		_ = w.rpc.Error(frame, livepresence.SessionBusy, "busy", nil)
-		return
+func (w *Worker) handleClose(frame livepresence.Frame, slot *runSlot, owner, interrupt bool) {
+	if owner {
+		if interrupt {
+			go w.product.Interrupt(w.root)
+		}
+		if slot.runDone != nil {
+			<-slot.runDone
+		}
+		err := w.closeProduct()
+		w.mu.Lock()
+		slot.closeErr = err
+		close(slot.closeDone)
+		w.mu.Unlock()
 	}
+	<-slot.closeDone
 	w.mu.Lock()
-	slot := w.run
-	interrupt := slot != nil && !slot.terminal && !slot.interrupted
-	if interrupt {
-		slot.interrupted = true
-	}
+	closeErr := slot.closeErr
 	w.mu.Unlock()
-	if interrupt {
-		go w.product.Interrupt(w.root)
-	}
-	if slot != nil {
-		<-slot.done
-	}
-	if err := w.closeProduct(); err != nil {
-		_ = w.rpc.Error(frame, livepresence.SessionInternal, "internal", nil)
+	var replyErr error
+	if closeErr != nil {
+		replyErr = w.rpc.Error(frame, livepresence.SessionInternal, "internal", nil)
 	} else {
-		_ = w.rpc.Result(frame, struct{}{})
+		replyErr = w.rpc.Result(frame, struct{}{})
 	}
-	w.stop()
+	last := slot.waiters.Add(-1) == 0
+	if replyErr != nil || last {
+		w.finish(replyErr)
+	}
+}
+
+func (w *Worker) finish(err error) {
+	w.finishOnce.Do(func() {
+		w.fatal <- err
+		_ = w.rpc.Close()
+	})
+}
+
+func (w *Worker) reply(err error) {
+	if err != nil {
+		w.finish(err)
+	}
 }
 
 func (w *Worker) closeProduct() error {
@@ -264,37 +290,22 @@ func (w *Worker) closeProduct() error {
 	return w.closeErr
 }
 
-func (w *Worker) stop() {
-	w.stopOnce.Do(func() {
-		if w.cancel != nil {
-			w.cancel()
-		}
-		if w.rpc != nil {
-			_ = w.rpc.Close()
-		}
-		close(w.closed)
-	})
-}
-
 func workerEnvironment() (endpoint, token, key string, err error) {
-	token, ok := os.LookupEnv("AGENT_SESSIONS_LAUNCH_TOKEN")
-	key = os.Getenv("AGENT_SESSIONS_LOCAL_KEY")
-	_ = os.Unsetenv("AGENT_SESSIONS_LAUNCH_TOKEN")
-	_ = os.Unsetenv("AGENT_SESSIONS_LOCAL_KEY")
+	token, ok := os.LookupEnv("AGENTBUS_LAUNCH_TOKEN")
+	key = os.Getenv("AGENTBUS_LOCAL_KEY")
+	_ = os.Unsetenv("AGENTBUS_LAUNCH_TOKEN")
+	_ = os.Unsetenv("AGENTBUS_LOCAL_KEY")
 	if !ok || token == "" {
 		return "", "", "", errors.New("launch token is required")
 	}
-	endpoint = os.Getenv("AGENT_SESSIONS_SOCKET")
+	endpoint = os.Getenv("AGENTBUS_SOCKET")
 	if endpoint == "" {
 		endpoint, err = stateroot.SessionSocket()
 	}
 	return endpoint, token, key, nil
 }
 
-func plainDial(ctx context.Context, endpoint, key string) (net.Conn, error) {
-	if key != "" {
-		return nil, errors.New("daemon requires local TLS support")
-	}
+func plainDial(ctx context.Context, endpoint, _ string) (net.Conn, error) {
 	return (&net.Dialer{}).DialContext(ctx, "unix", endpoint)
 }
 

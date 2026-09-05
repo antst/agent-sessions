@@ -105,6 +105,7 @@
     {"name":"error superseded","definition":"RPCError","valid":true,"value":{"code":-32012,"message":"superseded"}},
     {"name":"error name taken","definition":"RPCError","valid":true,"value":{"code":-32013,"message":"name_taken"}},
     {"name":"error unknown host","definition":"RPCError","valid":true,"value":{"code":-32014,"message":"unknown_host"}},
+    {"name":"error forward lost","definition":"RPCError","valid":true,"value":{"code":-32015,"message":"forward_lost"}},
     {"name":"error mismatched pair","definition":"RPCError","valid":false,"value":{"code":-32001,"message":"busy"}},
     {"name":"error spawn missing data","definition":"RPCError","valid":false,"value":{"code":-32009,"message":"spawn_failed"}},
     {"name":"error nonspawn data","definition":"RPCError","valid":false,"value":{"code":-32010,"message":"timeout","data":{"stderr_tail":[]}}},

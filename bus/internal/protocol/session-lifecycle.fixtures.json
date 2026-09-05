@@ -8,7 +8,7 @@
     {"name":"full-duplex","proof":["deliver_while_running","worker_method_while_running"]},
     {"name":"close-during-run","proof":["run_response_before_close_response"]},
     {"name":"eof-during-run","proof":["callbacks_cancelled","pending_failed","close_once"]},
-    {"name":"peer-lifetime","proof":["eof_reconnect","superseded_terminal"]},
+    {"name":"peer-lifetime","proof":["eof_reconnect","superseded_terminal","same_id_rehello","changed_groups_rejected","different_id_replaced","worker_rehello_rejected"]},
     {"name":"invalid-frames","proof":["malformed","unknown","oversized","unsafe_id","callbacks_zero"]},
     {"name":"terminal-before-interrupt","proof":["interrupt_calls_zero"]},
     {"name":"idle-close-deliver","proof":["rejected_closing","deliver_calls_zero"]},

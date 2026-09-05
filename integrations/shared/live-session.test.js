@@ -10,8 +10,8 @@ const test = require("node:test");
 const { CLIENT_OPERATIONS, METHOD_DEFINITIONS, InactiveError, LiveSessionClient, compileSessionSchema, readConfiguration, renderDelivery } = require("./live-session.js");
 
 test("universal session schema accepts the shared fixtures", () => {
-  const root = JSON.parse(fs.readFileSync(path.join(__dirname, "../../bus/protocol/session.schema.json"), "utf8"));
-  const fixtures = JSON.parse(fs.readFileSync(path.join(__dirname, "../../bus/protocol/session.fixtures.json"), "utf8"));
+  const root = JSON.parse(fs.readFileSync(path.join(__dirname, "../../bus/internal/protocol/session.schema.json"), "utf8"));
+  const fixtures = JSON.parse(fs.readFileSync(path.join(__dirname, "../../bus/internal/protocol/session.fixtures.json"), "utf8"));
   const schema = compileSessionSchema(root), coverage = new Map();
   for (const fixture of fixtures.cases) {
     let value = fixture.raw ? JSON.parse(fixture.raw) : structuredClone(fixture.value);

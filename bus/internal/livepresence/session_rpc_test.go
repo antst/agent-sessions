@@ -81,6 +81,22 @@ func TestSessionRPCLateResponseIsDrainedAfterCallerLeaves(t *testing.T) {
 	}
 }
 
+func TestSessionRPCDropsUnmatchedResponseWithoutWriting(t *testing.T) {
+	rpc, remote := sessionRPCPair(t)
+	read := make(chan Frame, 1)
+	go func() { frame, _ := rpc.Read(true); read <- frame }()
+	writeSessionFrame(t, remote, `{"jsonrpc":"2.0","id":77,"result":{"sessions":[]}}`)
+	_ = remote.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+	if _, err := bufio.NewReader(remote).ReadBytes('\n'); err == nil {
+		t.Fatal("unmatched response produced a reply")
+	}
+	_ = remote.SetReadDeadline(time.Time{})
+	writeSessionFrame(t, remote, `{"jsonrpc":"2.0","id":1,"method":"message.deliver","params":{"message_id":"m","from":{"session_id":"p@local","name":"p@local","product":"peer","groups":[]},"body":"body"}}`)
+	if frame := <-read; frame.Method != "message.deliver" {
+		t.Fatalf("frame after unmatched response = %+v", frame)
+	}
+}
+
 func TestSessionRPCCloseFailsPendingCallOnce(t *testing.T) {
 	rpc, remote := sessionRPCPair(t)
 	called := make(chan error, 1)
@@ -94,6 +110,52 @@ func TestSessionRPCCloseFailsPendingCallOnce(t *testing.T) {
 	}
 	if err := rpc.Close(); err != nil {
 		t.Fatalf("second close = %v", err)
+	}
+}
+
+func TestSessionRPCTerminalMarkRejectsLateWorkBeforeCloseReturns(t *testing.T) {
+	local, remote := net.Pipe()
+	blocked := &blockingCloseConn{Conn: local, entered: make(chan struct{}), release: make(chan struct{})}
+	rpc, err := NewSessionRPC(blocked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remote.Close()
+
+	written := make(chan struct{})
+	go func() {
+		defer close(written)
+		_, _ = remote.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"message.deliver","params":{"message_id":"m","from":{"session_id":"p@local","name":"p@local","product":"peer","groups":[]},"body":"body"}}` + "\n"))
+	}()
+	request, err := rpc.Read(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-written
+	pending := make(chan error, 1)
+	go func() { pending <- rpc.Call(context.Background(), true, "session.list", struct{}{}, &struct{}{}) }()
+	_ = readSessionFrame(t, remote)
+	closed := make(chan error, 1)
+	go func() { closed <- rpc.Close() }()
+	<-blocked.entered
+	if err := rpc.Call(context.Background(), true, "session.list", struct{}{}, &struct{}{}); err == nil {
+		t.Fatal("call registered after terminal mark")
+	}
+	if err := rpc.Result(request, SessionDeliveryReceipt{Disposition: "injected"}); err == nil {
+		t.Fatal("response written after terminal mark")
+	}
+	if rpc.resolve("999", Success(json.RawMessage("999"), json.RawMessage(`{}`))) {
+		t.Fatal("response resolved after terminal mark")
+	}
+	if err := rpc.wire.Write(Success(json.RawMessage("2"), json.RawMessage(`{}`))); !errors.Is(err, ErrConnectionClosed) {
+		t.Fatalf("connection write after terminal mark = %v", err)
+	}
+	close(blocked.release)
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-pending; err == nil {
+		t.Fatal("preexisting pending call survived close")
 	}
 }
 
@@ -137,4 +199,16 @@ func readSessionFrame(t *testing.T, connection net.Conn) Frame {
 		t.Fatal(err)
 	}
 	return frame
+}
+
+type blockingCloseConn struct {
+	net.Conn
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *blockingCloseConn) Close() error {
+	close(c.entered)
+	<-c.release
+	return c.Conn.Close()
 }

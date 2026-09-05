@@ -5,26 +5,24 @@ import (
 	"path/filepath"
 )
 
-// Resolve returns the conventional Agent Sessions state root.
+// Resolve returns the conventional Agentbus state root.
 func Resolve() (string, error) {
-	root := os.Getenv("AGENT_SESSIONS_STATE_ROOT")
-	if root == "" {
-		if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
-			root = filepath.Join(xdg, "agent-sessions")
-		} else {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return "", err
-			}
-			root = filepath.Join(home, ".local", "state", "agent-sessions")
+	var root string
+	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
+		root = filepath.Join(xdg, "agentbus")
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
 		}
+		root = filepath.Join(home, ".local", "state", "agentbus")
 	}
 	return filepath.Abs(root)
 }
 
 // SessionSocket resolves the client-side socket discovery order.
 func SessionSocket() (string, error) {
-	if socket := os.Getenv("AGENT_SESSIONS_SOCKET"); socket != "" {
+	if socket := os.Getenv("AGENTBUS_SOCKET"); socket != "" {
 		return filepath.Abs(socket)
 	}
 	root, err := Resolve()

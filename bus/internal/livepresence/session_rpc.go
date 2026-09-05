@@ -2,16 +2,18 @@ package livepresence
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net"
 	"strconv"
 	"sync"
 
-	"github.com/antst/agent-sessions/bus/protocol"
+	"github.com/antst/agent-sessions/bus/internal/protocol"
 )
 
 const (
@@ -111,12 +113,15 @@ type SessionRPC struct {
 	wire   *Connection
 	schema *SessionSchema
 
-	mu       sync.Mutex
-	next     int64
-	closed   bool
-	pending  map[string]sessionPending
-	requests map[string]bool
-	seen     map[string]bool
+	mu        sync.Mutex
+	next      int64
+	closed    bool
+	closeDone chan struct{}
+	closeErr  error
+	pending   map[string]sessionPending
+	requests  map[string]bool
+	seen      map[string]bool
+	unmatched sync.Once
 }
 
 func NewSessionRPC(connection net.Conn) (*SessionRPC, error) {
@@ -125,11 +130,12 @@ func NewSessionRPC(connection net.Conn) (*SessionRPC, error) {
 		return nil, err
 	}
 	return &SessionRPC{
-		wire:     NewConnection(connection),
-		schema:   schema,
-		pending:  make(map[string]sessionPending),
-		requests: make(map[string]bool),
-		seen:     make(map[string]bool),
+		wire:      NewConnection(connection),
+		schema:    schema,
+		pending:   make(map[string]sessionPending),
+		requests:  make(map[string]bool),
+		seen:      make(map[string]bool),
+		closeDone: make(chan struct{}),
 	}, nil
 }
 
@@ -191,7 +197,7 @@ func (r *SessionRPC) Read(daemon bool) (Frame, error) {
 	for {
 		var frame Frame
 		if err := r.decode(&frame); err != nil {
-			if _, recoverable := sessionNumericID(frame.ID); recoverable {
+			if _, recoverable := sessionNumericID(frame.ID); recoverable && frame.Method != "" {
 				if writeErr := r.reject(frame); writeErr == nil {
 					continue
 				} else {
@@ -205,10 +211,11 @@ func (r *SessionRPC) Read(daemon bool) (Frame, error) {
 			if !numeric {
 				return Frame{}, errors.New("invalid session response")
 			}
-			if !validSessionResponse(frame) || !r.resolve(key, frame) {
-				if err := r.reject(frame); err != nil {
-					return Frame{}, err
-				}
+			if !validSessionResponse(frame) {
+				return Frame{}, errors.New("invalid session response")
+			}
+			if !r.resolve(key, frame) {
+				r.unmatched.Do(func() { log.Printf("agentbus: dropping unmatched session response id %s", key) })
 			}
 			continue
 		}
@@ -273,6 +280,12 @@ func (r *SessionRPC) finish(request, response Frame) error {
 }
 
 func (r *SessionRPC) reject(request Frame) error {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return ErrConnectionClosed
+	}
+	r.mu.Unlock()
 	return r.wire.Write(Failure(request.ID, SessionInvalidFrame, "invalid_frame", nil))
 }
 
@@ -292,6 +305,10 @@ func (r *SessionRPC) abandon(key string, response chan Frame, drop bool) {
 
 func (r *SessionRPC) resolve(key string, frame Frame) bool {
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return false
+	}
 	pending, ok := r.pending[key]
 	if ok {
 		delete(r.pending, key)
@@ -322,20 +339,29 @@ func (r *SessionRPC) resolve(key string, frame Frame) bool {
 func (r *SessionRPC) Close() error {
 	r.mu.Lock()
 	if r.closed {
+		done := r.closeDone
 		r.mu.Unlock()
-		return nil
+		<-done
+		return r.closeErr
 	}
 	r.closed = true
+	r.mu.Unlock()
+	err := r.wire.Close()
+	r.mu.Lock()
 	pending := r.pending
 	r.pending = make(map[string]sessionPending)
 	r.requests = make(map[string]bool)
+	r.closeErr = err
 	r.mu.Unlock()
 	for _, call := range pending {
 		if call.response != nil {
 			close(call.response)
 		}
 	}
-	return r.wire.Close()
+	r.mu.Lock()
+	close(r.closeDone)
+	r.mu.Unlock()
+	return err
 }
 
 func (r *SessionRPC) decode(frame *Frame) error {
@@ -352,10 +378,14 @@ func (r *SessionRPC) decode(frame *Frame) error {
 	body = body[:len(body)-1]
 	if err := DecodeStrict(body, frame); err != nil {
 		var header struct {
-			ID json.RawMessage `json:"id"`
+			ID     json.RawMessage `json:"id"`
+			Method json.RawMessage `json:"method"`
 		}
 		if json.Unmarshal(body, &header) == nil {
 			frame.ID = header.ID
+			if len(header.Method) != 0 && !bytes.Equal(bytes.TrimSpace(header.Method), []byte("null")) {
+				_ = json.Unmarshal(header.Method, &frame.Method)
+			}
 		}
 		return err
 	}

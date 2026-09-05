@@ -16,13 +16,25 @@ const modulePath = "github.com/antst/agent-sessions"
 
 func TestBusAndWrappersKeepTheSplitReadyBoundary(t *testing.T) {
 	repository := filepath.Clean("..")
-	checkGoImports(t, filepath.Join(repository, "bus"), func(path, imported string) {
-		if strings.HasPrefix(imported, modulePath+"/wrappers") {
+	for _, required := range []string{filepath.Join(repository, "bus"), filepath.Join(repository, "wrappers", "README.md")} {
+		if _, err := os.Stat(required); err != nil {
+			t.Fatalf("required split-ready path %s: %v", required, err)
+		}
+	}
+	checkGoImports(t, repository, func(path, imported string) {
+		relative, err := filepath.Rel(repository, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		inBus := relative == "bus" || strings.HasPrefix(relative, "bus"+string(filepath.Separator))
+		inWrappers := relative == "wrappers" || strings.HasPrefix(relative, "wrappers"+string(filepath.Separator))
+		if inBus && strings.HasPrefix(imported, modulePath+"/wrappers") {
 			t.Errorf("%s imports wrapper package %s", path, imported)
 		}
-	})
-	checkGoImports(t, filepath.Join(repository, "wrappers"), func(path, imported string) {
-		if strings.HasPrefix(imported, modulePath+"/bus/") &&
+		if !inBus && strings.HasPrefix(imported, modulePath+"/bus/internal/") {
+			t.Errorf("%s imports private bus package %s", path, imported)
+		}
+		if inWrappers && strings.HasPrefix(imported, modulePath+"/bus/") &&
 			!strings.HasPrefix(imported, modulePath+"/bus/sdk/go") {
 			t.Errorf("%s bypasses the public Go kit with %s", path, imported)
 		}
@@ -61,9 +73,6 @@ func TestBusSourceContainsNoProductNames(t *testing.T) {
 
 func checkGoImports(t *testing.T, root string, check func(string, string)) {
 	t.Helper()
-	if _, err := os.Stat(root); os.IsNotExist(err) {
-		return
-	}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() || filepath.Ext(path) != ".go" {
 			return err

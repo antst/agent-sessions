@@ -13,8 +13,9 @@ import (
 const MaxFrameBytes = 1 << 20
 
 var (
-	ErrFrameTooLarge  = errors.New("session frame exceeds 1 MiB")
-	ErrFrameTruncated = errors.New("session frame is not newline terminated")
+	ErrFrameTooLarge    = errors.New("session frame exceeds 1 MiB")
+	ErrFrameTruncated   = errors.New("session frame is not newline terminated")
+	ErrConnectionClosed = errors.New("session connection closed")
 )
 
 type Frame struct {
@@ -54,12 +55,16 @@ type Connection struct {
 	connection net.Conn
 	reader     *bufio.Reader
 	writeMu    sync.Mutex
+	stateMu    sync.Mutex
+	closed     bool
+	closeDone  chan struct{}
+	closeErr   error
 	observeMu  sync.Mutex
 	observer   func(string, Frame)
 }
 
 func NewConnection(connection net.Conn) *Connection {
-	return &Connection{connection: connection, reader: bufio.NewReaderSize(connection, MaxFrameBytes+1)}
+	return &Connection{connection: connection, reader: bufio.NewReaderSize(connection, MaxFrameBytes+1), closeDone: make(chan struct{})}
 }
 
 func (c *Connection) Observe(observer func(string, Frame)) {
@@ -71,6 +76,12 @@ func (c *Connection) Observe(observer func(string, Frame)) {
 func (c *Connection) Write(frame Frame) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	c.stateMu.Lock()
+	if c.closed {
+		c.stateMu.Unlock()
+		return ErrConnectionClosed
+	}
+	c.stateMu.Unlock()
 	body, err := json.Marshal(frame)
 	if err != nil {
 		return err
@@ -92,7 +103,23 @@ func (c *Connection) observe(direction string, frame Frame) {
 	}
 }
 
-func (c *Connection) Close() error { return c.connection.Close() }
+func (c *Connection) Close() error {
+	c.stateMu.Lock()
+	if c.closed {
+		done := c.closeDone
+		c.stateMu.Unlock()
+		<-done
+		return c.closeErr
+	}
+	c.closed = true
+	c.stateMu.Unlock()
+	err := c.connection.Close()
+	c.stateMu.Lock()
+	c.closeErr = err
+	close(c.closeDone)
+	c.stateMu.Unlock()
+	return err
+}
 
 func ValidRequest(frame Frame) bool {
 	return frame.JSONRPC == "2.0" && frame.Method != "" && len(frame.Params) != 0 &&
