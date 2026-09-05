@@ -139,7 +139,11 @@ func (c *Conn) read() {
 		}
 		frame, err := protocol.DecodeFrame(body[:len(body)-1])
 		if err != nil {
-			c.close(err)
+			if frame.ID > 0 && frame.Method != "" {
+				c.reject(frame, protocol.InvalidFrame)
+			} else {
+				c.close(err)
+			}
 			return
 		}
 		if frame.Method != "" {
@@ -158,16 +162,25 @@ func (c *Conn) receiveRequest(frame protocol.Frame) {
 	}
 	c.stateMu.Unlock()
 	if !ordered {
-		c.close(errors.New("request id is not increasing"))
+		c.reject(frame, protocol.InvalidFrame)
 		return
 	}
 	params, err := protocol.DecodeParams(frame.Method, frame.Params)
 	request := &Request{ID: frame.ID, Method: frame.Method, Params: params}
 	if err != nil || !protocol.Allows(frame.Method, !c.client) {
-		c.close(errors.New("invalid frame"))
+		code := protocol.InvalidFrame
+		if frame.Method == "session.hello" {
+			code = protocol.InvalidHello
+		}
+		c.reject(frame, code)
 		return
 	}
 	go c.handler(c.ctx, request)
+}
+
+func (c *Conn) reject(frame protocol.Frame, code int) {
+	_ = c.Error(&Request{ID: frame.ID, Method: frame.Method}, code, nil)
+	c.close(errors.New("invalid frame"))
 }
 
 func (c *Conn) receiveResponse(frame protocol.Frame) {

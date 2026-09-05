@@ -30,8 +30,11 @@ func (p *fakeProduct) Hello(context.Context) (HelloDescription, error) {
 	}
 	return HelloDescription{Product: "example-peer", SupportedOpenFields: []string{}, ExtraArguments: []ExtraArgument{}}, nil
 }
-func (p *fakeProduct) Open(context.Context, OpenRequest) (OpenResult, error) {
+func (p *fakeProduct) Open(_ context.Context, request OpenRequest) (OpenResult, error) {
 	p.calls[1].Add(1)
+	if request.Name != "parent/leaf@local" || len(request.Groups) != 1 || request.Groups[0] != "session:parent" || request.ResumeSessionID != "product-session" || request.Open.Cwd != "/tmp" || request.Open.PermissionMode != "ask" || request.Open.Model != "model" || request.Open.ReasoningEffort != "high" || len(request.Open.Arguments) != 1 || request.Open.Arguments[0] != "--flag" {
+		return OpenResult{}, errors.New("open request changed")
+	}
 	return OpenResult{SessionID: "product-session"}, nil
 }
 func (p *fakeProduct) Run(ctx context.Context, input string) (TurnResult, error) {
@@ -149,7 +152,8 @@ func (h *harness) async(method string, params, result any) <-chan error {
 	return done
 }
 func (h *harness) open(t *testing.T) {
-	must(t, h.call("session.open", OpenRequest{Name: "parent/leaf@local", Groups: []string{}, Open: OpenOptions{}}, &OpenResult{}))
+	var result OpenResult
+	check(t, h.call("session.open", OpenRequest{Name: "parent/leaf@local", Groups: []string{"session:parent"}, ResumeSessionID: "product-session", Open: OpenOptions{Cwd: "/tmp", PermissionMode: "ask", Model: "model", ReasoningEffort: "high", Arguments: []string{"--flag"}}}, &result) == nil && result.SessionID == "product-session", "open result = %#v", result)
 }
 
 func TestWorkerLifecycleTable(t *testing.T) {
@@ -193,13 +197,13 @@ func runCase(t *testing.T, name string) [6]int32 {
 		h := newHarness(t, p)
 		must(t, h.call("session.superseded", struct{}{}, &struct{}{}))
 		check(t, p.worker.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}) != nil, "expected error")
-		other := &fakeProduct{}
-		invalidFrames(t, other)
 		for _, item := range []string{"eof reconnect", "same-id re-hello", "changed groups", "different-id re-hello"} {
 			t.Run(item, func(t *testing.T) { t.Skip("pending connectPeer in commit 3") })
 		}
-	case "invalid-frames":
-		invalidFrames(t, p)
+		t.Run("worker re-hello", func(t *testing.T) { t.Skip("pending daemon admission (commit 2)") })
+	case "wrong-direction-request":
+		h := newHarness(t, p)
+		check(t, h.call("session.hello", protocol.WorkerHello{Protocol: 1, LaunchToken: "again", HelloDescription: HelloDescription{Product: "worker", SupportedOpenFields: []string{}, ExtraArguments: []ExtraArgument{}}}, &struct{}{}) != nil, "expected error")
 	case "terminal-before-interrupt":
 		h := opened(t, p)
 		must(t, h.call("turn.run", turn("ok"), &TurnResult{}))
@@ -244,6 +248,7 @@ func blockingCase(t *testing.T, name string) [6]int32 {
 		p.interrupted, p.closeStart, p.closeEnd, p.hangInterrupt = make(chan struct{}), make(chan struct{}), make(chan struct{}), true
 		closed := h.async("session.close", target, &struct{}{})
 		<-p.interrupted
+		must(t, h.call("turn.interrupt", target, &struct{}{}))
 		close(p.release)
 		must(t, <-run)
 		<-p.closeStart
@@ -275,12 +280,6 @@ func checkDelivery(t *testing.T, h *harness, disposition string) {
 	var receipt DeliveryReceipt
 	must(t, h.call("message.deliver", delivery, &receipt))
 	check(t, receipt.Disposition == disposition, "receipt = %#v", receipt)
-}
-
-func invalidFrames(t *testing.T, total *fakeProduct) {
-	h := newHarness(t, total)
-	check(t, h.call("session.hello", protocol.WorkerHello{Protocol: 1, LaunchToken: "again", HelloDescription: HelloDescription{Product: "worker", SupportedOpenFields: []string{}, ExtraArguments: []ExtraArgument{}}}, &struct{}{}) != nil, "expected error")
-	<-total.worker.Closed()
 }
 
 func checkEnvironment(t *testing.T, p *fakeProduct) {

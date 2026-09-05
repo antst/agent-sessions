@@ -24,9 +24,7 @@ func TestCallRoundTripAndIncreasingIDs(t *testing.T) {
 	go func() {
 		for id := int64(1); id <= 2; id++ {
 			frame := readFrame(t, peer)
-			if frame.ID != id {
-				t.Errorf("id = %d, want %d", frame.ID, id)
-			}
+			check(t, frame.ID == id, "id = %d, want %d", frame.ID, id)
 			body, _ := protocol.ResultBytes(id, "session.list", protocol.SessionListResult{Sessions: []protocol.SessionSummary{}})
 			_, _ = peer.Write(body)
 			if id == 1 {
@@ -36,14 +34,10 @@ func TestCallRoundTripAndIncreasingIDs(t *testing.T) {
 	}()
 	for range 2 {
 		var result protocol.SessionListResult
-		if err := c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &result); err != nil {
-			t.Fatal(err)
-		}
+		must(t, c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &result))
 	}
 	c.next = protocol.MaxRequestID
-	if err := c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}); err == nil {
-		t.Fatal("exhausted request id succeeded")
-	}
+	check(t, c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}) != nil, "exhausted request id succeeded")
 }
 
 func TestResponseClaimsTargetBeforeCancelOrClose(t *testing.T) {
@@ -73,9 +67,7 @@ func TestResponseClaimsTargetBeforeCancelOrClose(t *testing.T) {
 			default:
 			}
 			close(target.release)
-			if err := <-done; err != nil {
-				t.Fatalf("claimed response lost to %s: %v", action, err)
-			}
+			must(t, <-done)
 			_ = peer.Close()
 		})
 	}
@@ -89,13 +81,10 @@ func TestCloseBeforeWriteEmitsNothing(t *testing.T) {
 	<-paused.entered
 	_ = c.Close()
 	close(paused.release)
-	if err := <-returned; err == nil {
-		t.Fatal("call succeeded")
-	}
+	check(t, <-returned != nil, "call succeeded")
 	_ = peer.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-	if body, _ := bufio.NewReader(peer).ReadBytes('\n'); len(body) != 0 {
-		t.Fatalf("wrote %q", body)
-	}
+	body, _ := bufio.NewReader(peer).ReadBytes('\n')
+	check(t, len(body) == 0, "wrote %q", body)
 }
 
 func TestCloseUnblocksWriter(t *testing.T) {
@@ -112,12 +101,8 @@ func TestCloseUnblocksWriter(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Close waited for blocked Write")
 	}
-	if err := <-returned; err == nil {
-		t.Fatal("blocked call succeeded")
-	}
-	if blocked.closes.Load() != 1 {
-		t.Fatalf("closes = %d", blocked.closes.Load())
-	}
+	check(t, <-returned != nil, "blocked call succeeded")
+	check(t, blocked.closes.Load() == 1, "closes = %d", blocked.closes.Load())
 	_ = peer.Close()
 }
 
@@ -129,9 +114,7 @@ func TestLateResponseDoesNotBlockAndRequestIDsIncrease(t *testing.T) {
 	returned := asyncCall(c, ctx)
 	lost := readFrame(t, peer)
 	cancel()
-	if !errors.Is(<-returned, context.Canceled) {
-		t.Fatal("cancelled call did not return context error")
-	}
+	check(t, errors.Is(<-returned, context.Canceled), "cancelled call did not return context error")
 	go func() {
 		body, _ := protocol.ResultBytes(lost.ID, "session.list", protocol.SessionListResult{Sessions: []protocol.SessionSummary{}})
 		_, _ = peer.Write(body)
@@ -140,20 +123,44 @@ func TestLateResponseDoesNotBlockAndRequestIDsIncrease(t *testing.T) {
 	}()
 	select {
 	case request := <-requests:
-		if request.ID != 1 {
-			t.Fatalf("request id = %d", request.ID)
-		}
+		check(t, request.ID == 1, "request id = %d", request.ID)
 	case <-time.After(time.Second):
 		t.Fatal("reader blocked on late response")
 	}
 	bad := []byte("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.open\",\"params\":{\"name\":\"\xff\",\"groups\":[],\"open\":{}}}\n")
 	good, _ := protocol.RequestBytes(3, "session.open", protocol.OpenRequest{Name: "again@local", Groups: []string{}, Open: protocol.OpenOptions{}})
 	go peer.Write(append(bad, good...))
+	rejected := readFrame(t, peer)
+	check(t, rejected.Error != nil && rejected.Error.Code == protocol.InvalidFrame, "invalid response = %#v", rejected)
 	<-c.Done()
 	select {
 	case <-requests:
 		t.Fatal("frame after invalid input reached handler")
 	default:
+	}
+}
+
+func TestInvalidRequestRepliesThenCloses(t *testing.T) {
+	tests := []struct {
+		body string
+		code int
+	}{
+		{`{"jsonrpc":"2.0","id":1,"method":"session.list","params":{"extra":true}}`, protocol.InvalidFrame},
+		{`{"jsonrpc":"2.0","id":1,"method":"session.hello","params":{"protocol":1,"product":"p","session_id":"s","name":"n","groups":[],"info":{},"launch_token":"t","supported_open_fields":[],"extra_arguments":[]}}`, protocol.InvalidHello},
+		{`{`, 0},
+	}
+	for _, test := range tests {
+		local, peer := net.Pipe()
+		New(local, false, nil)
+		go peer.Write(append([]byte(test.body), '\n'))
+		reader := bufio.NewReader(peer)
+		if test.code != 0 {
+			want, _ := protocol.ErrorBytes(1, test.code, nil)
+			got, err := reader.ReadBytes('\n')
+			check(t, err == nil && string(got) == string(want), "response = %q, %v; want %q", got, err, want)
+		}
+		body, err := reader.ReadBytes('\n')
+		check(t, len(body) == 0 && errors.Is(err, io.EOF), "after response = %q, %v; want EOF", body, err)
 	}
 }
 
@@ -164,15 +171,13 @@ func TestEOFFailsPendingOnce(t *testing.T) {
 	_ = readFrame(t, peer)
 	_, _ = peer.Write([]byte("{"))
 	_ = peer.Close()
-	if err := <-returned; err == nil {
-		t.Fatal("pending call succeeded after EOF")
-	}
+	check(t, <-returned != nil, "pending call succeeded after EOF")
 	<-c.Done()
 }
 
 func TestCloseIsIdempotent(t *testing.T) {
 	local, peer := net.Pipe()
-	counted := &countCloseConn{Conn: local}
+	counted := &signalWriteConn{Conn: local, entered: make(chan struct{})}
 	c := New(counted, true, nil)
 	returned := asyncCall(c, context.Background())
 	_ = readFrame(t, peer)
@@ -182,9 +187,7 @@ func TestCloseIsIdempotent(t *testing.T) {
 		go func() { defer group.Done(); _ = c.Close() }()
 	}
 	group.Wait()
-	if counted.closes.Load() != 1 || <-returned == nil {
-		t.Fatalf("closes = %d", counted.closes.Load())
-	}
+	check(t, counted.closes.Load() == 1 && <-returned != nil, "closes = %d", counted.closes.Load())
 	_ = peer.Close()
 }
 
@@ -198,9 +201,7 @@ func TestOversizeFrameClosesAtBound(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("oversize frame was scanned past the bound")
 	}
-	if <-written == nil {
-		t.Fatal("oversize writer was not interrupted")
-	}
+	check(t, <-written != nil, "oversize writer was not interrupted")
 }
 
 func TestMalformedPendingResponseClosesAllCalls(t *testing.T) {
@@ -215,9 +216,7 @@ func TestMalformedPendingResponseClosesAllCalls(t *testing.T) {
 	first, second := readFrame(t, peer), readFrame(t, peer)
 	bad := fmt.Sprintf("{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":null}\n", min(first.ID, second.ID))
 	_, _ = io.WriteString(peer, bad)
-	if <-returned == nil || <-returned == nil {
-		t.Fatal("malformed response left a pending call")
-	}
+	check(t, <-returned != nil && <-returned != nil, "malformed response left a pending call")
 	<-c.Done()
 }
 
@@ -237,9 +236,7 @@ func TestCloseCancelsAdmittedHandler(t *testing.T) {
 	<-entered
 	_ = c.Close()
 	close(release)
-	if !<-cancelled {
-		t.Fatal("handler was not cancelled or wrote after close")
-	}
+	check(t, <-cancelled, "handler was not cancelled or wrote after close")
 }
 
 func TestConcurrentHandlersWriteCompleteFrames(t *testing.T) {
@@ -256,12 +253,9 @@ func TestConcurrentHandlersWriteCompleteFrames(t *testing.T) {
 	reader := bufio.NewReader(peer)
 	for range 2 {
 		body, err := reader.ReadBytes('\n')
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err = protocol.DecodeFrame(body[:len(body)-1]); err != nil {
-			t.Fatal(err)
-		}
+		must(t, err)
+		_, err = protocol.DecodeFrame(body[:len(body)-1])
+		must(t, err)
 	}
 	_ = c.Close()
 	_ = peer.Close()
@@ -291,13 +285,6 @@ func (c *signalWriteConn) Write(body []byte) (int, error) {
 }
 func (c *signalWriteConn) Close() error { c.closes.Add(1); return c.Conn.Close() }
 
-type countCloseConn struct {
-	net.Conn
-	closes atomic.Int32
-}
-
-func (c *countCloseConn) Close() error { c.closes.Add(1); return c.Conn.Close() }
-
 type pausedResult struct {
 	protocol.SessionListResult
 	entered, release chan struct{}
@@ -312,13 +299,9 @@ func (r *pausedResult) UnmarshalJSON(raw []byte) error {
 func readFrame(t *testing.T, connection net.Conn) protocol.Frame {
 	t.Helper()
 	body, err := bufio.NewReader(connection).ReadBytes('\n')
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 	frame, err := protocol.DecodeFrame(body[:len(body)-1])
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 	return frame
 }
 
@@ -328,4 +311,11 @@ func asyncCall(c *Conn, ctx context.Context) <-chan error {
 		returned <- c.Call(ctx, "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{})
 	}()
 	return returned
+}
+
+func must(t *testing.T, err error) { check(t, err == nil, "%v", err) }
+func check(t *testing.T, ok bool, format string, args ...any) {
+	if !ok {
+		t.Fatalf(format, args...)
+	}
 }

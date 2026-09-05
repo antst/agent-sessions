@@ -29,6 +29,11 @@ committed. Request admission captures the source identity and groups from the
 exact current connection once; later identity changes cannot rewrite authority
 for a request already admitted.
 
+A request with a usable ID whose params or method are invalid receives its
+correlated `invalid_frame` response, or `invalid_hello` for `session.hello`,
+before the reader closes the connection. Without a usable ID the reader closes
+without writing. The reader never dispatches a later frame after either case.
+
 The local Unix socket is trusted and plain by default. When the daemon's
 optional `local_key` is configured, every peer and worker connection instead
 uses TLS 1.3 on that same socket. The R1 key derivation and public-key pinning
@@ -1061,7 +1066,8 @@ results. A hanging interrupt cannot hide an available terminal. This entire
 interrupt/terminal/native-close sequence must fit within the daemon's single
 `closeBound = 10s`; expiry kills the worker and the kit invents no result. From
 the instant close owns the slot,
-new runs are `busy`, and delivery is rejected as `closing` before product code.
+new runs are `busy`, delivery is rejected as `closing` before product code, and
+interrupt returns `{}` without another product call.
 
 The kit owns final process ordering: it calls `close()`, writes the close
 response, closes its socket, and then resolves its `closed` signal. The product
@@ -1126,9 +1132,10 @@ kits. The lifecycle cases are:
    invoked once;
 9. peer EOF reconnect versus supersession terminality, same-ID re-hello
    updating name/info with identical groups, changed-group rejection,
-   different-ID identity replacement on the same socket, and worker re-hello
-   rejection;
-10. a worker re-hello rejected before a product callback;
+   and different-ID identity replacement on the same socket;
+10. a daemon-to-worker `session.hello` rejected as a wrong-direction request
+    before a product callback; worker-originated re-hello rejection belongs to
+    daemon admission;
 11. a terminal response followed by interrupt, proving `not_running` and no
     native interrupt call;
 12. delivery first and another delivery during close, proving cancellation of

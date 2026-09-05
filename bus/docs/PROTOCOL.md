@@ -23,6 +23,11 @@ committed. Request admission captures the source identity and groups from the
 exact current connection once; later identity changes cannot rewrite authority
 for a request already admitted.
 
+A request with a usable ID whose params or method are invalid receives its
+correlated `invalid_frame` response, or `invalid_hello` for `session.hello`,
+before the reader closes the connection. Without a usable ID the reader closes
+without writing. The reader never dispatches a later frame after either case.
+
 The local Unix socket is trusted and plain by default. When the daemon's
 optional `local_key` is configured, every peer and worker connection instead
 uses TLS 1.3 on that same socket. The R1 key derivation and public-key pinning

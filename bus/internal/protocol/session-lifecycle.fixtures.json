@@ -9,7 +9,7 @@
     {"name":"close-during-run", "calls":[1,1,1,1,0,1]},
     {"name":"eof-during-run", "calls":[1,1,1,0,0,1]},
     {"name":"peer-lifetime", "calls":[1,0,0,0,0,0]},
-    {"name":"invalid-frames", "calls":[1,0,0,0,0,0]},
+    {"name":"wrong-direction-request", "calls":[1,0,0,0,0,0]},
     {"name":"terminal-before-interrupt", "calls":[1,1,1,0,0,0]},
     {"name":"idle-close-deliver", "calls":[1,1,0,0,1,1]},
     {"name":"callback-originated-method", "calls":[1,1,1,0,1,0]},

@@ -158,7 +158,7 @@ func (w *Worker) handle(_ context.Context, request *rpc.Request) {
 			_ = w.conn.Close()
 			return
 		}
-		w.run = &runSlot{}
+		w.run = &runSlot{interrupt: true}
 		interrupt := slot != nil && !slot.interrupt
 		if interrupt {
 			slot.interrupt = true
