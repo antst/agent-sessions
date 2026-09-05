@@ -134,8 +134,8 @@ The daemon sends the displaced connection the ID-bearing request
 canonical identity. The displaced client marks that identity terminal before its
 best-effort `{}` response, closes, and never reconnects that identity. The new
 connection is already current, so every request from the displaced connection,
-including another hello, is rejected. After that map swap and outside
-`mapsMutex`, the daemon writes the supersession request once with
+including another hello, is rejected. After the directory replaces the exact
+entry and releases its mutex, the old connection's owner writes the supersession request once with
 `supersedeWriteBound = 1s`, closes the old local socket, and never waits for an
 acknowledgement. A writable socket returns immediately; the bound only stops a
 dead client from blocking this path. If a displaced client races one final reconnect, that new claim
@@ -231,17 +231,16 @@ Unsupported supplied
 open fields, an invalid session ID, exit, or timeout fail truthfully and do not
 publish a live session.
 
-One transaction-local mutex chooses exactly one open-result, exit, timeout, or
-shutdown outcome. Resume also holds its session-ID row lock. A fresh spawn has
-no ID, so its composed name is reserved until the product returns an ID; the
-commit then takes that ID's row lock. The launch token, not a speculative ID,
-keys the provisional worker until open returns. Resume requires the returned ID
+One lane owner processes the open result, exit, timeout, and shutdown in event
+order, so exactly one outcome finishes the request. A fresh spawn has no ID, so
+its composed name is reserved until the product returns an ID. The launch
+token, not a speculative ID, keys the provisional worker until open returns.
+Resume requires the returned ID
 to equal `resume_session_id`. A fresh open returning an ID already held by an
 existing row fails with `spawn_failed` and the exact text `session id already
-exists`. The durable commit runs in the open-response completion hook before
-the reader dispatches the worker's next request. An exit drains the closed
-socket first, so an already-written valid open response can commit; EOF first
-fails the spawn.
+exists`. The lane owner commits while handling the open response, before it
+handles the next inbox frame. An exit drains the closed socket first, so an
+already-written valid open response can commit; EOF first fails the spawn.
 
 #### `session.open`
 
@@ -330,11 +329,11 @@ this version has none.
 - A rowless describe token can authenticate hello but can never authorize
   `session.open`; EOF after describe is the worker's normal exit.
 - Worker-originated session methods before the session ID commit are rejected.
-  The successful open-response completion hook commits the row before the
-  reader advances to the next worker frame; commit failure closes the
-  provisional connection. The kit adds no buffer, gate, or commit wait. After
-  commit, the same connection is the lane's presence and uses those ordinary
-  methods; there is no tool frame.
+  The lane owner commits while handling the successful open response, before
+  handling the next inbox frame; commit failure closes the provisional
+  connection. The kit adds no additional commit buffer, gate, or
+  acknowledgement. After commit, the same connection is the lane's presence
+  and uses those ordinary methods; there is no tool frame.
 - A second `turn.run` while one is outstanding returns busy. There is one
   running boolean in a product kit and one pending RPC in the daemon.
 - `lane.spawn` with `resume_session_id` naming a connected row returns
@@ -351,11 +350,11 @@ this version has none.
 - Composed lane names and recursive private groups record creation ancestry.
   A later peer or parent rename does not cascade into existing child names or
   group paths, and attached lane titles stay fixed.
-- The session-ID row lock serializes resume and close. A waiter rechecks the row
-  after acquiring it: a second resume sees `already_connected`, and resume
-  cannot exec until synchronous supervisor cleanup of the prior worker has
-  finished. Fresh spawn reserves its composed name until its product ID is
-  known, then commits under that ID's row lock.
+- A lane row is claimed for resume, close, or forget until that operation's
+  cleanup finishes. New run, interrupt, close, resume, or forget requests for a
+  claimed row return `busy`; nothing waits on a row. Delivery to a claimed but
+  still attached lane proceeds. Fresh spawn reserves its composed name until
+  its product ID is known.
 - Resume acquires product-side exclusive ownership before touching the existing
   native session and holds it through cleanup. Fresh open does the same before
   create when the wrapper chooses the ID; when only the product can allocate the
@@ -448,7 +447,7 @@ and closes the connection without writing one.
 | `-32602` | `invalid_hello` | `session.hello` when its union, protocol, identity, or token is invalid. |
 | `-32001` | `unknown_session` | `message.send`, resume `lane.spawn`, `turn.run`, `turn.interrupt`, or `session.close` when the named row or peer does not exist or is invisible to the caller. |
 | `-32002` | `not_connected` | `turn.run`, `turn.interrupt`, or `session.close` when a durable row has no connection. |
-| `-32003` | `busy` | `turn.run` when the target already has an outstanding run, or any routed call when that worker already has 256 unanswered calls. A delivery at that bound returns a rejected receipt with reason `busy`. |
+| `-32003` | `busy` | `turn.run` when the target already has an outstanding run; a worker loop dequeuing a 257th unanswered call; a full 256-event connection inbox; or a new run, interrupt, close, resume, or forget for a claimed lane row. A delivery rejected by either bound has reason `busy`; delivery to a claimed but attached lane is still admitted. |
 | `-32004` | `not_running` | `turn.interrupt` when the target has no outstanding run. |
 | `-32005` | `already_connected` | Resume `lane.spawn` when the durable row already has its worker connection. |
 | `-32007` | `unknown_product` | `lane.describe` or new `lane.spawn` when the product token is invalid or its binary is absent from the target host's service PATH. |
@@ -456,18 +455,19 @@ and closes the connection without writing one.
 | `-32009` | `spawn_failed` | `lane.describe` or `lane.spawn` when exec, hello, open, or native creation fails before commit. |
 | `-32010` | `timeout` | `lane.describe` or `lane.spawn` when its one spawn/open transaction bound expires. |
 | `-32011` | `not_committed` | Any worker-originated client-to-daemon session method received after hello but before product-session-ID commit. |
-| `-32012` | `superseded` | Any request from a peer connection displaced by the atomic same-identity swap. |
+| `-32012` | `superseded` | Any request from a peer connection displaced by exact directory replacement. |
 | `-32013` | `name_taken` | New `lane.spawn` when another row on that host already holds the requested composed name. |
 | `-32014` | `unknown_host` | `lane.describe` or new `lane.spawn` naming an unfederated `host`, or any canonical identity input whose host part is neither local nor connected. |
 | `-32015` | `forward_lost` | A one-hop federated request whose transport ends before its response; the request may or may not have been applied on the target host and is never retried. |
-| `-32603` | `internal` | A durable-table write fails after in-memory cleanup, or a worker interrupt/close callback fails; it has no other use. |
+| `-32603` | `internal` | A durable row-file operation fails after directory cleanup, or a worker interrupt/close callback fails; it has no other use. |
 
 ## 2. Daemon
 
 ### 2.1 Stored and live data
 
-The daemon is a router around one durable table. It does not know how any
-product creates a session, runs a turn, injects a message, or closes. Native
+The daemon is a router around one directory and a set of durable row files. It
+does not know how any product creates a session, runs a turn, injects a message,
+or closes. Native
 products and wrappers expose those operations through the eleven methods in
 Section 1. The daemon contains no product switch, lane actor, product driver,
 capability interface, status projection, result collector, archive
@@ -479,29 +479,63 @@ Only lanes have durable rows. A row has exactly these columns:
 | --- | --- |
 | `session_id` | Immutable canonical `id@host` and primary key; the product returns the ID part from `session.open`. |
 | `product` | Immutable binary name executed with empty argv and a launch token in its environment. |
-| `name` | Canonical `name@host`; for a lane the stored name part is `<parent name part>/<caller leaf>` and the host is where the lane runs. It is the resume recipe's mirror of the product title, refreshed at open or peer re-hello. |
+| `name` | Canonical `name@host`; for a lane the stored name part is `<parent name part>/<caller leaf>` and the host is where the lane runs. It is the resume recipe's mirror of the product title, set at open. |
 | `groups` | Full resume-membership recipe containing the parent's private group, the recursively composed `<parent private group>/<leaf>`, and explicit `extra_groups`; no other parent membership is inherited. |
 | `open` | The original validated `SessionOpenOptions` value, re-marshalled unchanged on resume with `arguments` order preserved. |
 | `created_at` | Daemon timestamp assigned when the row commits. |
 
+Each row is one JSON file named `<sha256(session_id)>.json`. A commit writes and
+syncs a temporary file, renames it to that name, and syncs the containing
+directory. Startup reads only committed `.json` names; an interrupted temporary
+file is ignored. An unknown column, wrong digest name, duplicate session ID, or
+duplicate canonical name makes the durable directory invalid.
+
 There are no durable peer rows. The daemon qualifies a peer hello's product-
 asserted ID and name parts with its effective host, then creates one transient
-entry containing that canonical identity, groups, information, and exact
-connection. A same-ID re-hello refreshes name and information only; a different-
-ID re-hello ends the old transient identity on that connection and installs the
-new one. EOF removes the exact installed identity. Lane EOF removes only the
-live connection; its row remains offline and resumable. `SessionSummary.kind`
-is derived: a durable row is a lane and a transient entry is a peer.
+directory entry containing that canonical identity, groups, information, and
+exact connection. A same-ID re-hello refreshes name and information only; a
+different-ID re-hello ends the old identity on that connection and installs a
+fresh entry. EOF removes only the exact installed entry. Lane EOF removes only
+the live attachment; its row remains offline and resumable.
+`SessionSummary.kind` is derived: a durable row is a lane and a transient entry
+is a peer.
 
-For a connected lane, live name, groups, and information come from the runtime
-connection maps populated at open, exactly as for a peer. The durable `name`
-and `groups` columns are only the product-title mirror and resume recipe; the
-router consults them for visibility only while the row is offline.
+The in-memory directory indexes canonical IDs, canonical names, and launch
+tokens. Each entry contains its row data, current attachment, claimed and
+running facts, and an identity-lifetime `done` channel. One short directory
+mutex protects those registry facts together. It is held only for lookup,
+insert, replacement, removal, claim, and a copied list snapshot. No socket,
+process, disk, channel wait, or callback runs while it is held, and it never
+nests with another daemon mutex. An entry object is also the destination token:
+a receiver compares that exact object before admitting a request or settling a
+response, so a late event cannot attach to a replacement identity.
+
+For a connected lane, live name, groups, attachment, and running status come
+from its directory entry, exactly as for a peer. The durable `name`, `groups`,
+and `open` columns are the product-title mirror and resume recipe used while
+offline.
+
+Every accepted connection has one reader goroutine, one writer goroutine, and
+one owner loop. The reader posts frames in order into that connection's
+256-element mixed-event inbox. The writer alone writes its bounded outbox. The
+owner loop owns request admission, the pending-call map, child and launch
+references, timers, and reply handling; it never shares those fields with
+another loop. Foreign directory routing posts without blocking, returning
+`busy` when the inbox is full. Owned helpers may post back to their own loop
+while an owned count keeps that loop alive until every such helper has returned.
+
+Each routed operation carries a capacity-one reply slot created by its sender.
+The target loop is the sole code that removes the operation from its pending map
+and answers that slot. One sender-owned helper waits for either that answer or
+the sender identity's `done` channel and posts exactly one completion to the
+sender loop. This leaves one place that settles a target operation and one place
+that writes the caller response; it needs no reply lock, result collector, or
+durable output.
 
 Daemon start performs no recovery pass. Every durable row starts offline;
-connections, pending turns, row locks, and reservations start empty. Nothing is
-replayed or reaped from a prior incarnation because its workers exited on EOF.
-Restart is therefore a table load, not a lifecycle transition.
+connections, pending calls, owner loops, and reservations start empty. Nothing
+is replayed or reaped from a prior incarnation because its workers exited on
+EOF. Restart is therefore a row-file load, not a lifecycle transition.
 
 Daemon configuration consists of an optional federation hub address, the
 daemon's federation secret when a hub is used, an optional host name, an
@@ -521,31 +555,7 @@ encoded as base64; the daemon and hub reject any configured federation secret
 or `local_key` shorter than 32 decoded bytes. Config files containing secrets
 must be mode 0600.
 
-Three in-memory indexes hold all live session data:
-
-- `connections[session_id]` uses the canonical `id@host` and points to the exact current connection and, for a
-  spawned lane, its process supervisor. Each request checks that it arrived on
-  that exact pointer.
-- `pending[session_id]` contains at most one forwarded `turn.run`: its input,
-  worker request, and optional caller reply sink. The entry is not a turn state
-  machine; existence means running. Caller loss detaches only the reply sink;
-  the entry remains until the worker response or EOF.
-- `rowLocks[session_id]` is one mutex per durable lane ID. Resume and close use
-  it for the whole transaction. A fresh spawn has no ID yet, so a
-  `reservedNames` set holds its composed name until commit or failure; name
-  lookup checks rows and that set. Neither is persisted or exposed.
-
-One `mapsMutex` owns current connections, pending turns, transient peers,
-reservations, reserved names, and creation of row locks. The only lock order is
-row lock then `mapsMutex`, never the reverse. No socket or process call runs
-under `mapsMutex`. A list takes one maps snapshot and then reads the table while
-still holding that mutex; insertion and peer admission use the same maps-then-
-table order, so no half-committed identity is visible. Exact-pointer EOF removal
-and pending-call removal happen in the maps critical section, so a summary
-cannot expose `connected=false` with stale `running=true`.
-
-The durable table indexes canonical `session_id` and canonical name uniquely.
-No live fact, connection ID, generation, process ID, deadline, caller ID, or
+No live fact, connection pointer, child process, deadline, caller ID, or
 access-check result is stored in a row.
 
 ### 2.2 Opening and replacing connections
@@ -555,44 +565,40 @@ The daemon accepts a socket, completes the required local TLS handshake when
 requires `session.hello` first. Local TLS reuses the Section 2.5 derivation and
 pinning code with `client` and `daemon` labels, one expected key, and no SNI
 lookup. It rejects a peer hello unless `session_id` and `name` are valid
-unqualified name parts, then appends its effective host to both. On a first
-hello, that canonical ID is installed by one atomic map swap after consulting
-the durable row table and rejecting an ID owned by a lane as specified in
-Section 1.1. That same `mapsMutex` critical section cancels the displaced
-identity and detaches its reply sinks before installing the replacement. The
-displaced exact pointer becomes inadmissible immediately; the
-daemon writes `session.superseded` through its ordinary per-connection request-
-ID sequence after the map swap and outside `mapsMutex`, with
-`supersedeWriteBound = 1s`, then closes it without waiting for the
-acknowledgement. A writable socket returns immediately; the bound only limits a
-dead peer. All of its pending calls fail once. No reconnect lease or grace
-timer exists. A hello arriving from a displaced pointer is rejected like every
-other request from that pointer.
+unqualified name parts, then appends its effective host to both.
+
+For a first peer hello, the directory mutex covers one short replacement: check
+the canonical ID against rows and peers, detach any old entry, and install the
+new entry. The old entry becomes inadmissible before the mutex is released. Its
+owner then writes `session.superseded` as the final frame with
+`supersedeWriteBound = 1s` and closes the socket without waiting for an
+acknowledgement. No lock is held for that write. A writable socket returns
+immediately; the bound only limits a dead peer. The old owner settles its
+pending calls once. No reconnect lease or grace timer exists, and a hello from
+the displaced entry is rejected like every other request from it.
 
 A second peer hello on that same live connection is handled in frame order. With
 the same `session_id`, its declared groups slice must equal the original slice
-exactly, including order; the daemon then refreshes name and information in place. Different
-groups are `invalid_hello` and close the connection. With a different
-`session_id`, replacement is atomic under `mapsMutex`: each admitted request
-already holds a copy of the old source identity and groups; the daemon removes the old
-entry and private group, cancels its identity context, detaches its reply sinks,
-fails pending inbound
-deliveries once, installs the new identity with a new private group and the new
-hello's groups, and only then acknowledges. It sends no
-`session.superseded` on this same socket. This adds one same-ID update branch
+exactly, including order; the daemon then refreshes name and information in
+place. Different groups are `invalid_hello` and close the connection. With a different
+`session_id`, the directory replaces the entry before acknowledgement. Each
+admitted request already holds a copy of the old source identity and groups;
+the old owner detaches its reply sinks and settles pending inbound deliveries
+once. The new entry has its own private group and the new hello's groups. It
+sends no `session.superseded` on this same socket. This adds one same-ID update branch
 and one different-ID replacement branch. A worker connection never accepts a
 second hello.
 
 A worker hello resolves a one-use reservation created by `lane.describe` or
 `lane.spawn`. The reservation binds token, product, transaction, and expiry.
-Validation and token consumption are one locked operation. Wrong-product,
+Validation and token consumption are one directory operation. Wrong-product,
 unknown, expired, or repeated hello is `invalid_hello`; cancellation removes an
 unclaimed reservation. The connection stays provisional until open commits.
 Before commit it may answer daemon calls but every worker-originated session
-method returns `not_committed`. The open call's response-completion hook commits
-the row synchronously on the reader before that reader advances to the next
-frame; commit failure closes the provisional connection. This commit-before-
-dispatch ordering needs no buffer, gate, worker-side acknowledgement, or wait.
+method returns `not_committed`. The lane owner processes the open response and
+commits before it processes the next frame already waiting in its inbox. Commit
+failure closes the provisional connection. This commit-before-dispatch ordering
+needs no additional commit buffer, gate, or acknowledgement.
 
 Local peers state their identity and groups, and a federated daemon states its
 own summaries. The daemon adds no PID, peer-credential, descendant, signature,
@@ -628,64 +634,63 @@ separator reaches process resolution. Failure to find an executable on PATH is
 The one-use token is present only in the child's environment.
 
 `lane.describe` creates a rowless reservation, starts the process, and waits
-for either a valid hello, process exit, or the single spawn timeout. Valid hello
-is the complete result. The daemon returns its declarations and synchronously
-closes the supervised process without sending `session.open`. Describe creates
-no row, native session, connection entry, or product-specific readiness state.
+for either a valid hello, process exit, shutdown, or the single spawn timeout.
+Valid hello is the complete result. The daemon returns its declarations and
+stops the supervised process without sending `session.open`. Describe creates no
+row, native session, or product-specific readiness state.
 
-`lane.spawn` has one transaction owner. A transaction-local mutex lets the open
-completion hook, process exit, timeout, or daemon shutdown choose exactly one
-outcome. For a new lane it validates the open object, composes `<parent name
-part>/<caller leaf>@<target host>`, composes `<parent private group>/<leaf>`,
-adds only that group, the parent private group, and `extra_groups`, and reserves
-the prospective name until commit or failure. The full composed name part must
-fit the 128-character grammar and be unique among rows and reservations on that host.
-Siblings are thereby unique, and two different parents with the same name part
-collide on the same composed child name; the second spawn receives
-`name_taken`. The transaction goroutine holds that name reservation through
-commit or failure cleanup and takes no session-ID row lock for a fresh spawn.
-For resume it takes the session-ID row lock before rereading the row and holds
-it through open, commit or failure cleanup; a second resume waits on that lock.
-The provisional connection remains transaction-local and is absent from
-`connections` and `session.list`. It then reuses the row's product,
-composed name, groups, and stored open object. It creates the
-reservation, starts `<product>` with empty argv and the launch token, consumes
-hello, checks declared open-field support, and sends one `session.open`. Resume
-includes the row's ID part as `resume_session_id`; new open omits it.
+New `lane.spawn` validates the full open object and composed name before exec.
+It creates one directory reservation containing the composed name, product,
+launch token, timer, and reply slot. The composed name is
+`<parent name part>/<caller leaf>@<target host>`; the groups are the parent
+private group, `<parent private group>/<leaf>`, and explicit `extra_groups`.
+The prospective name stays reserved through final process cleanup. Siblings are
+thereby unique, and two equal parent name parts with the same leaf collide; the
+second spawn receives `name_taken`.
 
-The daemon starts one hello waiter and one direct open call; it has no generic
-event object, gate, or frame queue. One select observes open completion,
-process exit, timeout, and shutdown. After process exit it continues draining
-the already-closed socket while timeout and shutdown remain selectable. The
-open call's completion hook validates the product-returned session ID part and
-competes for the transaction mutex; it takes no row lock. If it wins, it
-requires exact
-equality to `resume_session_id` on resume, rejects a fresh canonical ID already
-owned by a row or peer as `spawn_failed` with `session id already exists`, then
-inserts the row and publishes the exact connection in one `mapsMutex` critical
-section. The hook
-returns before the socket reader advances, so the commit precedes dispatch of
-the worker's next frame. Process exit waits only for the reader to drain that
-already-closed socket: an open response written first can commit; EOF first
-fails spawn. Timeout and shutdown take the same transaction mutex and perform
-the single cleanup only if they win. A following EOF merely makes a committed
-row offline. No compensating close is attempted for native files created before
-commit; that accepted crash window does not justify another state.
+Resume looks up the durable row, checks visibility, and claims that exact entry
+before exec. A resume claim has no live attachment until commit. Another run,
+interrupt, close, resume, or forget returns `busy` immediately; nothing waits.
+The owner reuses the row's product, composed name, groups, and stored open value.
+New and resumed launches both start
+`<product>` with empty argv and the token in the environment, consume hello,
+check declared open-field support, and send one `session.open`. Resume includes
+the row's ID part as `resume_session_id`; new open omits it.
 
-A failed durable write returns `internal` after cleaning the provisional
-in-memory connection, pending entry, and reservation. There is no storage
-retry.
+The launch helper owns exec and the direct child. Before token claim it selects
+among child exit, timeout, shutdown, and claim. After claim it posts process
+events to the connection owner and waits for the child. The connection owner
+serializes the open response, process exit, timeout, connection close, and
+shutdown. A process-exit event records the exit while the reader drains frames
+already written before EOF; one later event finishes the request. It records
+TERM or KILL intent even when the process-start event is late, then applies that
+exact intent when the child arrives. Final cleanup stops the process group and
+joins the direct child, performs the final group KILL, then releases the
+reservation. A child that exits before hello takes this same cleanup path, so
+its descendants do not survive.
 
-The spawn timeout covers exec, hello, open, and commit. On failure the daemon
-closes the socket, kills the owned process group, and reaps the direct child. A concurrent
-resume waits on the same session-ID row lock, so a resumed native session never
-has two worker processes; a concurrent fresh spawn sees the composed-name
-reservation. A lost successful reply is recovered by listing visible lanes by
-name, not by replaying spawn.
+For a fresh open response, the owner validates the product-returned session ID,
+reserves that canonical ID in the directory, writes the row file, then publishes
+the ID, name, and attachment together. An existing peer or row with that ID is
+`spawn_failed` with `session id already exists`. Resume requires exact equality
+to `resume_session_id`. A disk failure returns `internal`; it removes the
+unpublished ID and reservation and does not retry. The owner commits before it
+handles the worker's next queued frame, so a request written immediately after
+the open response observes the row. There is no additional commit buffer, gate,
+or acknowledgement.
 
-Caller EOF never cancels describe, spawn, resume, or close. The transaction
-runs to its commit or cleanup boundary and only its reply sink disappears;
-describe still reaps its probe and a successful spawn still publishes its row.
+If the child exits during open, the reader still posts every frame it read
+before its one connection-closed event. The owner records the process exit and
+keeps the original spawn deadline while it drains those already-read frames. A
+valid open response written before EOF may commit; EOF first fails spawn. No
+compensating close is attempted for native files created before commit; that
+accepted crash window does not justify another stored state.
+
+Caller EOF never cancels describe, spawn, resume, or close. Only the caller's
+reply helper ends; the launch owner continues to commit or final cleanup.
+Describe still reaps its probe and a successful spawn still publishes its row.
+A lost successful reply is recovered by listing visible lanes by name, not by
+replaying spawn.
 
 The bound is the single constant `spawnTransactionTimeout = 60s` for every
 product and for both describe and spawn. It is not configuration and has no
@@ -700,53 +705,65 @@ translation. The target name part must satisfy the 1-128-character grammar
 before lookup; malformed input is `invalid_frame`, while invisible and absent
 targets are both `unknown_session`. The
 daemon copies source identity and groups from its current peer entry or lane
-row when the request arrives and keeps that copy with the request;
+entry when the request arrives and keeps that copy with the request;
 caller-supplied identity does not cross the route and a later peer identity
 replacement cannot alter an admitted call.
 
-For `turn.run`, the daemon rejects an existing pending entry as `busy`, installs
-one new entry, and enqueues the request on the target connection in the same
-`mapsMutex` critical section, so an immediately following interrupt cannot
-overtake it. Each worker connection has one sender goroutine and one ordered
-outbound channel. One counter under `mapsMutex` caps unanswered calls at 256;
-it increments at admission and decrements when a reply or EOF removes the
-pending call. The channel preserves admission order and is not a second count.
-Admission never blocks; a full bound fails only the new call with `busy`.
-Caller cancellation
-removes only the reply sink, not the pending entry or worker request. A terminal
-reply is validated, the pending entry is removed, and the result is delivered
-only when the caller's reply sink remains. If that sink is gone, the daemon
-drains and discards the result; it does not persist product-owned turn output.
-Worker EOF fails the pending request once; the daemon never manufactures a
-terminal outcome.
+Destination-entry validation and the non-blocking post to its inbox are one
+directory operation. A full 256-element inbox returns `busy` at that door. The
+inbox holds mixed events, not 256 reserved call slots. A request already in that
+queue may later receive `busy` when the target owner dequeues it. Multicast
+resolution and deduplication happen first on a copied directory snapshot.
 
-`turn.interrupt` and `session.close` use that same ordered sender. Their
-handlers enqueue synchronously in frame order and move only response waiting
-to a goroutine. The worker kit
-owns the single native interrupt invocation. `message.deliver` uses the target
-connection's sender too, while deliveries to different targets are concurrent;
-its returned disposition is copied into the sender's receipt. The daemon queues
-only bounded outbound calls needed to preserve one connection's wire order; it
-does not queue product work or results.
+The target owner admits requests in inbox order. Its pending map contains at
+most 256 unanswered worker calls; a dequeued 257th call returns `busy`. This is
+a separate limit from the mixed-event inbox and must not be described as 512
+calls. For `turn.run`, the owner also rejects a second outstanding run, records
+the pending call, updates the directory's running projection, and sends the
+worker frame before it handles a following interrupt. `turn.interrupt`,
+`session.close`, and `message.deliver` use the same path. The worker kit owns the
+single native interrupt invocation. A `session.close` operation retains its
+pending slot through process cleanup.
 
-`session.close` takes the row lock first, then rereads the row and current
-connection; a row removed by a preceding `forget` is `unknown_session`. It sends
-close while any run remains outstanding. The worker kit interrupts and awaits
-that same run. The one `closeBound = 10s` deadline starts when the daemon sends
+Each pending operation retains the destination entry token and its capacity-one
+reply slot. A worker result removes the operation and answers the slot in the
+same owner-loop turn. Before settlement the owner compares the retained entry
+with its current identity and directory entry; a response from a replaced
+identity becomes `not_connected`, rendered as `no_receipt` for delivery. Worker
+EOF settles every remaining operation once. A late response is unmatched and
+dropped. Caller cancellation ends only its reply helper; it neither removes the
+target's pending operation nor cancels product work. A later result is drained
+and discarded, and the daemon stores no product-owned turn output.
+
+A claimed row rejects every new run, interrupt, close, resume, or forget with
+`busy`; it never waits. Delivery is not part of that exclusion: a delivery to a
+claimed but still attached lane proceeds through the ordinary inbox and pending
+limits. A row removed by a preceding `forget` is `unknown_session`.
+
+On the first admitted `session.close`, the lane owner marks the row claimed and
+sends exactly one worker close. The worker kit interrupts and awaits any current
+run. A successful close response is held in the caller owner only while that
+same target still has a run reply outstanding; a busy close is an admission
+failure and is never held. When no same-target run reply remains pending, all
+eligible held successful closes are released. The run terminal is written
+first, then the close response. No dependency crosses targets.
+
+The one `closeBound = 10s` deadline starts when the daemon sends
 `session.close`. Close waits for the worker response, never for delivery of that
-response to the caller. If the result arrives before the bound, the daemon
-closes the socket, sends TERM to the owned process group, and waits only for the
-direct child. If the
-deadline expires first, it closes the worker file descriptor to interrupt a
-blocked call, sends KILL to the group, and reaps the child, with no second bound;
-after reaping it sends one final group KILL so no descendant survives. Process
-cleanup runs once. Stderr uses one pipe reader and a bounded trailing buffer;
-the parent closes its write end after start, and process wait never joins the
-reader or descendant pipe EOF.
-The row then remains offline and resumable. With `forget:true`, the daemon
-deletes the row only after that cleanup; later control or resume resolves to
-`unknown_session`. Forced cleanup fails the pending run once and persists no
-fabricated result.
+response to the caller. On ordinary completion the owner closes the socket and
+records TERM. On expiry it closes the socket and records KILL. A process-start
+event arriving later receives the recorded signal rather than reconstructing a
+different one. Process cleanup kills the group, waits only for the direct child,
+and sends one final group KILL. The stderr reader alone owns its read descriptor:
+after child wait, an immediate read deadline wakes it, it drains bytes already
+buffered without waiting for descendant EOF, closes the descriptor, and keeps a
+bounded tail.
+
+After cleanup the row remains offline and resumable. With `forget:true`, the
+owner deletes its row file before removing the directory entry; later control or
+resume is `unknown_session`. Forced cleanup settles the pending run once and
+persists no fabricated result. Cleanup and claim release never wait for writing
+the caller response.
 
 Once close begins, the kit keeps the existing run slot occupied until process
 exit even if the native run has already settled. A later `turn.run` is `busy`
@@ -754,49 +771,56 @@ without invoking product code, and delivery during close is rejected with
 reason `closing`. This uses the existing run-slot fact; there is no closing
 state.
 
-`closeBound` is not configuration and has no per-product override. Together
-with `spawnTransactionTimeout = 60s`, it is one of exactly two daemon lane-path
-clocks.
+The daemon has three named bounds: `spawnTransactionTimeout = 60s`,
+`closeBound = 10s`, and `supersedeWriteBound = 1s`. The first two are lifecycle
+clocks. The third bounds one final socket write and never delays a writable
+connection. None is configuration or product-specific.
 
 The daemon sends at most one `session.close` request on a worker connection.
-Concurrent public close calls serialize on the row lock; after the first
-finishes, the next sees the row offline. A second `session.close` frame on the
+A concurrent or later close while that row remains claimed receives `busy` and
+the caller retries after cleanup. A second `session.close` frame on the
 same worker connection is therefore a protocol violation and closes that
 connection without a reply.
 
-Unrequested lane EOF takes the same row lock, removes only the matching
-connection pointer, fails calls once, kills the process group, and reaps the
-direct child.
-A resume waits behind that cleanup. Peer EOF only removes the matching
-transient peer entry. These pointer checks make late EOF from a displaced peer
-or old process harmless without a generation counter.
+Every connection ending closes its file descriptor. The reader then posts the
+one connection-closed event. On that event the owner detaches its exact
+attachment, settles pending calls, and disposes the outbox. It continues
+consuming its inbox until its owned helpers and child are finished and the inbox
+is empty. Unrequested lane EOF also kills the process group and reaps the child
+before releasing the claim. A resume attempt during that cleanup receives
+`busy`. Peer EOF removes only the exact transient entry. A stale EOF cannot
+clear a replacement entry.
 
 Daemon shutdown closes every accepted connection, including a token-
-authenticated worker that has not committed, chooses shutdown as the outcome
-of every active spawn transaction that has not already finished, and reaps each
-owned process. Nothing can commit after shutdown returns.
+authenticated worker that has not committed, prevents new reservations and
+commits under the directory mutex, and broadcasts shutdown once. Each owner
+disables that select case after receiving it, closes its socket, settles pending
+work, and reaps its child. Connection owner loops, readers, writers, and launch
+producers are registered before starting; reply helpers are covered transitively
+by their owner's owned count. Shutdown returns after the accept loop and all
+registered work have ended; nothing commits afterward.
 
 ### 2.5 Listing, messaging, and federation
 
-`session.list` snapshots transient peers, current connections, pending turns,
-reservations, and reserved names under `mapsMutex`, then reads durable rows in
-that same maps-then-table order before releasing the mutex. It takes no row
-lock. `connected` comes only from the exact
-connection pointer; `running` comes only from the pending entry. Filtering and
-group visibility happen before results are assembled. No roster cache or
-projection stream exists.
+`session.list` copies one coherent metadata snapshot under the directory mutex:
+durable rows, transient peers, exact attachments, claims, and running
+projections. It performs no disk read and waits on no owner loop. Filtering and
+group visibility happen while selecting the snapshot; sorting and result
+assembly happen after unlock. No roster cache or projection stream exists.
 
 `message.send` first validates each target's name grammar. It then resolves and
-deduplicates visible targets. Every remaining label yields one receipt:
+deduplicates the whole visible recipient set before posting any delivery. Every
+remaining label yields one receipt:
 unresolvable labels are rejected with `unknown_session`, `unknown_host`, or
 `ambiguous`, while every resolvable current target receives one
-`message.deliver`. Resolution captures the destination's identity context with
-the connection snapshot; a same-socket identity change cancels that old
-destination, so its late receipt cannot attach to the new identity. Those
-deliveries run concurrently, and one response returns
+`message.deliver`. Resolution retains the exact destination entry. The target
+compares that token when it dequeues the request, and response settlement checks
+it again; a same-socket identity change therefore cannot attach an old delivery
+or receipt to the new identity. Those deliveries run concurrently, and one response returns
 the receipts in label order after session-ID deduplication. There is no delivery
-timer. Offline lanes and failed calls produce rejected receipts. A target at
-the 256-unanswered-call bound produces rejected reason `busy`. If EOF or
+timer. Offline lanes and failed calls produce rejected receipts. A full target
+inbox or a target owner already holding 256 unanswered calls produces rejected
+reason `busy`. A claimed but still attached lane remains deliverable. If EOF or
 supersession ends the target connection before a receipt arrives, the sender
 receives rejected reason `no_receipt`; whether product code acted is unknowable
 and deliberately not promised. Canonical names are resolved only after
@@ -838,8 +862,8 @@ Secrets never leave configuration, TLS 1.3 supplies forward secrecy, and no
 custom application handshake exists. There is deliberately no separate expiry
 or revocation system: rotation is an edit to both configurations. The local daemon socket remains
 the trusted transport described in Section 1. This transport is capped at
-**120 production and 120 test logical lines** inside `internal/daemon`'s
-existing 1,100-line budget; tests cover derivation, pinning, mismatch, and
+**120 production and 120 test logical lines** inside the proposed combined
+daemon-and-connection budget; tests cover derivation, pinning, mismatch, and
 rotation by configuration edit. Optional local encryption reuses that code and
 may add at most **40 production and 60 test logical lines**; it does not create
 a separate transport package or budget.
@@ -886,25 +910,29 @@ conformance references, and the public `bus/sdk/go` and `bus/sdk/js` kits.
 and packaging projection. A future repository split can use `git subtree`
 without moving a file across that boundary.
 
-`bus/internal/daemon` owns the table, current connections, pending turns, row
-locks, reservations, routing, and federation. `bus/cmd/agentbus` only
+`bus/internal/daemon` owns the directory, session owner loops, row files,
+reservations, routing, and federation. `bus/cmd/agentbus` only
 parses CLI/MCP input, constructs the daemon with its optional federation,
 discovery, and local-encryption configuration, and renders results. Product
 selection never enters either request router.
 
-`bus/internal/rpc` is the product-agnostic full-duplex connection
-implementation. One reader runs each handler synchronously in frame order. A
-handler decides state and returns at once; long work such as a product run or a
-forwarded wait is spawned by the handler, never by the transport. A handler
-never blocks the reader. One send helper
-holds a write mutex for one complete frame; it checks the closed flag immediately
-before writing, and any write error calls `Close`. A separate mutex protects only
-the closed flag, the strictly increasing request counters, and the pending map;
-it is never held during I/O or a callback. `Close` marks the connection closed,
-detaches pending calls, closes the file descriptor to interrupt blocked I/O, and
-fails each detached call once. It never waits for the write mutex and is
-idempotent. Any read error or EOF follows that same close path.
-Product reports, reconnect policy, and method-specific routing do not enter it.
+`bus/internal/conn` is the daemon's product-agnostic socket pair. The session
+creates the inbox and passes it in. One reader posts frames or one final
+connection-closed event; one writer consumes the bounded outbox. Foreign posts
+are non-blocking, while the reader and owner-confined helpers use their owned
+paths. Closing the file descriptor is the only termination request. The reader
+alone closes the connection `done` channel and reports the single termination
+event; the owner handles it once and disposes the outbox. Graceful supersession
+queues one final frame under its one-second deadline before the writer closes
+the descriptor. Hard close, overflow, and shutdown close it immediately. No
+product policy enters this package.
+
+`bus/internal/rpc` is the separate full-duplex client used by the public kits.
+Its one reader runs admission handlers in frame order; a handler decides state
+and returns, while callbacks or waits run outside the reader. One complete-frame
+write mutex and one small state mutex protect its client calls and close path.
+It is not used to own daemon sessions and does not duplicate the directory or
+owner-loop facts.
 
 `bus/internal/structuredprocess` retains generic bounded TERM/KILL process
 ownership and must not import a product or protocol state type. The public Go
@@ -932,15 +960,16 @@ lines, not as additions hidden behind relocation accounting:
 
 | Surface | Maximum | Constraint |
 | --- | ---: | --- |
-| `bus/internal/daemon` | 1,100 | Table, router, transactions, delivery, and federation together. |
+| `bus/internal/daemon` + `bus/internal/conn` | 1,400 | Directory, session owners, row files, launch, delivery, federation, and the daemon socket pair together. |
 | Largest daemon router file | 450 | No product literal, argv parser, or product callback. |
-| Durable table | 120 | Open, load, insert, and delete for the six stored columns. |
+| Durable row files | 120 | Load, write+rename, and delete for the six stored columns. |
 | Connection admission | 150 | First hello, both peer re-hello branches, and supersession. |
-| Spawn/describe transaction | 200 | Reservation, empty-argv exec, one transaction winner, 60-second bound, and commit before dispatch. |
-| Routing and visibility | 200 | Ordered worker sender, request dispatch, group visibility, per-label receipts, and last-`@`/bare-name resolution. |
-| Close, EOF, and forget | 100 | Stop, remove the live entry, optional row delete, and KILL at 10 seconds. |
+| Spawn/describe | 200 | Name/token reservation, empty-argv exec, owner-loop decision, 60-second bound, and commit before the next frame. |
+| Routing and visibility | 200 | Directory lookup/post, owner-loop admission, reply slots, group visibility, per-label receipts, and last-`@`/bare-name resolution. |
+| Close, EOF, and forget | 100 | Claim, settle, optional row delete, and KILL at 10 seconds. |
 | CLI, composition, and config | 100 | Optional hub, host, products, and local-key loading. |
 | Cross-host forwarder | 60 | Host-qualified session ID or explicit spawn/describe host; one hop, no state, retry, or shape translation. |
+| `bus/internal/conn` subcap | 150 | One reader, one writer, bounded inbox/outbox, and descriptor close. |
 | `bus/internal/rpc` | 200 | Framing, one reader, pending calls, complete-frame writes, and close. |
 | `bus/internal/structuredprocess` | 700 | Generic process ownership; current functionality may remain. |
 | `bus/cmd/agentbus` daemon composition | 350 | Construction and rendering only; no protocol state. |
