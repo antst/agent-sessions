@@ -1216,7 +1216,12 @@ disconnected it stores the new desired name and information and returns
 Its `replace(ctx, identity)` call supplies a complete new identity for a
 different-ID re-hello on the same connection. It settles outstanding operations
 from the old identity as `not_connected`; reconnect uses the new desired
-identity.
+identity. The desired-identity swap, caller settlement, and removal of the old
+wire from new-call admission are one peer-lock operation; calls in the gap fail
+`not_connected`. The replacement hello acknowledgement reinstalls that wire
+only if its desired-identity generation is still current. `rehello` composes
+its name and information from the current desired identity under the same lock,
+so a crossed replacement keeps the new session ID and groups.
 The product's current title is the peer name. A same-ID re-hello updates that
 name and information in place only when the declared groups slice is exactly
 equal, including order. A

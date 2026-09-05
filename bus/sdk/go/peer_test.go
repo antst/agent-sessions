@@ -131,7 +131,8 @@ func TestPeerReplaceSettlesOldRunAndReconnectsAsNewIdentity(t *testing.T) {
 		}
 	})
 	requests1, server1, client1 := peerPipe(t)
-	connections <- client1
+	paused := &pauseNthWriteConn{Conn: client1, at: 3, entered: make(chan struct{}), release: make(chan struct{})}
+	connections <- paused
 	peer, err := ConnectPeer(Identity{Product: "fixture-client", SessionID: "old", Name: "old", Groups: []string{"old"}, Info: map[string]any{}}, acceptDelivery)
 	if err != nil {
 		t.Fatal(err)
@@ -147,19 +148,41 @@ func TestPeerReplaceSettlesOldRunAndReconnectsAsNewIdentity(t *testing.T) {
 	replaced := make(chan error, 1)
 	next := Identity{Product: "fixture-client", SessionID: "new", Name: "new", Groups: []string{"new"}, Info: map[string]any{}}
 	go func() { replaced <- peer.Replace(context.Background(), next) }()
-	replacement := <-requests1
+	<-paused.entered
 	status, err := peer.Caller.Wait(WaitRequest{TurnID: started.TurnID})
 	if err != nil || status.State != "unavailable" || status.Reason != "-32002 not_connected" {
 		t.Fatalf("old run = %#v, %v", status, err)
 	}
+	if _, err = peer.Call(context.Background(), "session.list", SessionListRequest{}); !isCode(err, protocol.NotConnected) {
+		t.Fatalf("call during replacement = %v", err)
+	}
+	if err = peer.Rehello("retitled", map[string]any{"revision": 2}); !isCode(err, protocol.NotConnected) {
+		t.Fatalf("crossed rehello = %v", err)
+	}
 	mustRPC(t, server1.Error(run, protocol.NotConnected, nil))
+	close(paused.release)
+	replacement := <-requests1
+	if _, err = peer.Call(context.Background(), "session.list", SessionListRequest{}); !isCode(err, protocol.NotConnected) {
+		t.Fatalf("call before replacement ack = %v", err)
+	}
+	select {
+	case request := <-requests1:
+		t.Fatalf("request escaped replacement gap: %s", request.Method)
+	default:
+	}
 	mustRPC(t, server1.Result(replacement, struct{}{}))
+	retitled := <-requests1
+	assertPeerHello(t, retitled, "retitled", "")
+	if got := retitled.Params.(*protocol.PeerHello).SessionID; got != "new" {
+		t.Fatalf("retitled identity = %q", got)
+	}
+	mustRPC(t, server1.Result(retitled, struct{}{}))
 	mustRPC(t, <-replaced)
 	peer.mu.Lock()
-	current := peer.identity.SessionID
+	currentID, currentName := peer.identity.SessionID, peer.identity.Name
 	peer.mu.Unlock()
-	if current != "new" {
-		t.Fatalf("identity = %q", current)
+	if currentID != "new" || currentName != "retitled" {
+		t.Fatalf("identity = %q/%q", currentID, currentName)
 	}
 	requests2, server2, client2 := peerPipe(t)
 	connections <- client2
@@ -168,9 +191,25 @@ func TestPeerReplaceSettlesOldRunAndReconnectsAsNewIdentity(t *testing.T) {
 	if got := reconnected.Params.(*protocol.PeerHello).SessionID; got != "new" {
 		t.Fatalf("reconnect identity = %q", got)
 	}
+	assertPeerHello(t, reconnected, "retitled", "")
 	mustRPC(t, server2.Result(reconnected, struct{}{}))
 	peer.Shutdown()
 	await(t, peer.Closed(), "peer closed")
+}
+
+type pauseNthWriteConn struct {
+	net.Conn
+	at, writes       int
+	entered, release chan struct{}
+}
+
+func (c *pauseNthWriteConn) Write(body []byte) (int, error) {
+	c.writes++
+	if c.writes == c.at {
+		close(c.entered)
+		<-c.release
+	}
+	return c.Conn.Write(body)
 }
 
 func TestCallerReportsRealDaemonEOF(t *testing.T) {

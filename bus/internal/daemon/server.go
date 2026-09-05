@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 
 	"github.com/antst/agent-sessions/bus/internal/conn"
 )
@@ -56,7 +57,7 @@ func Start(config Config) (*Daemon, error) {
 	if err = os.MkdirAll(filepath.Dir(config.SocketPath), 0o700); err != nil {
 		return nil, err
 	}
-	_ = os.Remove(config.SocketPath)
+	sweepSockets(config.SocketPath)
 	listener, err := net.Listen("unix", config.SocketPath)
 	if err != nil {
 		return nil, err
@@ -70,6 +71,22 @@ func Start(config Config) (*Daemon, error) {
 	d.directory = newDirectory(d, rows)
 	go d.accept()
 	return d, nil
+}
+
+func sweepSockets(socket string) {
+	paths := []string{socket}
+	entries, _ := os.ReadDir(filepath.Join(filepath.Dir(socket), "lanes"))
+	for _, entry := range entries {
+		paths = append(paths, filepath.Join(filepath.Dir(socket), "lanes", entry.Name()))
+	}
+	for _, path := range paths {
+		fd, err := net.Dial("unix", path)
+		if err == nil {
+			_ = fd.Close()
+		} else if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, os.ErrNotExist) {
+			_ = os.Remove(path)
+		}
+	}
 }
 
 func (d *Daemon) Done() <-chan struct{} { return d.done }
