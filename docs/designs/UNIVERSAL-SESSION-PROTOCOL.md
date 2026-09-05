@@ -450,7 +450,7 @@ and closes the connection without writing one.
 
 ## 2. Daemon
 
-### 2.1 Authority and data
+### 2.1 Stored and live data
 
 The daemon is a router around one durable table. It does not know how any
 product creates a session, runs a turn, injects a message, or closes. Native
@@ -505,11 +505,11 @@ encoded as base64; the daemon and hub reject any configured federation secret
 or `local_key` shorter than 32 decoded bytes. Config files containing secrets
 must be mode 0600.
 
-Three in-memory indexes are the complete live authority:
+Three in-memory indexes hold all live session data:
 
 - `connections[session_id]` uses the canonical `id@host` and points to the exact current connection and, for a
-  spawned lane, its process supervisor. Admission checks pointer identity on
-  every request.
+  spawned lane, its process supervisor. Each request checks that it arrived on
+  that exact pointer.
 - `pending[session_id]` contains at most one forwarded `turn.run`: its input,
   worker request, and optional caller reply sink. The entry is not a turn state
   machine; existence means running.
@@ -528,9 +528,9 @@ critical section, so a summary cannot expose `connected=false` with a stale
 
 The durable table indexes canonical `session_id` and canonical name uniquely.
 No live fact, connection ID, generation, process ID, deadline, caller ID, or
-authorization decision is stored in a row.
+access-check result is stored in a row.
 
-### 2.2 Connection admission
+### 2.2 Opening and replacing connections
 
 The daemon accepts a socket, completes the required local TLS handshake when
 `local_key` is configured, enforces the framing limits in Section 1, and
@@ -546,16 +546,17 @@ ID sequence with an immediate write deadline and closes it without waiting for
 the acknowledgement. All of its pending calls fail once. No reconnect lease or
 grace timer exists.
 
-A second peer hello on that same live connection is ordered admission. With
+A second peer hello on that same live connection is handled in frame order. With
 the same `session_id`, its groups must equal the installed set
 exactly; the daemon then refreshes name and information in place. Different
 groups are `invalid_hello` and close the connection. With a different
-`session_id`, replacement is atomic under the maps mutex: request admission has
-already captured the old source identity and groups; the daemon removes the old
+`session_id`, replacement is atomic under the maps mutex: each admitted request
+already holds a copy of the old source identity and groups; the daemon removes the old
 entry and private group, detaches its reply sinks, fails pending inbound
 deliveries once, installs the new identity with a new private group and the new
 hello's groups, and only then acknowledges. It sends no
-`session.superseded` on this same socket. A worker connection never accepts a
+`session.superseded` on this same socket. This adds one same-ID update branch
+and one different-ID replacement branch. A worker connection never accepts a
 second hello.
 
 A worker hello resolves a one-use reservation created by `lane.describe` or
@@ -569,9 +570,9 @@ keep reading and buffering complete frames, but dispatches none until the row
 commit succeeds; commit failure closes the provisional connection. This
 commit-before-dispatch ordering needs no worker-side acknowledgement or wait.
 
-The protocol is trusted by construction: local peers assert identity and
-groups, and a federated daemon asserts its own summaries. The daemon adds no
-PID, peer-credential, descendant, signature, or capability machinery.
+Local peers state their identity and groups, and a federated daemon states its
+own summaries. The daemon adds no PID, peer-credential, descendant, signature,
+or capability check.
 
 ### 2.3 Describe and spawn
 
@@ -657,13 +658,13 @@ per-product override.
 
 ### 2.4 Routing, turns, and close
 
-Every request resolves the caller from its exact current connection, qualifies
+Every request reads the caller from its exact current connection, qualifies
 a bare target with the caller's own host, resolves the resulting canonical ID
 or name among visible sessions, and then forwards the closed method without
 translation. Invisible and absent targets are both `unknown_session`. The
-daemon derives source identity and groups from its current peer entry or lane
-row at admission and carries that immutable snapshot through the request;
-caller-supplied authority never crosses the route and a later peer identity
+daemon copies source identity and groups from its current peer entry or lane
+row when the request arrives and keeps that copy with the request;
+caller-supplied identity does not cross the route and a later peer identity
 replacement cannot alter an admitted call.
 
 For `turn.run`, the daemon rejects an existing pending entry as `busy`, installs
@@ -782,14 +783,14 @@ A forwarded request is exactly
 `{from:{session_id:<id@host>,groups:[...]},request:<unchanged public request>}`.
 The originating host is the authenticated TLS connection and correlation is
 the enclosing JSON-RPC ID. The target applies its ordinary visibility check
-using the carried groups; the hub does not decide authorization. A federated
+using the carried groups; the hub does not make that decision. A federated
 turn is one outstanding RPC at each hop; caller loss has the same sink-only
-effect, and the authoritative daemon drains and discards a result whose origin
+effect, and the target daemon drains and discards a result whose origin
 reply sink has disappeared. Transport loss before a forwarded response returns
 `forward_lost`: the request may or may not have been applied and is never
 retried.
 
-`maxPendingForwardedPerHost = 256` is the one federation-flow cap. Overflow
+`maxPendingForwardedPerHost = 256` is the one added limit. Overflow
 closes that host connection and fails its pending forwarded calls as
 `forward_lost`; the ordinary 1 MiB frame limit already bounds snapshots and
 requests. All forwarding is one function of at most 60 logical lines: resolve
