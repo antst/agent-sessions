@@ -1,9 +1,12 @@
 package host
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
-	"runtime"
+	"net"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -12,16 +15,8 @@ import (
 )
 
 type fakeTurn struct {
-	done           chan struct{}
-	waiting        chan struct{}
-	injected       chan string
-	interrupt      chan struct{}
-	injecting      chan struct{}
-	inject         chan struct{}
-	interruptBlock chan struct{}
-	active         atomic.Bool
-	outcome        string
-	interrupts     atomic.Int32
+	done, waiting, interrupted, interruptBlock chan struct{}
+	interrupts                                 atomic.Int32
 }
 
 func (t *fakeTurn) Wait(context.Context) (sessionkit.TurnResult, error) {
@@ -29,230 +24,189 @@ func (t *fakeTurn) Wait(context.Context) (sessionkit.TurnResult, error) {
 		close(t.waiting)
 	}
 	<-t.done
-	return sessionkit.TurnResult{Outcome: t.outcome, Result: "done"}, nil
-}
-func (t *fakeTurn) Inject(_ context.Context, message string) (bool, error) {
-	if t.injecting != nil {
-		close(t.injecting)
-		<-t.inject
-	}
-	if t.active.Load() {
-		t.injected <- message
-	}
-	return t.active.Load(), nil
+	return sessionkit.TurnResult{Outcome: "completed"}, nil
 }
 func (t *fakeTurn) Interrupt(context.Context) error {
 	t.interrupts.Add(1)
-	close(t.interrupt)
+	close(t.interrupted)
 	if t.interruptBlock != nil {
 		<-t.interruptBlock
 	}
 	return nil
 }
 
-func TestHandoffConfirmedActiveInjection(t *testing.T) {
-	h, turn := &Handoff{}, newFakeTurn(true)
-	run := asyncRun(h, func(context.Context, string) (Turn, error) { return turn, nil })
-	<-turn.waiting
-	receipt, err := h.Deliver(context.Background(), delivery("body"))
-	must(t, err)
-	if receipt.Disposition != "injected" || !strings.Contains(<-turn.injected, "body") {
-		t.Fatalf("receipt = %#v", receipt)
-	}
-	close(turn.done)
-	<-run
-}
-
-func TestHandoffQueueAndInterrupt(t *testing.T) {
+func TestHandoffDeliveryAndQueueCommit(t *testing.T) {
 	h := &Handoff{}
-	_, _ = h.Deliver(context.Background(), delivery("queued"))
-	turn := newFakeTurn(true)
-	turn.outcome = "interrupted"
-	turn.interruptBlock = make(chan struct{})
-	started := make(chan string, 1)
-	release := make(chan struct{})
-	run := asyncRun(h, func(context.Context, string) (Turn, error) {
-		started <- "started"
-		<-release
-		return turn, nil
-	})
+	var injected string
+	receipt, err := h.Deliver(context.Background(), delivery("active"), func(_ context.Context, message string) (bool, error) { injected = message; return true, nil })
+	must(t, err)
+	check(t, receipt.Disposition == "injected" && strings.Contains(injected, "active"), "active receipt = %#v", receipt)
+	started, release := make(chan struct{}), make(chan struct{})
+	delivered := make(chan sessionkit.DeliveryReceipt, 1)
+	go func() {
+		receipt, _ := h.Deliver(context.Background(), delivery("racing"), func(context.Context, string) (bool, error) { close(started); <-release; return false, nil })
+		delivered <- receipt
+	}()
 	<-started
-	_, _ = h.Deliver(context.Background(), delivery("late"))
-	interrupted := asyncInterrupt(h)
-	select {
-	case <-interrupted:
-		t.Fatal("interrupt did not wait for creation")
-	default:
-	}
-	waitStartingInterrupt(h)
 	close(release)
-	<-turn.interrupt
-	close(turn.done)
-	if result := <-run; result.Outcome != "interrupted" || turn.interrupts.Load() != 1 {
-		t.Fatalf("result = %#v, interrupts = %d", result, turn.interrupts.Load())
-	}
-	close(turn.interruptBlock)
-	must(t, <-interrupted)
-	var nextPrompt string
-	nextTurn := newFakeTurn(false)
-	next := asyncRun(h, func(_ context.Context, prompt string) (Turn, error) {
-		nextPrompt = prompt
-		return nextTurn, nil
-	})
-	close(nextTurn.done)
-	<-next
-	if strings.Contains(nextPrompt, "queued") || !strings.Contains(nextPrompt, "late") {
-		t.Fatalf("commit removed wrong queue entries: %q", nextPrompt)
-	}
+	receipt = <-delivered
+	check(t, receipt.Disposition == "queued_for_next_turn", "terminal receipt = %#v", receipt)
+	_, _ = h.Deliver(context.Background(), delivery("after"), nil)
+	next, prompt := newFakeTurn(), ""
+	close(next.done)
+	_, err = h.Run(context.Background(), &sessionkit.Run{}, "", func(_ context.Context, got string) (Turn, error) { prompt = got; return next, nil })
+	must(t, err)
+	check(t, strings.Count(prompt, "racing") == 1 && strings.Index(prompt, "racing") < strings.Index(prompt, "after"), "next prompt = %q", prompt)
 }
 
 func TestHandoffFailedCreationKeepsFullQueue(t *testing.T) {
 	h := &Handoff{queue: make([]string, MaxQueuedDeliveries), queueSize: MaxQueuedDeliveries - 1}
-	started := make(chan struct{})
-	run := asyncRun(h, func(context.Context, string) (Turn, error) {
-		close(started)
-		waitStartingInterrupt(h)
-		return nil, errors.New("failed")
-	})
-	<-started
-	receipt, err := h.Deliver(context.Background(), delivery("overflow"))
-	must(t, err)
-	if receipt.Reason != "queue_full" {
-		t.Fatalf("receipt = %#v", receipt)
-	}
-	interrupted := asyncInterrupt(h)
-	select {
-	case <-interrupted:
-		t.Fatal("interrupt did not wait for failed creation")
-	default:
-	}
-	if result := <-run; result.Outcome != "interrupted" {
-		t.Fatalf("result = %#v", result)
-	}
-	must(t, <-interrupted)
-	if len(h.queue) != MaxQueuedDeliveries {
-		t.Fatalf("queue length = %d", len(h.queue))
-	}
-}
-
-func TestHandoffTerminalInjectionRace(t *testing.T) {
-	h := &Handoff{}
-	turn := newFakeTurn(true)
-	turn.injecting, turn.inject = make(chan struct{}), make(chan struct{})
-	run := asyncRun(h, func(context.Context, string) (Turn, error) { return turn, nil })
-	<-turn.waiting
-	delivered := asyncDeliver(h, "racing")
-	<-turn.injecting
-	turn.active.Store(false)
-	close(turn.done)
-	close(turn.inject)
-	if receipt := <-delivered; receipt.Disposition != "queued_for_next_turn" {
-		t.Fatalf("receipt = %#v", receipt)
-	}
-	<-run
-	_, _ = h.Deliver(context.Background(), delivery("after"))
-	var prompt string
-	nextTurn := newFakeTurn(false)
-	next := asyncRun(h, func(_ context.Context, input string) (Turn, error) { prompt = input; return nextTurn, nil })
-	close(nextTurn.done)
-	<-next
-	if strings.Count(prompt, "racing") != 1 || strings.Index(prompt, "racing") > strings.Index(prompt, "after") {
-		t.Fatalf("queued prompt = %q", prompt)
-	}
-}
-
-func TestHandoffBlockedActiveInterruptDoesNotBlockTerminal(t *testing.T) {
-	h := &Handoff{}
-	turn := newFakeTurn(true)
-	turn.interruptBlock = make(chan struct{})
-	run := asyncRun(h, func(context.Context, string) (Turn, error) { return turn, nil })
-	<-turn.waiting
-	interrupted := asyncInterrupt(h)
-	<-turn.interrupt
-	close(turn.done)
-	if result := <-run; result.Outcome != "completed" {
-		t.Fatalf("result = %#v", result)
-	}
-	receipt, err := h.Deliver(context.Background(), delivery("after"))
-	must(t, err)
-	if receipt.Disposition != "queued_for_next_turn" {
-		t.Fatalf("receipt = %#v", receipt)
-	}
-	close(turn.interruptBlock)
-	must(t, <-interrupted)
-}
-
-func TestHandoffInterruptBeforeRunAbortsCreation(t *testing.T) {
-	h, called := &Handoff{}, false
-	must(t, h.Interrupt(context.Background()))
-	result, err := h.Run(context.Background(), "input", func(context.Context, string) (Turn, error) {
-		called = true
-		return nil, nil
-	})
-	must(t, err)
-	if called || result.Outcome != "interrupted" {
-		t.Fatalf("created = %v, result = %#v", called, result)
-	}
-}
-
-func TestHandoffQueueByteBound(t *testing.T) {
-	h := &Handoff{queue: []string{"full"}, queueSize: MaxQueuedBytes}
-	receipt, err := h.Deliver(context.Background(), delivery("overflow"))
-	must(t, err)
-	if receipt.Disposition != "rejected" || receipt.Reason != "queue_full" {
-		t.Fatalf("receipt = %#v", receipt)
-	}
-}
-
-func asyncRun(h *Handoff, start StartTurn) <-chan sessionkit.TurnResult {
-	done := make(chan sessionkit.TurnResult, 1)
-	go func() {
-		result, _ := h.Run(context.Background(), "input", start)
-		done <- result
-	}()
-	return done
-}
-
-func asyncInterrupt(h *Handoff) <-chan error {
+	started, release := make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
-	go func() { done <- h.Interrupt(context.Background()) }()
-	return done
+	go func() {
+		_, err := h.Run(context.Background(), &sessionkit.Run{}, "input", func(context.Context, string) (Turn, error) {
+			close(started)
+			<-release
+			return nil, errors.New("failed")
+		})
+		done <- err
+	}()
+	<-started
+	receipt, err := h.Deliver(context.Background(), delivery("overflow"), nil)
+	must(t, err)
+	close(release)
+	check(t, receipt.Reason == "queue_full" && (<-done).Error() == "failed" && len(h.queue) == MaxQueuedDeliveries, "receipt = %#v, queue = %d", receipt, len(h.queue))
+	h = &Handoff{queue: []string{"full"}, queueSize: MaxQueuedBytes}
+	receipt, err = h.Deliver(context.Background(), delivery("overflow"), nil)
+	must(t, err)
+	check(t, receipt.Reason == "queue_full", "byte-bound receipt = %#v", receipt)
 }
 
-func asyncDeliver(h *Handoff, body string) <-chan sessionkit.DeliveryReceipt {
-	done := make(chan sessionkit.DeliveryReceipt, 1)
-	go func() { receipt, _ := h.Deliver(context.Background(), delivery(body)); done <- receipt }()
-	return done
+type workerProduct struct {
+	h                          Handoff
+	before, release, interrupt chan struct{}
+	start                      StartTurn
 }
 
-func newFakeTurn(active bool) *fakeTurn {
-	turn := &fakeTurn{done: make(chan struct{}), waiting: make(chan struct{}), injected: make(chan string, 1), interrupt: make(chan struct{}), outcome: "completed"}
-	turn.active.Store(active)
-	return turn
+func (*workerProduct) Hello(context.Context) (sessionkit.HelloDescription, error) {
+	return sessionkit.HelloDescription{Product: "example-peer", SupportedOpenFields: []string{}, ExtraArguments: []sessionkit.ExtraArgument{}}, nil
 }
+func (*workerProduct) Open(context.Context, sessionkit.OpenRequest) (sessionkit.OpenResult, error) {
+	return sessionkit.OpenResult{SessionID: "session"}, nil
+}
+func (p *workerProduct) Run(ctx context.Context, run *sessionkit.Run, input string) (sessionkit.TurnResult, error) {
+	close(p.before)
+	<-p.release
+	return p.h.Run(ctx, run, input, p.start)
+}
+func (p *workerProduct) Interrupt(ctx context.Context, run *sessionkit.Run) error {
+	close(p.interrupt)
+	return p.h.Interrupt(ctx, run)
+}
+func (p *workerProduct) Deliver(context.Context, sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
+	return sessionkit.DeliveryReceipt{}, nil
+}
+func (*workerProduct) Close(context.Context) error { return nil }
 
-func waitStartingInterrupt(h *Handoff) {
-	for {
-		h.mu.Lock()
-		interrupted := h.starting != nil && h.starting.interrupted
-		h.mu.Unlock()
-		if interrupted {
-			return
-		}
-		runtime.Gosched()
+func TestHandoffSDKInterruptCrossings(t *testing.T) {
+	for _, phase := range []string{"before callback", "during creation", "active turn"} {
+		t.Run(phase, func(t *testing.T) {
+			p := &workerProduct{before: make(chan struct{}), release: make(chan struct{}), interrupt: make(chan struct{})}
+			turn, creating, created := newFakeTurn(), make(chan struct{}), make(chan struct{})
+			called := false
+			switch phase {
+			case "before callback":
+				p.start = func(context.Context, string) (Turn, error) { called = true; return turn, nil }
+			case "during creation":
+				turn.interruptBlock = make(chan struct{})
+				p.start = func(context.Context, string) (Turn, error) { close(creating); <-created; return turn, nil }
+				close(p.release)
+			case "active turn":
+				turn.waiting, turn.interruptBlock = creating, make(chan struct{})
+				p.start = func(context.Context, string) (Turn, error) { return turn, nil }
+				close(p.release)
+			}
+			connection, reader := startWorker(t, p)
+			writeRequest(t, connection, 2, "turn.run", map[string]any{"session_id": "session@local", "input": "input"})
+			if phase == "before callback" {
+				<-p.before
+			} else {
+				<-creating
+			}
+			writeRequest(t, connection, 3, "turn.interrupt", map[string]string{"session_id": "session@local"})
+			<-p.interrupt
+			if phase == "before callback" {
+				close(p.release)
+				frames := readFrames(t, reader, 2)
+				check(t, !called && strings.Contains(frames, `"outcome":"interrupted"`), "created = %v, frames = %s", called, frames)
+				return
+			}
+			if phase == "during creation" {
+				close(created)
+			}
+			<-turn.interrupted
+			close(turn.done)
+			frames := readFrames(t, reader, map[bool]int{true: 1, false: 2}[phase == "active turn"])
+			close(turn.interruptBlock)
+			if phase == "active turn" {
+				frames += readFrames(t, reader, 1)
+			}
+			check(t, turn.interrupts.Load() == 1 && strings.Contains(frames, `"outcome":"completed"`), "interrupts/frames = %d/%s", turn.interrupts.Load(), frames)
+		})
 	}
 }
 
+func startWorker(t *testing.T, product *workerProduct) (net.Conn, *bufio.Reader) {
+	path := filepath.Join(t.TempDir(), "bus.sock")
+	listener, err := net.Listen("unix", path)
+	must(t, err)
+	t.Setenv(TokenEnv, "token")
+	t.Setenv(SocketEnv, path)
+	worker := sessionkit.NewWorker(product)
+	go worker.Serve(context.Background())
+	connection, err := listener.Accept()
+	must(t, err)
+	reader := bufio.NewReader(connection)
+	readLine(t, reader)
+	_, err = connection.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}` + "\n"))
+	must(t, err)
+	writeRequest(t, connection, 1, "session.open", map[string]any{"name": "name@local", "groups": []string{}, "open": map[string]any{}})
+	readFrames(t, reader, 1)
+	t.Cleanup(func() { _ = connection.Close(); <-worker.Closed(); _ = listener.Close() })
+	return connection, reader
+}
+
+func writeRequest(t *testing.T, connection net.Conn, id int, method string, params any) {
+	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+	must(t, err)
+	_, err = connection.Write(append(body, '\n'))
+	must(t, err)
+}
+func readFrames(t *testing.T, reader *bufio.Reader, count int) string {
+	var frames strings.Builder
+	for range count {
+		frames.Write(readLine(t, reader))
+	}
+	return frames.String()
+}
+func readLine(t *testing.T, reader *bufio.Reader) []byte {
+	body, err := reader.ReadBytes('\n')
+	must(t, err)
+	return body
+}
+func newFakeTurn() *fakeTurn {
+	return &fakeTurn{done: make(chan struct{}), interrupted: make(chan struct{})}
+}
 func delivery(body string) sessionkit.DeliveryRequest {
-	return sessionkit.DeliveryRequest{
-		MessageID: "message", Body: body,
-		From: sessionkit.DeliverySource{SessionID: "peer@local", Name: "peer@local", Product: "example", Groups: []string{"project"}},
-	}
+	return sessionkit.DeliveryRequest{MessageID: "message", Body: body, From: sessionkit.DeliverySource{SessionID: "peer@local", Name: "peer@local", Product: "example", Groups: []string{"project"}}}
 }
-
 func must(t *testing.T, err error) {
-	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+func check(t *testing.T, condition bool, format string, args ...any) {
+	if !condition {
+		t.Fatalf(format, args...)
 	}
 }

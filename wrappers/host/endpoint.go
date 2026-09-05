@@ -51,22 +51,24 @@ func BridgeStdio(ctx context.Context, path string, input io.ReadCloser, output i
 	if err != nil {
 		return err
 	}
-	defer connection.Close()
-	stop := context.AfterFunc(ctx, func() { _ = connection.Close(); _ = input.Close() })
-	defer stop()
-	written := make(chan error, 1)
+	done := make(chan error, 2)
 	go func() {
 		_, copyErr := io.Copy(connection, input)
 		if unix, ok := connection.(*net.UnixConn); ok {
 			_ = unix.CloseWrite()
 		}
-		written <- copyErr
+		done <- copyErr
 	}()
-	_, readErr := io.Copy(output, connection)
+	go func() { _, copyErr := io.Copy(output, connection); done <- copyErr }()
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
+	_ = connection.Close()
 	_ = input.Close()
-	writeErr := <-written
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	return errors.Join(readErr, writeErr)
+	return err
 }

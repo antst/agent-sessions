@@ -1,9 +1,11 @@
 package host
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -24,6 +26,37 @@ type ExecPlan struct {
 	Path string
 	Args []string
 	Env  []string
+}
+
+type Child struct {
+	command  *exec.Cmd
+	lock     *SessionLock
+	endpoint *PrivateEndpoint
+	done     chan struct{}
+	err      error
+}
+
+func StartChild(command *exec.Cmd, lock *SessionLock, endpoint *PrivateEndpoint) (*Child, error) {
+	if command.Env == nil {
+		command.Env = os.Environ()
+	}
+	for _, name := range []string{SocketEnv, LocalKeyEnv, TokenEnv, SessionIDEnv, NameEnv, GroupsEnv} {
+		command.Env = replaceEnv(command.Env, name, "")
+	}
+	command.ExtraFiles = append(command.ExtraFiles, lock.File())
+	if err := command.Start(); err != nil {
+		return nil, err
+	}
+	child := &Child{command: command, lock: lock, endpoint: endpoint, done: make(chan struct{})}
+	go func() { child.err = command.Wait(); close(child.done) }()
+	return child, nil
+}
+
+func (c *Child) Done() <-chan struct{} { return c.done }
+func (c *Child) Wait() error           { <-c.done; return c.err }
+func (c *Child) Close(ctx context.Context, stop func(context.Context) error) error {
+	err := stop(ctx)
+	return errors.Join(err, c.Wait(), c.endpoint.Close(), c.lock.Close())
 }
 
 // InteractivePlan removes only wrapper-owned group flags. Native option arity

@@ -1,7 +1,10 @@
 package host
 
 import (
+	"context"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -9,15 +12,9 @@ import (
 
 func TestLaneModeUsesTokenPresence(t *testing.T) {
 	t.Setenv(TokenEnv, "")
-	if !LaneMode() {
-		t.Fatal("empty present token did not select lane mode")
-	}
-	if err := os.Unsetenv(TokenEnv); err != nil {
-		t.Fatal(err)
-	}
-	if LaneMode() {
-		t.Fatal("absent token selected lane mode")
-	}
+	check(t, LaneMode(), "empty present token did not select lane mode")
+	must(t, os.Unsetenv(TokenEnv))
+	check(t, !LaneMode(), "absent token selected lane mode")
 }
 
 func TestInteractivePlan(t *testing.T) {
@@ -26,22 +23,17 @@ func TestInteractivePlan(t *testing.T) {
 	}, []string{"PATH=/bin", GroupsEnv + "=[\"old\"]"}, PeerIdentity{SessionID: "id", Name: "name"}, func(option string) bool { return option == "--model" })
 	must(t, err)
 	wantArgs := []string{"--model", "-g", "--", "-g", "literal"}
-	if !reflect.DeepEqual(plan.Args, wantArgs) {
-		t.Fatalf("args = %q", plan.Args)
-	}
+	check(t, reflect.DeepEqual(plan.Args, wantArgs), "args = %q", plan.Args)
 	joined := "\n" + strings.Join(plan.Env, "\n") + "\n"
 	for _, want := range []string{"\nAGENTBUS_SESSION_ID=id\n", "\nAGENTBUS_SESSION_NAME=name\n", "\nAGENTBUS_GROUPS=[\"project\",\"review\"]\n"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("environment missing %q: %s", want, joined)
-		}
+		check(t, strings.Contains(joined, want), "environment missing %q: %s", want, joined)
 	}
 }
 
 func TestInteractivePlanErrors(t *testing.T) {
 	for _, arguments := range [][]string{{"-g"}, {"--group="}} {
-		if _, err := InteractivePlan("product", arguments, nil, PeerIdentity{}, nil); err == nil {
-			t.Fatalf("arguments %q succeeded", arguments)
-		}
+		_, err := InteractivePlan("product", arguments, nil, PeerIdentity{}, nil)
+		check(t, err != nil, "arguments %q succeeded", arguments)
 	}
 }
 
@@ -69,12 +61,59 @@ func TestBuildArgumentsTable(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := BuildArguments(test.args, rules)
-			if test.want == "" && (err != nil || !reflect.DeepEqual(got, test.args)) {
-				t.Fatalf("got %q, %v", got, err)
-			}
-			if test.want != "" && (err == nil || err.Error() != test.want) {
-				t.Fatalf("error = %v", err)
-			}
+			check(t, test.want != "" || err == nil && reflect.DeepEqual(got, test.args), "got %q, %v", got, err)
+			check(t, test.want == "" || err != nil && err.Error() == test.want, "error = %v", err)
 		})
 	}
+}
+
+func TestChildOwnershipTable(t *testing.T) {
+	for _, ownerDies := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ordered close", true: "stray child holds lock"}[ownerDies], func(t *testing.T) {
+			socket := filepath.Join(t.TempDir(), "bus.sock")
+			lock, err := AcquireSessionLock(socket, "example", "session")
+			must(t, err)
+			endpoint, err := ListenPrivate(socket, "session")
+			must(t, err)
+			command := exec.Command(os.Args[0], "-test.run=TestOwnedChildHelper")
+			command.Env = append(os.Environ(), "HOST_CHILD=1", SocketEnv+"=secret", LocalKeyEnv+"=secret", TokenEnv+"=secret", SessionIDEnv+"=secret", NameEnv+"=secret", GroupsEnv+"=secret")
+			input, err := command.StdinPipe()
+			must(t, err)
+			child, err := StartChild(command, lock, endpoint)
+			must(t, err)
+			_, err = AcquireSessionLock(socket, "example", "session")
+			check(t, err != nil && err.Error() == "session busy", "live child lock = %v", err)
+			if ownerDies {
+				h := &Handoff{}
+				_, _ = h.Deliver(context.Background(), delivery("queued"), nil)
+				must(t, lock.Close())
+				_, err = AcquireSessionLock(socket, "example", "session")
+				check(t, err != nil && err.Error() == "session busy", "inherited lock = %v", err)
+				must(t, input.Close())
+				must(t, child.Wait())
+				check(t, len(h.queue) == 1, "child death changed FIFO: %d", len(h.queue))
+				must(t, endpoint.Close())
+			} else {
+				must(t, child.Close(context.Background(), func(context.Context) error { return input.Close() }))
+				_, err = os.Stat(endpoint.Path)
+				check(t, os.IsNotExist(err), "endpoint remains: %v", err)
+			}
+			again, err := AcquireSessionLock(socket, "example", "session")
+			must(t, err)
+			must(t, again.Close())
+		})
+	}
+}
+
+func TestOwnedChildHelper(t *testing.T) {
+	if os.Getenv("HOST_CHILD") != "1" {
+		return
+	}
+	for _, name := range []string{SocketEnv, LocalKeyEnv, TokenEnv, SessionIDEnv, NameEnv, GroupsEnv} {
+		if os.Getenv(name) != "" {
+			os.Exit(2)
+		}
+	}
+	_, _ = os.Stdin.Read(make([]byte, 1))
+	os.Exit(0)
 }

@@ -18,11 +18,8 @@ func TestRendererMatchesC5Fixture(t *testing.T) {
 	must(t, json.Unmarshal(raw, &fixture))
 	got, err := render(fixture.Message)
 	must(t, err)
-	if got != fixture.Rendered {
-		t.Fatalf("rendered = %q, want %q", got, fixture.Rendered)
-	}
+	check(t, got == fixture.Rendered, "rendered = %q, want %q", got, fixture.Rendered)
 	fixture.Message.From.SessionID = ""
-	if _, err := render(fixture.Message); err == nil {
-		t.Fatal("incomplete sender was rendered")
-	}
+	_, err = render(fixture.Message)
+	check(t, err != nil, "incomplete sender was rendered")
 }
