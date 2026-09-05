@@ -44,6 +44,19 @@ func TestPrivateEndpointBridgeCancel(t *testing.T) {
 	check(t, errors.Is(err, os.ErrNotExist), "endpoint remains: %v", err)
 }
 
+func TestPrivateEndpointReplacesStalePath(t *testing.T) {
+	directory := t.TempDir()
+	socket := filepath.Join(directory, "bus.sock")
+	path := filepath.Join(directory, "lanes", "session.sock")
+	must(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	must(t, os.WriteFile(path, []byte("stale"), 0o600))
+	endpoint, err := ListenPrivate(socket, "session")
+	must(t, err)
+	defer endpoint.Close()
+	info, err := os.Stat(path)
+	check(t, err == nil && info.Mode()&os.ModeSocket != 0, "stale path was not replaced by a socket: %v", err)
+}
+
 type blockedWriter struct{ started, release chan struct{} }
 
 func (w blockedWriter) Write(p []byte) (int, error) {
