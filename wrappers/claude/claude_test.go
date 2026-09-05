@@ -163,7 +163,7 @@ func TestStreamRunDeliveryAndInterrupt(t *testing.T) {
 	check(t, result.Outcome == "interrupted", "terminal = %#v", result)
 }
 
-func TestResultWaitsForInjectedReplay(t *testing.T) {
+func TestPreReplayResultIsIgnored(t *testing.T) {
 	p, writes := newStream()
 	native, err := p.start(context.Background(), "caller")
 	must(t, err)
@@ -173,13 +173,19 @@ func TestResultWaitsForInjectedReplay(t *testing.T) {
 	must(t, err)
 	check(t, receipt.Disposition == "injected", "receipt = %#v", receipt)
 	<-writes.wrote
-	p.receive(frame{Type: "result", Subtype: "success", SessionID: fixtureID, Result: "includes delivery"})
+	p.receive(frame{Type: "result", Subtype: "success", SessionID: fixtureID, Result: "before delivery"})
 	select {
 	case <-native.(*turn).done:
 		t.Fatal("result completed before the injected frame replay")
 	default:
 	}
 	p.receive(frame{Type: "user", IsReplay: true})
+	select {
+	case <-native.(*turn).done:
+		t.Fatal("discarded result completed after the injected frame replay")
+	default:
+	}
+	p.receive(frame{Type: "result", Subtype: "success", SessionID: fixtureID, Result: "includes delivery"})
 	result, err := native.Wait(context.Background())
 	must(t, err)
 	check(t, result.Result == "includes delivery", "terminal = %#v", result)

@@ -43,11 +43,14 @@ type Wrapper struct {
 
 type turn struct {
 	owner    *Wrapper
-	done     chan struct{}
-	result   sessionkit.TurnResult
-	err      error
+	done     chan turnDone
 	write    uint64
 	consumed bool
+}
+
+type turnDone struct {
+	result sessionkit.TurnResult
+	err    error
 }
 
 type frame struct {
@@ -156,7 +159,7 @@ func (p *Wrapper) start(ctx context.Context, prompt string) (host.Turn, error) {
 		p.mu.Unlock()
 		return nil, err
 	}
-	t := &turn{owner: p, done: make(chan struct{})}
+	t := &turn{owner: p, done: make(chan turnDone, 1)}
 	p.active = t
 	err := p.write(prompt)
 	needsInit := !p.init
@@ -202,8 +205,8 @@ func (t *turn) Wait(ctx context.Context) (sessionkit.TurnResult, error) {
 	select {
 	case <-ctx.Done():
 		return sessionkit.TurnResult{}, ctx.Err()
-	case <-t.done:
-		return t.result, t.err
+	case done := <-t.done:
+		return done.result, done.err
 	}
 }
 
@@ -285,14 +288,11 @@ func (p *Wrapper) receive(item frame) {
 			p.failLocked(fmt.Errorf("Claude result changed native session from %q to %q", p.expected, item.SessionID))
 			return
 		}
-		if p.active != nil {
-			p.active.result = terminal(item)
+		if p.active != nil && p.active.consumed {
+			t := p.active
+			p.active = nil
+			t.done <- turnDone{result: terminal(item)}
 		}
-	}
-	if p.active != nil && p.active.consumed && p.active.result.Outcome != "" {
-		t := p.active
-		p.active = nil
-		close(t.done)
 	}
 }
 
@@ -324,8 +324,7 @@ func (p *Wrapper) failLocked(err error) {
 	t, control := p.active, p.control
 	p.active, p.control = nil, nil
 	if t != nil {
-		t.err = err
-		close(t.done)
+		t.done <- turnDone{err: err}
 	}
 	if control != nil {
 		control <- err
