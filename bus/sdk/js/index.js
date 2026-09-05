@@ -105,7 +105,7 @@ class Peer {
     this.caller = new Caller(this, options.caller);
   }
   call(method, params, signal) { if (!this.connection) return Promise.reject(new Error("not connected")); return this.connection.call(method, params, signal); }
-  async rehello(identity) { const next = snapshot(identity); await this.call("session.hello", { protocol: 1, ...next }); this.identity = next; }
+  async rehello(identity) { const next = snapshot(identity); if (!this.connection || this.connection.signal.aborted) { this.identity = next; return; } await this.call("session.hello", { protocol: 1, ...next }); this.identity = next; }
   shutdown() { this.terminal = true; this.connection?.close(); this.finish(); }
   async _open() {
     if (this.terminal) return; let connection; try { connection = new Connection(this.connect(this.socket), true, (request) => this._handle(request, connection)); } catch { this.schedule(() => { this.ready = this._open(); }, 2000); return; } this.connection = connection;

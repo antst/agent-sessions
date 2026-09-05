@@ -134,7 +134,7 @@ async function peerLifetime() {
   assert.deepEqual(currentIdentity.groups, ["shared"]); assert.deepEqual(currentIdentity.info, {}); identity.groups.pop(); delete identity.info.changed;
   assert.equal((await connections[1].call("message.deliver", delivery)).disposition, "injected"); assert.equal(deliveries, 1);
   const renamed = { ...identity, name: "renamed", groups: ["shared"], info: {} }; await peer.rehello(renamed); assert.equal(currentIdentity.name, "renamed"); renamed.groups.push("mutated"); renamed.info.changed = true;
-  connections[1].close(); await scheduledReady.promise; await assert.rejects(peer.call("session.list", {}), /not connected/); assert.equal(connections.length, 2); scheduled.shift().call(); await peer.ready; assert.deepEqual(currentIdentity.groups, ["shared"]); assert.deepEqual(currentIdentity.info, {});
+  connections[1].close(); await scheduledReady.promise; await assert.rejects(peer.call("session.list", {}), /not connected/); assert.equal(connections.length, 2); await peer.rehello({ ...identity, name: "offline title", groups: ["shared"], info: {} }); scheduled.shift().call(); await peer.ready; assert.equal(currentIdentity.name, "offline title"); assert.deepEqual(currentIdentity.groups, ["shared"]); assert.deepEqual(currentIdentity.info, {});
   await errorCode(peer.rehello({ ...identity, groups: ["changed"] }), -32602); assert.deepEqual(peer.identity.groups, ["shared"]);
   await peer.rehello({ ...identity, session_id: "session-2", name: "other" }); assert.equal(currentIdentity.session_id, "session-2");
   await connections[2].call("session.superseded", {}); await peer.closed; assert.equal(scheduled.length, 0);
