@@ -457,8 +457,8 @@ members. This is the complete product-facing contract:
 | --- | --- |
 | `hello(cancel)` | Return fixed product, version, supported open fields, and ordered extra-argument declarations after app-ready. |
 | `open(cancel, request)` | Create or resume from the typed request, apply its composed name as the product title where supported, and return the exact product session ID. |
-| `run(cancel, input)` | Start one native turn, observe it to a terminal result, and return that result. |
-| `interrupt(cancel)` | Ask the one current native turn to stop. |
+| `run(cancel, run, input)` | Start one native turn for the kit-owned `Run` token, observe it to a terminal result, and return that result. |
+| `interrupt(cancel, run)` | Ask the native turn identified by that same `Run` token to stop. |
 | `deliver(cancel, request)` | Receive the full closed `MessageDeliverRequest` `{message_id,from,body}`, inject now or queue for the next turn, and return the truthful closed receipt. |
 | `close(cancel)` | Stop accepting work, close native state, and release product resources. |
 
@@ -515,6 +515,17 @@ The kit has only two live facts: the connection is open or closed, and a run is
 present or absent. The product's opened session reference is data, not a
 lifecycle state. There is no generation, projection, collector, archive phase,
 deadline, or reconnect state machine.
+
+The kit creates one `Run` token when it installs the run slot and passes that
+same object, with the same per-run cancellation context, to `run()` and
+`interrupt()`. `Run.Interrupted()` exposes the kit's coalesced interrupt mark;
+the kit sets it before calling `interrupt()`. `Run.Native` is the product's one
+product-synchronized slot for its native turn. The product publishes that slot
+under its own handoff lock and then rechecks `Run.Interrupted()`; `interrupt()`
+reads the slot under the same lock. Whichever side observes the other performs
+the one native interrupt. Once `run()` returns, the kit issues no new native
+interrupt, including while it writes the terminal result. A product or wrapper
+keeps no second starting, active, or interrupt-requested lifecycle bits.
 
 Before mutating an existing session, a native product must acquire exclusivity
 that excludes any competing process and hold it through native cleanup. A

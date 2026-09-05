@@ -175,7 +175,7 @@ func (c *Conn) receiveRequest(frame protocol.Frame) {
 		c.reject(frame, code)
 		return
 	}
-	go c.handler(c.ctx, request)
+	c.handler(c.ctx, request)
 }
 
 func (c *Conn) reject(frame protocol.Frame, code int) {

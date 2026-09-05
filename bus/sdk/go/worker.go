@@ -16,16 +16,21 @@ import (
 type WorkerCallbacks interface {
 	Hello(context.Context) (HelloDescription, error)
 	Open(context.Context, OpenRequest) (OpenResult, error)
-	Run(context.Context, string) (TurnResult, error)
-	Interrupt(context.Context) error
+	Run(context.Context, *Run, string) (TurnResult, error)
+	Interrupt(context.Context, *Run) error
 	Deliver(context.Context, DeliveryRequest) (DeliveryReceipt, error)
 	Close(context.Context) error
 }
 
-type runSlot struct {
-	done      chan struct{}
-	interrupt bool
+type Run struct {
+	Native      any
+	context     context.Context
+	cancel      context.CancelFunc
+	done        chan struct{}
+	interrupted atomic.Bool
 }
+
+func (r *Run) Interrupted() bool { return r.interrupted.Load() }
 
 type Worker struct {
 	product WorkerCallbacks
@@ -34,7 +39,7 @@ type Worker struct {
 	conn    *rpc.Conn
 	context context.Context
 	cancel  context.CancelFunc
-	run     *runSlot
+	run     *Run
 	opened  atomic.Bool
 	once    sync.Once
 	closed  chan struct{}
@@ -83,73 +88,41 @@ func (w *Worker) handle(_ context.Context, request *rpc.Request) {
 	ctx := w.context
 	switch request.Method {
 	case "session.superseded":
-		w.reply(w.conn.Result(request, struct{}{}))
-		_ = w.conn.Close()
+		go func() { w.reply(w.conn.Result(request, struct{}{})); _ = w.conn.Close() }()
 	case "session.open":
-		result, err := w.product.Open(ctx, *request.Params.(*OpenRequest))
-		if err != nil {
-			w.reply(w.conn.Error(request, protocol.SpawnFailed, map[string]any{"stderr_tail": []string{err.Error()}}))
-			return
-		}
-		w.opened.Store(true)
-		w.reply(w.conn.Result(request, result))
+		go w.open(ctx, request)
 	case "turn.run":
 		w.mu.Lock()
 		if !w.opened.Load() || w.run != nil {
 			w.mu.Unlock()
-			w.reply(w.conn.Error(request, protocol.Busy, nil))
+			go w.answer(request, nil, protocol.Busy)
 			return
 		}
-		slot := &runSlot{done: make(chan struct{})}
+		runCtx, cancel := context.WithCancel(ctx)
+		slot := &Run{context: runCtx, cancel: cancel, done: make(chan struct{})}
 		w.run = slot
 		w.mu.Unlock()
-		result, err := w.product.Run(ctx, request.Params.(*protocol.TurnRunRequest).Input)
-		if err != nil {
-			result = TurnResult{Outcome: "failed", Result: err.Error()}
-		}
-		result.Result, result.Truncated = truncate(result.Result)
-		w.mu.Lock()
-		if _, err = protocol.EncodeResult("turn.run", result); err == nil {
-			err = w.conn.Result(request, result)
-		}
-		if err == nil {
-			if w.run == slot {
-				w.run = nil
-			}
-		}
-		close(slot.done)
-		w.mu.Unlock()
-		w.reply(err)
+		go w.runTurn(ctx, request, slot)
 	case "turn.interrupt":
 		w.mu.Lock()
 		if w.run == nil {
 			w.mu.Unlock()
-			w.reply(w.conn.Error(request, protocol.NotRunning, nil))
+			go w.answer(request, nil, protocol.NotRunning)
 			return
 		}
-		call := !w.run.interrupt
-		w.run.interrupt = w.run.interrupt || call
+		slot := w.run
+		call := slot.context != nil && slot.context.Err() == nil && slot.interrupted.CompareAndSwap(false, true)
 		w.mu.Unlock()
-		if call {
-			if err := w.product.Interrupt(ctx); err != nil {
-				w.reply(w.conn.Error(request, protocol.Internal, nil))
-				return
-			}
-		}
-		w.reply(w.conn.Result(request, struct{}{}))
+		go w.interrupt(request, slot, call)
 	case "message.deliver":
 		w.mu.Lock()
 		closing := w.run != nil && w.run.done == nil
 		w.mu.Unlock()
 		if closing {
-			w.reply(w.conn.Result(request, DeliveryReceipt{Disposition: "rejected", Reason: "closing"}))
+			go w.answer(request, DeliveryReceipt{Disposition: "rejected", Reason: "closing"}, 0)
 			return
 		}
-		receipt, err := w.product.Deliver(ctx, *request.Params.(*DeliveryRequest))
-		if err != nil {
-			receipt = DeliveryReceipt{Disposition: "rejected", Reason: err.Error()}
-		}
-		w.reply(w.conn.Result(request, receipt))
+		go w.deliver(ctx, request)
 	case "session.close":
 		w.mu.Lock()
 		slot := w.run
@@ -158,25 +131,89 @@ func (w *Worker) handle(_ context.Context, request *rpc.Request) {
 			_ = w.conn.Close()
 			return
 		}
-		w.run = &runSlot{interrupt: true}
-		interrupt := slot != nil && !slot.interrupt
-		if interrupt {
-			slot.interrupt = true
-		}
+		w.run = &Run{}
+		w.run.interrupted.Store(true)
+		interrupt := slot != nil && slot.context.Err() == nil && slot.interrupted.CompareAndSwap(false, true)
 		w.mu.Unlock()
-		if interrupt {
-			go w.product.Interrupt(ctx)
-		}
-		if slot != nil {
-			<-slot.done
-		}
-		w.cancel()
-		if err := w.closeProduct(ctx); err != nil {
+		go w.close(ctx, request, slot, interrupt)
+	}
+}
+
+func (w *Worker) open(ctx context.Context, request *rpc.Request) {
+	result, err := w.product.Open(ctx, *request.Params.(*OpenRequest))
+	if err != nil {
+		w.reply(w.conn.Error(request, protocol.SpawnFailed, map[string]any{"stderr_tail": []string{err.Error()}}))
+		return
+	}
+	w.opened.Store(true)
+	w.reply(w.conn.Result(request, result))
+}
+
+func (w *Worker) runTurn(_ context.Context, request *rpc.Request, slot *Run) {
+	result, err := w.product.Run(slot.context, slot, request.Params.(*protocol.TurnRunRequest).Input)
+	if err != nil {
+		result = TurnResult{Outcome: "failed", Result: err.Error()}
+	}
+	result.Result, result.Truncated = truncate(result.Result)
+	w.mu.Lock()
+	slot.cancel()
+	if _, err = protocol.EncodeResult("turn.run", result); err == nil {
+		err = w.conn.Result(request, result)
+	}
+	if err == nil && w.run == slot {
+		w.run = nil
+	}
+	close(slot.done)
+	w.mu.Unlock()
+	w.reply(err)
+}
+
+func (w *Worker) interrupt(request *rpc.Request, run *Run, call bool) {
+	if call {
+		if err := w.nativeInterrupt(run); err != nil {
 			w.reply(w.conn.Error(request, protocol.Internal, nil))
-		} else {
-			w.reply(w.conn.Result(request, struct{}{}))
+			return
 		}
-		_ = w.conn.Close()
+	}
+	w.reply(w.conn.Result(request, struct{}{}))
+}
+
+func (w *Worker) deliver(ctx context.Context, request *rpc.Request) {
+	receipt, err := w.product.Deliver(ctx, *request.Params.(*DeliveryRequest))
+	if err != nil {
+		receipt = DeliveryReceipt{Disposition: "rejected", Reason: err.Error()}
+	}
+	w.reply(w.conn.Result(request, receipt))
+}
+
+func (w *Worker) close(ctx context.Context, request *rpc.Request, slot *Run, interrupt bool) {
+	if interrupt {
+		go w.nativeInterrupt(slot)
+	}
+	if slot != nil {
+		<-slot.done
+	}
+	w.cancel()
+	if err := w.closeProduct(ctx); err != nil {
+		w.reply(w.conn.Error(request, protocol.Internal, nil))
+	} else {
+		w.reply(w.conn.Result(request, struct{}{}))
+	}
+	_ = w.conn.Close()
+}
+
+func (w *Worker) nativeInterrupt(run *Run) error {
+	if run.context.Err() != nil {
+		return nil
+	}
+	return w.product.Interrupt(run.context, run)
+}
+
+func (w *Worker) answer(request *rpc.Request, value any, code int) {
+	if code != 0 {
+		w.reply(w.conn.Error(request, code, nil))
+	} else {
+		w.reply(w.conn.Result(request, value))
 	}
 }
 
