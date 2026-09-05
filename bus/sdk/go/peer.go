@@ -3,7 +3,6 @@ package sessionkit
 import (
 	"context"
 	"encoding/json"
-	"maps"
 	"net"
 	"sync"
 	"time"
@@ -12,7 +11,10 @@ import (
 	"github.com/antst/agent-sessions/bus/internal/rpc"
 )
 
-const peerReconnectInterval = 2 * time.Second
+const defaultPeerReconnectInterval = 2 * time.Second
+
+var peerReconnectInterval = defaultPeerReconnectInterval
+var dialPeer = net.Dial
 
 type DeliverFunc func(context.Context, DeliveryRequest) (DeliveryReceipt, error)
 
@@ -20,13 +22,13 @@ type Peer struct {
 	Caller        *Caller
 	mu            sync.Mutex
 	identity      PeerIdentity
+	generation    uint64
 	deliver       DeliverFunc
 	socket        string
 	wire          *rpc.Conn
 	ctx           context.Context
 	cancel        context.CancelFunc
 	ready, closed chan struct{}
-	readyOnce     sync.Once
 }
 
 func ConnectPeer(identity PeerIdentity, deliver DeliverFunc) (*Peer, error) {
@@ -34,13 +36,13 @@ func ConnectPeer(identity PeerIdentity, deliver DeliverFunc) (*Peer, error) {
 	if err != nil {
 		return nil, err
 	}
-	identity = cloneIdentity(identity)
-	if _, err = protocol.EncodeParams("session.hello", identity); err != nil {
+	identity, err = snapshotIdentity(identity)
+	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &Peer{identity: identity, deliver: deliver, socket: socket, ctx: ctx, cancel: cancel, ready: make(chan struct{}), closed: make(chan struct{})}
-	p.Caller = newCaller(p.Call)
+	p.Caller = newCaller(p.call)
 	go p.connect()
 	return p, nil
 }
@@ -48,22 +50,28 @@ func ConnectPeer(identity PeerIdentity, deliver DeliverFunc) (*Peer, error) {
 func (p *Peer) Ready() <-chan struct{}  { return p.ready }
 func (p *Peer) Closed() <-chan struct{} { return p.closed }
 
-func (p *Peer) Rehello(identity PeerIdentity) error {
-	next := cloneIdentity(identity)
-	if _, err := protocol.EncodeParams("session.hello", next); err != nil {
+func (p *Peer) Rehello(name string, info map[string]any) error {
+	p.mu.Lock()
+	next := p.identity
+	p.mu.Unlock()
+	next.Name, next.Info = name, info
+	next, err := snapshotIdentity(next)
+	if err != nil {
 		return err
 	}
+	p.mu.Lock()
 	if p.ctx.Err() != nil {
+		p.mu.Unlock()
 		return &ProtocolError{Code: protocol.Superseded, Message: "superseded"}
 	}
-	p.mu.Lock()
 	p.identity = next
+	p.generation++
+	wire, generation := p.wire, p.generation
 	p.mu.Unlock()
-	wire := p.connection()
 	if wire == nil {
 		return errNotConnected
 	}
-	err := wire.Call(context.Background(), "session.hello", next, &struct{}{})
+	err = p.hello(wire, next, generation)
 	if err != nil && wire.Context().Err() != nil {
 		return errNotConnected
 	}
@@ -78,16 +86,17 @@ func (p *Peer) Shutdown() {
 }
 
 func (p *Peer) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	var result json.RawMessage
+	err := p.call(ctx, method, params, &result)
+	return result, err
+}
+
+func (p *Peer) call(ctx context.Context, method string, params, result any) error {
 	wire := p.connection()
 	if wire == nil {
-		return nil, errNotConnected
+		return errNotConnected
 	}
-	var result json.RawMessage
-	err := wire.Call(ctx, method, params, &result)
-	if err != nil && wire.Context().Err() != nil {
-		err = errNotConnected
-	}
-	return result, err
+	return wire.Call(ctx, method, params, result)
 }
 
 func (p *Peer) connection() *rpc.Conn {
@@ -98,24 +107,20 @@ func (p *Peer) connection() *rpc.Conn {
 
 func (p *Peer) connect() {
 	defer close(p.closed)
+	ready := p.ready
 	for {
-		fd, err := net.Dial("unix", p.socket)
+		fd, err := dialPeer("unix", p.socket)
 		if err == nil {
 			var wire *rpc.Conn
 			wire = rpc.New(fd, true, func(_ context.Context, request *rpc.Request) { p.handle(wire, request) })
 			p.mu.Lock()
-			identity := p.identity
+			identity, generation := p.identity, p.generation
 			p.mu.Unlock()
-			if wire.Call(p.ctx, "session.hello", identity, &struct{}{}) == nil {
-				p.mu.Lock()
-				if p.ctx.Err() != nil {
-					p.mu.Unlock()
-					_ = wire.Close()
-					return
+			if p.hello(wire, identity, generation) == nil {
+				if ready != nil {
+					close(ready)
+					ready = nil
 				}
-				p.wire = wire
-				p.mu.Unlock()
-				p.readyOnce.Do(func() { close(p.ready) })
 				<-wire.Done()
 				p.mu.Lock()
 				if p.wire == wire {
@@ -125,11 +130,34 @@ func (p *Peer) connect() {
 			}
 			_ = wire.Close()
 		}
+		if p.ctx.Err() != nil {
+			return
+		}
 		select {
 		case <-time.After(peerReconnectInterval):
 		case <-p.ctx.Done():
 			return
 		}
+	}
+}
+
+func (p *Peer) hello(wire *rpc.Conn, identity PeerIdentity, generation uint64) error {
+	for {
+		if err := wire.Call(p.ctx, "session.hello", identity, &struct{}{}); err != nil {
+			return err
+		}
+		p.mu.Lock()
+		if p.ctx.Err() != nil {
+			p.mu.Unlock()
+			return rpc.ErrClosed
+		}
+		if generation == p.generation {
+			p.wire = wire
+			p.mu.Unlock()
+			return nil
+		}
+		identity, generation = p.identity, p.generation
+		p.mu.Unlock()
 	}
 }
 
@@ -153,9 +181,12 @@ func (p *Peer) handle(wire *rpc.Conn, request *rpc.Request) {
 
 var errNotConnected = &ProtocolError{Code: protocol.NotConnected, Message: "not_connected"}
 
-func cloneIdentity(identity PeerIdentity) PeerIdentity {
+func snapshotIdentity(identity PeerIdentity) (PeerIdentity, error) {
 	identity.Protocol = 1
-	identity.Groups = append([]string{}, identity.Groups...)
-	identity.Info = maps.Clone(identity.Info)
-	return identity
+	raw, err := protocol.EncodeParams("session.hello", identity)
+	var snapshot PeerIdentity
+	if err == nil {
+		err = json.Unmarshal(raw, &snapshot)
+	}
+	return snapshot, err
 }

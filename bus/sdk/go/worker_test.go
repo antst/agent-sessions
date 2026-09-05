@@ -84,7 +84,8 @@ func (p *fakeProduct) Deliver(ctx context.Context, _ DeliveryRequest) (DeliveryR
 		return DeliveryReceipt{}, ctx.Err()
 	}
 	if p.outbound {
-		return DeliveryReceipt{Disposition: "injected"}, p.worker.Call(ctx, "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{})
+		_, err := p.worker.Caller().List(ctx, protocol.SessionListRequest{})
+		return DeliveryReceipt{Disposition: "injected"}, err
 	}
 	return DeliveryReceipt{Disposition: "injected"}, nil
 }
@@ -110,6 +111,7 @@ func startHarness(t *testing.T, p *fakeProduct, acknowledge, openNow bool) *rpc.
 	setEnvironment(t, "token", "")
 	worker, daemon := net.Pipe()
 	p.worker = NewWorker(p)
+	check(t, p.worker.Caller() == p.worker.Caller(), "worker did not retain one pre-serve caller")
 	p.worker.dial = func(_ context.Context, network, address string) (net.Conn, error) {
 		check(t, atomic.LoadInt32(&p.calls[0]) == 1 && network == "unix" && address == "/fixture/socket", "dial before hello or wrong endpoint")
 		return worker, nil

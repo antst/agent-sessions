@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"reflect"
-	"sync"
 	"testing"
 
 	"github.com/antst/agent-sessions/bus/internal/protocol"
@@ -19,7 +19,7 @@ func TestCallerMapsWireMethods(t *testing.T) {
 		method string
 		params any
 	}
-	call := func(_ context.Context, method string, params any) (json.RawMessage, error) {
+	call := func(_ context.Context, method string, params, result any) error {
 		seen = append(seen, struct {
 			method string
 			params any
@@ -33,7 +33,8 @@ func TestCallerMapsWireMethods(t *testing.T) {
 			"turn.interrupt": struct{}{},
 			"session.close":  struct{}{},
 		}
-		return json.Marshal(results[method])
+		raw, _ := json.Marshal(results[method])
+		return json.Unmarshal(raw, result)
 	}
 	c := newCaller(call)
 	ctx := context.Background()
@@ -62,44 +63,24 @@ func TestCallerMapsWireMethods(t *testing.T) {
 }
 
 func TestCallerSugarMatchesJavaScriptShapes(t *testing.T) {
-	type pending struct {
-		release chan struct{}
-		result  TurnResult
-		err     error
+	fixtures := loadCallerFixtures(t)
+	type terminal struct {
+		result TurnResult
+		err    error
 	}
-	var mu sync.Mutex
-	runs := map[string]*pending{}
-	call := func(_ context.Context, method string, params any) (json.RawMessage, error) {
-		request := params.(TurnRunRequest)
-		mu.Lock()
-		run := runs[request.SessionID]
-		mu.Unlock()
-		<-run.release
-		return json.Marshal(run.result)
-	}
-	add := func(id string, result TurnResult, err error) {
-		mu.Lock()
-		runs[id] = &pending{release: make(chan struct{}), result: result, err: err}
-		mu.Unlock()
-	}
-	add("one@local", TurnResult{Outcome: "completed", Result: "done"}, nil)
-	add("two@local", TurnResult{Outcome: "completed", Result: "two"}, nil)
-	c := newCaller(func(ctx context.Context, method string, params any) (json.RawMessage, error) {
-		raw, err := call(ctx, method, params)
-		request := params.(TurnRunRequest)
-		mu.Lock()
-		configured := runs[request.SessionID].err
-		mu.Unlock()
-		if configured != nil {
-			return nil, configured
+	terminals := make(chan terminal)
+	c := newCaller(func(_ context.Context, _ string, _ any, result any) error {
+		terminal := <-terminals
+		if terminal.err == nil {
+			*result.(*TurnResult) = terminal.result
 		}
-		return raw, err
+		return terminal.err
 	})
-	first, _ := c.Start(TurnRunRequest{SessionID: "one@local", Input: "first"})
-	second, _ := c.Start(TurnRunRequest{SessionID: "two@local", Input: "second"})
-	assertJSON(t, first, `{"turn_id":"t-1"}`)
-	assertJSON(t, second, `{"turn_id":"t-2"}`)
-	if _, err := c.Start(TurnRunRequest{SessionID: "one@local", Input: "again"}); !isCode(err, protocol.Busy) {
+	sequence := fixtures.Sequences.TargetRelease
+	request := TurnRunRequest{SessionID: sequence.SessionID, Input: sequence.FirstInput}
+	first, _ := c.Start(request)
+	assertJSON(t, first, fixtures.Shapes.Start.Result)
+	if _, err := c.Start(request); !isCode(err, protocol.Busy) {
 		t.Fatalf("same-target start error = %v", err)
 	}
 	zero := int64(0)
@@ -107,30 +88,44 @@ func TestCallerSugarMatchesJavaScriptShapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertJSON(t, running, `{"turn_id":"t-1","session_id":"one@local","state":"running"}`)
-	close(runs["one@local"].release)
-	done, err := c.Wait(WaitRequest{TurnID: first.TurnID})
+	assertJSON(t, running, fixtures.Shapes.Running.Result)
+	c.mu.Lock()
+	firstDone := c.runs[first.TurnID].done
+	c.mu.Unlock()
+	terminals <- terminal{result: fixtures.Shapes.Done.Terminal}
+	<-firstDone
+	second, err := c.Start(TurnRunRequest{SessionID: sequence.SessionID, Input: sequence.SecondInput})
+	if err != nil || first.TurnID != sequence.FirstTurnID || second.TurnID != sequence.SecondTurnID {
+		t.Fatalf("target release = %#v %#v, %v", first, second, err)
+	}
+	done, err := c.Status(StatusRequest{TurnID: first.TurnID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertJSON(t, done, `{"turn_id":"t-1","session_id":"one@local","state":"done","result":{"outcome":"completed","result":"done"}}`)
+	assertJSON(t, done, fixtures.Shapes.Done.Result)
 	if _, err = c.Status(StatusRequest{TurnID: first.TurnID}); !errors.Is(err, ErrUnknownTurn) {
 		t.Fatalf("collected status error = %v", err)
 	}
-	close(runs["two@local"].release)
-	if _, err = c.Wait(WaitRequest{TurnID: second.TurnID}); err != nil {
-		t.Fatal(err)
+	terminals <- terminal{result: fixtures.Shapes.Done.Terminal}
+	_, _ = c.Wait(WaitRequest{TurnID: second.TurnID})
+
+	for _, failure := range []struct {
+		err  error
+		want TurnStatus
+	}{{rpc.ErrClosed, fixtures.Shapes.EOF.Result}, {&ProtocolError{Code: fixtures.Shapes.WireError.Code, Message: fixtures.Shapes.WireError.Message}, fixtures.Shapes.WireError.Result}} {
+		caller := newCaller(func(context.Context, string, any, any) error { return failure.err })
+		started, _ := caller.Start(fixtures.Shapes.Start.Request)
+		unavailable, waitErr := caller.Wait(WaitRequest{TurnID: started.TurnID})
+		if waitErr != nil {
+			t.Fatal(waitErr)
+		}
+		assertJSON(t, unavailable, failure.want)
 	}
-	add("wire@local", TurnResult{}, &ProtocolError{Code: protocol.NotRunning, Message: "not_running"})
-	wire, _ := c.Start(TurnRunRequest{SessionID: "wire@local", Input: "work"})
-	close(runs["wire@local"].release)
-	unavailable, _ := c.Wait(WaitRequest{TurnID: wire.TurnID})
-	assertJSON(t, unavailable, `{"turn_id":"t-3","session_id":"wire@local","state":"unavailable","reason":"-32004 not_running"}`)
-	add("lost@local", TurnResult{}, rpc.ErrClosed)
-	lost, _ := c.Start(TurnRunRequest{SessionID: "lost@local", Input: "work"})
-	close(runs["lost@local"].release)
-	unavailable, _ = c.Wait(WaitRequest{TurnID: lost.TurnID})
-	assertJSON(t, unavailable, `{"turn_id":"t-4","session_id":"lost@local","state":"unavailable","reason":"result unavailable, lane resumable"}`)
+	for _, invalid := range fixtures.Sequences.InvalidLocalRequests {
+		if err := runInvalidLocal(c, invalid.Operation, invalid.Request); err == nil || err.Error() != invalid.Error {
+			t.Fatalf("%s error = %v", invalid.Operation, err)
+		}
+	}
 }
 
 func TestDialIsOneShotFramedClient(t *testing.T) {
@@ -159,15 +154,98 @@ func TestDialIsOneShotFramedClient(t *testing.T) {
 	}
 }
 
-func assertJSON(t *testing.T, value any, want string) {
+func assertJSON(t *testing.T, value, want any) {
 	t.Helper()
 	raw, err := json.Marshal(value)
-	if err != nil || string(raw) != want {
-		t.Fatalf("json = %s, want %s, err %v", raw, want, err)
+	expected, wantErr := json.Marshal(want)
+	if err != nil || wantErr != nil || string(raw) != string(expected) {
+		t.Fatalf("json = %s, want %s, errors %v / %v", raw, expected, err, wantErr)
 	}
 }
 
 func isCode(err error, code int) bool {
 	var value *ProtocolError
 	return errors.As(err, &value) && value.Code == code
+}
+
+type callerFixtures struct {
+	Shapes struct {
+		Start     startFixture
+		Running   resultFixture[TurnStatus]
+		Done      doneFixture
+		EOF       resultFixture[TurnStatus]
+		WireError wireErrorFixture `json:"wire_error"`
+	}
+	Sequences struct {
+		TargetRelease        targetReleaseFixture  `json:"target_release_before_collection"`
+		InvalidLocalRequests []invalidLocalFixture `json:"invalid_local_requests"`
+		CrossedRehello       crossedRehelloFixture `json:"crossed_rehello"`
+	}
+}
+
+type startFixture struct {
+	Request TurnRunRequest
+	Result  StartResult
+}
+
+type resultFixture[T any] struct {
+	Result T
+}
+
+type doneFixture struct {
+	Terminal TurnResult
+	Result   TurnStatus
+}
+
+type wireErrorFixture struct {
+	Code    int
+	Message string
+	Result  TurnStatus
+}
+
+type targetReleaseFixture struct {
+	SessionID    string `json:"session_id"`
+	FirstInput   string `json:"first_input"`
+	SecondInput  string `json:"second_input"`
+	FirstTurnID  string `json:"first_turn_id"`
+	SecondTurnID string `json:"second_turn_id"`
+}
+
+type invalidLocalFixture struct {
+	Operation string
+	Request   json.RawMessage
+	Error     string
+}
+
+func loadCallerFixtures(t *testing.T) callerFixtures {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "internal", "protocol", "caller-sugar.fixtures.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixtures callerFixtures
+	if err = json.Unmarshal(raw, &fixtures); err != nil {
+		t.Fatal(err)
+	}
+	return fixtures
+}
+
+func runInvalidLocal(c *Caller, operation string, raw json.RawMessage) error {
+	switch operation {
+	case "start":
+		var request TurnRunRequest
+		_ = json.Unmarshal(raw, &request)
+		_, err := c.Start(request)
+		return err
+	case "status":
+		var request StatusRequest
+		_ = json.Unmarshal(raw, &request)
+		_, err := c.Status(request)
+		return err
+	default:
+		var request WaitRequest
+		_ = json.Unmarshal(raw, &request)
+		_, err := c.Wait(request)
+		return err
+	}
 }

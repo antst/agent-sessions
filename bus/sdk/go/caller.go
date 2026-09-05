@@ -2,7 +2,6 @@ package sessionkit
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -15,7 +14,7 @@ const unavailableReason = "result unavailable, lane resumable"
 
 var ErrUnknownTurn = errors.New("unknown_turn")
 
-type callFunc func(context.Context, string, any) (json.RawMessage, error)
+type callFunc func(context.Context, string, any, any) error
 
 type Caller struct {
 	call          callFunc
@@ -25,14 +24,15 @@ type Caller struct {
 }
 
 type localRun struct {
-	id, sessionID, state, reason string
-	result                       *TurnResult
-	done                         chan struct{}
+	TurnStatus
+	done chan struct{}
 }
 
 type StartResult struct {
 	TurnID string `json:"turn_id"`
 }
+
+type StatusRequest = StartResult
 
 type TurnStatus struct {
 	TurnID    string      `json:"turn_id"`
@@ -47,20 +47,13 @@ type WaitRequest struct {
 	TimeoutMS *int64 `json:"timeout_ms,omitempty"`
 }
 
-type StatusRequest struct {
-	TurnID string `json:"turn_id"`
-}
-
 func newCaller(call callFunc) *Caller {
 	return &Caller{call: call, runs: map[string]*localRun{}, targets: map[string]*localRun{}}
 }
 
 func callAs[T any](ctx context.Context, call callFunc, method string, params any) (T, error) {
 	var result T
-	raw, err := call(ctx, method, params)
-	if err == nil {
-		err = json.Unmarshal(raw, &result)
-	}
+	err := call(ctx, method, params, &result)
 	return result, err
 }
 
@@ -101,31 +94,37 @@ func (c *Caller) Start(request TurnRunRequest) (StartResult, error) {
 		return StartResult{}, &ProtocolError{Code: protocol.Busy, Message: "busy"}
 	}
 	c.next++
-	run := &localRun{id: fmt.Sprintf("t-%d", c.next), sessionID: request.SessionID, state: "running", done: make(chan struct{})}
-	c.runs[run.id], c.targets[run.sessionID] = run, run
+	run := &localRun{TurnStatus: TurnStatus{TurnID: fmt.Sprintf("t-%d", c.next), SessionID: request.SessionID, State: "running"}, done: make(chan struct{})}
+	c.runs[run.TurnID], c.targets[run.SessionID] = run, run
 	c.mu.Unlock()
 	go func() {
 		result, err := c.Run(context.Background(), request)
 		c.settle(run, result, err)
 	}()
-	return StartResult{TurnID: run.id}, nil
+	return StartResult{TurnID: run.TurnID}, nil
 }
 
 func (c *Caller) Status(request StatusRequest) (TurnStatus, error) {
+	if request.TurnID == "" {
+		return TurnStatus{}, errors.New("invalid status request")
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	run := c.runs[request.TurnID]
 	if run == nil {
 		return TurnStatus{}, ErrUnknownTurn
 	}
-	result := run.view()
-	if run.state != "running" {
+	result := run.TurnStatus
+	if run.State != "running" {
 		delete(c.runs, request.TurnID)
 	}
 	return result, nil
 }
 
 func (c *Caller) Wait(request WaitRequest) (TurnStatus, error) {
+	if request.TurnID == "" || request.TimeoutMS != nil && *request.TimeoutMS < 0 {
+		return TurnStatus{}, errors.New("invalid wait request")
+	}
 	c.mu.Lock()
 	run := c.runs[request.TurnID]
 	c.mu.Unlock()
@@ -134,8 +133,6 @@ func (c *Caller) Wait(request WaitRequest) (TurnStatus, error) {
 	}
 	if request.TimeoutMS == nil {
 		<-run.done
-	} else if *request.TimeoutMS < 0 {
-		return TurnStatus{}, errors.New("invalid wait request")
 	} else {
 		timer := time.NewTimer(time.Duration(*request.TimeoutMS) * time.Millisecond)
 		defer timer.Stop()
@@ -150,19 +147,15 @@ func (c *Caller) Wait(request WaitRequest) (TurnStatus, error) {
 func (c *Caller) settle(run *localRun, result TurnResult, err error) {
 	c.mu.Lock()
 	if err == nil {
-		run.state, run.result = "done", &result
+		run.State, run.Result = "done", &result
 	} else {
-		run.state, run.reason = "unavailable", unavailableReason
+		run.State, run.Reason = "unavailable", unavailableReason
 		var value *ProtocolError
 		if errors.As(err, &value) {
-			run.reason = fmt.Sprintf("%d %s", value.Code, value.Message)
+			run.Reason = fmt.Sprintf("%d %s", value.Code, value.Message)
 		}
 	}
-	delete(c.targets, run.sessionID)
+	delete(c.targets, run.SessionID)
 	close(run.done)
 	c.mu.Unlock()
-}
-
-func (r *localRun) view() TurnStatus {
-	return TurnStatus{TurnID: r.id, SessionID: r.sessionID, State: r.state, Result: r.result, Reason: r.reason}
 }

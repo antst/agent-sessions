@@ -36,6 +36,7 @@ func (r *Run) Done() <-chan struct{} { return r.done }
 
 type Worker struct {
 	product WorkerCallbacks
+	caller  *Caller
 	dial    func(context.Context, string, string) (net.Conn, error)
 	mu      sync.Mutex
 	conn    *rpc.Conn
@@ -48,11 +49,13 @@ type Worker struct {
 }
 
 func NewWorker(product WorkerCallbacks) *Worker {
-	return &Worker{product: product, dial: (&net.Dialer{}).DialContext, closed: make(chan struct{})}
+	worker := &Worker{product: product, dial: (&net.Dialer{}).DialContext, closed: make(chan struct{})}
+	worker.caller = newCaller(worker.Call)
+	return worker
 }
 
 func (w *Worker) Closed() <-chan struct{} { return w.closed }
-func (w *Worker) Caller() *Caller         { return newCaller((&Client{wire: w.conn}).Call) }
+func (w *Worker) Caller() *Caller         { return w.caller }
 
 func (w *Worker) Serve(ctx context.Context) error {
 	defer close(w.closed)
@@ -89,9 +92,7 @@ func (w *Worker) Call(ctx context.Context, method string, params, result any) er
 	return w.conn.Call(ctx, method, params, result)
 }
 
-func (w *Worker) Shutdown() {
-	_ = w.conn.Close()
-}
+func (w *Worker) Shutdown() { _ = w.conn.Close() }
 
 func (w *Worker) handle(_ context.Context, request *rpc.Request) {
 	switch request.Method {
