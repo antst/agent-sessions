@@ -33,6 +33,8 @@ A request with a usable ID whose params or method are invalid receives its
 correlated `invalid_frame` response, or `invalid_hello` for `session.hello`,
 before the reader closes the connection. Without a usable ID the reader closes
 without writing. The reader never dispatches a later frame after either case.
+A response whose ID does not match an outstanding call is also an invalid frame:
+the receiver closes the connection and fails its pending calls once.
 
 The local Unix socket is trusted and plain by default. When the daemon's
 optional `local_key` is configured, every peer and worker connection instead
@@ -1211,6 +1213,10 @@ or another re-hello therefore cannot leave the older value installed. Its
 `rehello(name, info)` call preserves the product, session ID, and groups. While
 disconnected it stores the new desired name and information and returns
 `not_connected`.
+Its `replace(ctx, identity)` call supplies a complete new identity for a
+different-ID re-hello on the same connection. It settles outstanding operations
+from the old identity as `not_connected`; reconnect uses the new desired
+identity.
 The product's current title is the peer name. A same-ID re-hello updates that
 name and information in place only when the declared groups slice is exactly
 equal, including order. A
@@ -1234,6 +1240,9 @@ connection-bound client supplies `list`, `send`, `describe`, `spawn`, `resume`,
 without blocking the reader. Go also exports one thin no-hello client:
 `Dial(socket)`, `Call(ctx, method, params)`, and `Close`; the caller kit and a
 wrapper's private lane socket use that one framed implementation.
+Go exports `NewCaller(call)` to place the same typed methods and caller
+conveniences over that no-hello client's call function; workers and peers are
+the other two uses of the same caller.
 
 Go constructs one caller for each worker before `Serve` and binds it to the
 worker's current connection through `Worker.Call`; repeated `Worker.Caller()`
