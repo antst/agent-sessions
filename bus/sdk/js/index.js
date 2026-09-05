@@ -113,15 +113,16 @@ class Peer {
     this.identity = snapshot(desired);
     const connection = this.connection;
     if (!connection || connection.signal.aborted) throw new Error("not connected");
-    try { return await connection.call("session.hello", { protocol: 1, ...this.identity }); }
+    try { return await this._hello(connection, this.identity); }
     catch (error) { if (connection.signal.aborted) throw new Error("not connected"); throw error; }
   }
   shutdown() { this.terminal = true; this.connection?.close(); this.finish(); }
   async _open() {
     if (this.terminal) return; let connection; try { connection = new Connection(this.connect(this.socket), true, (request) => this._handle(request, connection)); } catch { this.schedule(() => { this.ready = this._open(); }, 2000); return; } this.connection = connection;
-    try { await connection.call("session.hello", { protocol: 1, ...this.identity }); } catch { connection.close(); }
+    try { await this._hello(connection); } catch { connection.close(); }
     if (!connection.signal.aborted) void connection.done.then(() => this._lost(connection)); else this._lost(connection);
   }
+  async _hello(connection, identity = this.identity) { for (;;) { const result = await connection.call("session.hello", { protocol: 1, ...identity }); if (identity === this.identity) return result; identity = this.identity; } }
   _lost(connection) { if (this.connection !== connection || this.terminal) return; this.connection = null; this.schedule(() => { this.ready = this._open(); }, 2000); }
   _handle(request, connection) {
     if (request.method === "session.superseded") { this.terminal = true; void connection.result(request, {}).finally(() => { connection.close(); this.finish(); }); return; }
