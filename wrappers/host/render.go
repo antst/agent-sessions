@@ -25,7 +25,7 @@ func render(request sessionkit.DeliveryRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "<cross-session-message " + attributes + ">\n[codex-peer-metadata: " + string(metadata) + "]\n" +
+	return "<cross-session-message " + attributes + ">\n[agentbus-metadata: " + string(metadata) + "]\n" +
 		escapeEnvelopeBody(request.Body) + "\n</cross-session-message>", nil
 }
 
