@@ -24,6 +24,7 @@ type pending struct {
 	method string
 	result any
 	done   chan error
+	seen   func() error
 }
 
 type Conn struct {
@@ -52,11 +53,43 @@ func (c *Conn) Done() <-chan struct{}    { return c.ctx.Done() }
 func (c *Conn) Context() context.Context { return c.ctx }
 
 func (c *Conn) Call(ctx context.Context, method string, params, result any) error {
-	raw, err := protocol.EncodeParams(method, params)
-	if err != nil {
+	return c.call(ctx, method, params, result, nil)
+}
+
+// CallObserved runs seen after a valid result is decoded and before the reader
+// accepts the next frame.
+func (c *Conn) CallObserved(ctx context.Context, method string, params, result any, seen func() error) error {
+	return c.call(ctx, method, params, result, seen)
+}
+
+func (c *Conn) call(ctx context.Context, method string, params, result any, seen func() error) error {
+	id, p := c.begin(method, params, result, seen)
+	select {
+	case err := <-p.done:
 		return err
+	case <-ctx.Done():
+		if c.drop(id, p) {
+			return ctx.Err()
+		}
+		return <-p.done
 	}
-	p := pending{method: method, result: result, done: make(chan error, 1)}
+}
+
+// Begin sends one call and returns its eventual response without tying it to a
+// caller context. It lets a connection owner serialize writes without waiting
+// for earlier responses.
+func (c *Conn) Begin(method string, params, result any, seen func() error) <-chan error {
+	_, p := c.begin(method, params, result, seen)
+	return p.done
+}
+
+func (c *Conn) begin(method string, params, result any, seen func() error) (int64, pending) {
+	raw, err := protocol.EncodeParams(method, params)
+	p := pending{method: method, result: result, done: make(chan error, 1), seen: seen}
+	if err != nil {
+		p.done <- err
+		return 0, p
+	}
 	c.writeMu.Lock()
 	c.stateMu.Lock()
 	var id int64
@@ -79,18 +112,11 @@ func (c *Conn) Call(ctx context.Context, method string, params, result any) erro
 	}
 	c.writeMu.Unlock()
 	if err != nil {
-		c.drop(id, p)
-		return err
-	}
-	select {
-	case err := <-p.done:
-		return err
-	case <-ctx.Done():
-		if c.drop(id, p) {
-			return ctx.Err()
+		if id == 0 || c.drop(id, p) {
+			p.done <- err
 		}
-		return <-p.done
 	}
+	return id, p
 }
 
 func (c *Conn) Result(request *Request, value any) error {
@@ -198,6 +224,11 @@ func (c *Conn) receiveResponse(frame protocol.Frame) {
 	if frame.Error == nil {
 		if err = protocol.UnmarshalResult(p.method, frame.Result, p.result); err != nil {
 			c.close(err)
+		} else if p.seen != nil {
+			err = p.seen()
+			if err != nil {
+				c.close(err)
+			}
 		}
 	}
 	p.done <- err
