@@ -39,6 +39,14 @@ back to the documented default path when absent. Every spawned lane receives
 that variable alongside `AGENT_SESSIONS_LAUNCH_TOKEN` and, when configured,
 `AGENT_SESSIONS_LOCAL_KEY`.
 
+A product is a binary; started with a launch token in its environment it is a
+lane worker, with no mode argument. Lane-only workers such as non-AI tools are
+never started without a token, so a worker flag would be dead syntax for them.
+A flag plus a token would also create two sources of truth and require errors
+for both disagreement cases; the token alone leaves one fact and zero
+consistency checks. Per-spawn tokens are single-use and expiring, so an
+ordinary human shell never contains one.
+
 Every session has one canonical ID `uuid@host` and one canonical name
 `name@host`; every output uses those forms on the session's own daemon and on
 every federated host. The UUID part assigned by the daemon, including one
@@ -161,8 +169,8 @@ its next native turn; that queue is invisible to the daemon and to this wire.
 A session sends `lane.describe` with a product token and optional `host`.
 Absent `host`, or `host` equal to the local daemon, runs locally; another
 connected host forwards the identical request one hop and performs the complete
-probe there. The authoritative daemon starts `<product> --lane` from its
-service PATH with a rowless one-use token, consumes its worker hello, returns the declared open
+probe there. The authoritative daemon starts `<product>` from its service PATH
+with empty argv and a rowless one-use launch token in its environment, consumes its worker hello, returns the declared open
 fields, extra arguments, and optional product version, then closes it without
 sending `session.open`. The hello is emitted only after app-ready. Exit before
 hello fails with the exit code and bounded trailing stderr; there is no
@@ -422,7 +430,7 @@ Only lanes have durable rows. A row has exactly these columns:
 | Column | Meaning |
 | --- | --- |
 | `session_id` | Immutable canonical `uuid@host` and primary key; the daemon assigns the RFC 4122 version-4 UUID part. |
-| `product` | Immutable binary name executed as `<product> --lane`. |
+| `product` | Immutable binary name executed with empty argv and a launch token in its environment. |
 | `name` | Immutable canonical `name@host`; for a lane the stored name part is `<parent name part>/<caller leaf>` and the host is where the lane runs. |
 | `groups` | Immutable full set containing the parent's private group, the recursively composed `<parent private group>/<leaf>`, and explicit `extra_groups`; no other parent membership is inherited. |
 | `native_id` | Absent before commit; immutable after `session.open`. |
@@ -513,9 +521,11 @@ PID, peer-credential, descendant, signature, or capability machinery.
 ### 2.3 Describe and spawn
 
 The product token is exactly a binary name on the daemon's service PATH.
-Native and wrapped products have one process contract: exec `<product> --lane`
-with `AGENT_SESSIONS_LAUNCH_TOKEN` in the environment and no other daemon-added
-argument. When configured, the daemon also supplies `AGENT_SESSIONS_LOCAL_KEY`;
+Native and wrapped products have one process contract: exec `<product>` with
+empty argv and `AGENT_SESSIONS_LAUNCH_TOKEN` in the environment. Presence of
+that variable selects worker mode; absence selects the product's ordinary
+entry. Tokens are per-spawn, single-use, and expiring, so an ordinary human
+shell never holds one accidentally. When configured, the daemon also supplies `AGENT_SESSIONS_LOCAL_KEY`;
 the worker kit consumes and scrubs both variables before product code runs.
 Callers name the product binary but never supply an executable path.
 The daemon has no executable registry, fixed-argument table, or product
@@ -527,11 +537,11 @@ transport only and never participate in product resolution.
 
 Wrapped products are our binaries named `claude-peer`, `codex-peer`,
 `grok-peer`, `qwen-peer`, `opencode-peer`, `kilo-peer`, `pi-peer`, and
-`omp-peer`. Plain invocation is the interactive peer launch; `--lane` is the
-resident lane wrapper. Tokens are honest binary identities: `claude-peer` and
-`claude` are different products. When Claude becomes native, `claude --lane`
-starts working and `claude-peer` is deleted; the daemon and protocol do not
-change. The daemon accepts a product token only when it matches
+`omp-peer`. Invocation without a launch token is the interactive peer launch;
+invocation with one is the resident lane wrapper. Tokens are honest binary
+identities: `claude-peer` and `claude` are different products. When Claude
+becomes native, `claude` begins honoring the same launch-token environment and
+`claude-peer` is deleted; the daemon and protocol do not change. The daemon accepts a product token only when it matches
 `^[a-z0-9][a-z0-9-]{0,31}$`; an invalid token is `unknown_product`, so no path
 separator reaches process resolution. Failure to find an executable on PATH is
 `unknown_product`; an executable that starts and then fails is `spawn_failed`.
@@ -555,7 +565,7 @@ child name; the second spawn receives `name_taken`.
 For resume it checks `closed`
 before connection,
 then reuses the immutable row identity and stored open object. It creates the
-reservation, starts `<product> --lane`, consumes hello,
+reservation, starts `<product>` with empty argv and the launch token, consumes hello,
 checks declared open-field support, and sends one `session.open`. Resume includes
 the stored `native_id`; new open omits it.
 
@@ -810,7 +820,7 @@ product-side fate.
 | 23 | `internal/productruntime/environment_test.go` | Tests the deleted carrier. | Wrapper launch tests. |
 | 19 | `internal/productruntime/errors.go` | Driver error vocabulary dies. | Closed Section 1.4 wire errors. |
 | 29 | `internal/productruntime/fakes_test.go` | Fakes exist only for deleted drivers. | Shared kit fixtures and wrapper-local fakes. |
-| 31 | `internal/productruntime/lane_registry.go` | In-process product driver registry dies. | Direct `<product> --lane` PATH resolution in the daemon. |
+| 31 | `internal/productruntime/lane_registry.go` | In-process product driver registry dies. | Direct `<product>` PATH resolution with launch-token worker selection in the daemon. |
 | 31 | `internal/productruntime/lane_registry_test.go` | Tests the deleted registry. | Product grammar and PATH-resolution tests. |
 | 110 | `internal/productruntime/registry.go` | Host dependency/product composition registry dies. | Command composition plus wrapper constructors. |
 | 107 | `internal/productruntime/registry_test.go` | Tests the deleted registry. | Command composition and wrapper launch tests. |
@@ -1011,10 +1021,12 @@ under `dsh.profile`, and its `cordis.patch.yml` inserts exactly
 `{id: agent-sessions, name: '@agent-sessions/dsh', config: {mode: lane}}` after
 bundle patches and before any `--patch` overlays. A non-disabled plugin row is
 load-mandatory by DSH boot semantics: import failure exits one with "plugin tree
-failed to load". Phase 2 adds `dashi --lane`; that universal switch selects the
-exact profile and `mode: lane` plugin configuration above. In a normal DSH
-profile the same plugin runs in peer mode. Lane mode without a launch token
-is a startup error rather than an accidental peer.
+failed to load". Phase 2 makes the `dashi` boot layer select this exact profile
+and `mode: lane` plugin configuration whenever
+`AGENT_SESSIONS_LAUNCH_TOKEN` is present; no command-line switch or alias is
+involved. Without that variable, the normal DSH profile runs the same plugin in
+peer mode. Forcing the plugin's lane mode without a launch token is a startup
+error rather than an accidental peer.
 
 The c5b280d integration already proves the DSH core primitives the unified
 plugin needs:
@@ -1096,8 +1108,8 @@ must remain net-negative after the kit is accounted separately.
 | Ledger item | Decision | Reason |
 | --- | --- | --- |
 | Process and connection | Lane mode starts one resident wrapper, which owns one product session and the one daemon connection. Peer mode has no wrapper around the interactive TUI: the product-spawned stdio MCP server or JavaScript plugin owns the direct peer connection. | The connection holder is the integration process the product already supervises. Wrapping an interactive TUI would add terminal, signal, resize, and hand-started-session failure modes without improving the protocol. |
-| Installed entry forms | One installed integration image is named `<native>-peer` and exposes two entry forms: plain invocation launches the interactive product whose MCP/plugin holds a direct peer connection; `--lane` holds a worker connection and owns a headless child. | Sharing code and kits is required; sharing process topology would violate the one-connection rule in one of the two modes. |
-| Peer identity | Identity is fixed before peer hello in this order: launcher environment `AGENT_SESSIONS_SESSION_ID`, `AGENT_SESSIONS_SESSION_NAME`, `AGENT_SESSIONS_GROUPS`, `AGENT_SESSIONS_SOCKET`, and optional `AGENT_SESSIONS_LOCAL_KEY`, inherited unchanged by the product and its MCP/plugin process; otherwise Claude resolves its parent through `claude agents --json` (`cmd/agent-sessions/connector.go:449-487`), while DSH/OpenCode/Kilo/Pi/OMP read their in-process session ID; otherwise Codex defers hello until the first tool call supplies `_meta.threadId` (`connector.go:247-251`). Fresh Grok and Qwen peer launchers pass one new daemon UUID both through native `--session-id` and `AGENT_SESSIONS_SESSION_ID`; a hand-started Grok or Qwen process without either source serves every Agent Sessions tool with an error naming the required launcher and never sends hello. | Identity is a launcher or product fact, never a guessed process-global. Launcher environment carries the bare session UUID, name part, and groups; product-native resolution fills only facts the integration can prove. |
+| Installed entry forms | One installed integration image is named `<native>-peer` and exposes two entry forms: invocation without a launch token starts the interactive product whose MCP/plugin holds a direct peer connection; invocation with a launch token holds the worker connection and owns a headless child. | The environment is the mode discriminator for native and wrapped products alike; no product-specific worker flag enters the daemon. |
+| Peer identity | Identity is fixed before peer hello from the exact environment table below when present; otherwise Claude resolves its parent through `claude agents --json` (`cmd/agent-sessions/connector.go:449-487`), while DSH/OpenCode/Kilo/Pi/OMP read their in-process session ID; otherwise Codex defers hello until the first tool call supplies `_meta.threadId` (`connector.go:247-251`). Fresh Grok and Qwen peer launchers pass one new daemon UUID both through native `--session-id` and `AGENT_SESSIONS_SESSION_ID`; a hand-started Grok or Qwen process without either source serves every Agent Sessions tool with an error naming the required launcher and never sends hello. | Identity is a launcher or product fact, never a guessed process-global. Product-native resolution fills only facts the integration can prove. |
 | Product boundary | The wrapper exposes the six Section 3 callbacks locally and contains every product import, argument translation, native protocol, and delivery compromise. | Deleting one wrapper when a vendor adopts the native kit must require no daemon, schema, or caller-kit change. |
 | Child launch | The lane wrapper connects and sends worker hello before starting a native child. It receives and validates `session.open`, then spawns the child with the stored cwd, model, reasoning, permission, and ordered argument values. | Process-level flags are ordinary open fields for wrappers because the product does not exist until open. Native products start before open and therefore need session-level primitives instead. |
 | Child lifetime | If the native child dies while idle, the wrapper reaps it and exits immediately; worker EOF makes the row offline and explicitly resumable. | A live worker connection must never advertise a dead product or synthesize an internal restart policy. |
@@ -1108,11 +1120,27 @@ must remain net-negative after the kit is accounted separately.
 | Shared size cap | Wrapper host, local HTTP MCP, stdio/plugin bridge protocol, and bounded FIFO together: **400 production / 400 test logical lines**. | Product-independent scaffolding larger than the daemon router would be a second protocol implementation. |
 | Shared deletion | Delete the 16 non-product-specific files in `internal/launcher` (2,199 lines) and `cmd/agent-sessions/connector_refresh.go` plus its test (333 lines). Rewrite `connector.go`/test as the peer-mode MCP entry that owns a direct peer connection, and rewrite `native_peer.go` as thin exec-time product configuration; lane-wrapper composition is separate. | The old launcher package still dies: CLI parsing and thin peer exec plans move to `cmd`, lane process ownership to `structuredprocess`, and lane recipes to wrappers. Connector self-exec/release refresh is unnecessary when the installed MCP entry already is the peer connection holder. |
 
+The launcher/daemon environment contract is exact:
+
+| Variable | Value | Producer |
+| --- | --- | --- |
+| `AGENT_SESSIONS_SESSION_ID` | Bare RFC 4122 UUID. | Peer launcher only. |
+| `AGENT_SESSIONS_SESSION_NAME` | Bare, unqualified name part. | Peer launcher only. |
+| `AGENT_SESSIONS_GROUPS` | JSON array string containing the asserted groups. | Peer launcher only. |
+| `AGENT_SESSIONS_SOCKET` | Named daemon Unix-socket endpoint. | Peer launcher and daemon lane spawn. |
+| `AGENT_SESSIONS_LOCAL_KEY` | Optional local-TLS secret. | Peer launcher and daemon lane spawn when configured. |
+| `AGENT_SESSIONS_LAUNCH_TOKEN` | One-use expiring worker reservation token. | Daemon lane spawn only. |
+
+Peer launchers pass ID, name, groups, socket, and optional local key unchanged
+through the product to its MCP/plugin child. Lane launches contain only socket,
+optional local key, and launch token; canonical lane identity arrives later in
+`session.open`.
+
 ### 4.2 Claude Code
 
 | Ledger item | Decision | Source-backed reason |
 | --- | --- | --- |
-| Resident wrapper | `claude-peer --lane` owns one long-lived `claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages` child. Plain `claude-peer` still launches interactive Claude; Claude's product-spawned Agent Sessions stdio MCP server owns the peer connection. | The lane stream is proven at c5b280d `internal/products/claude/lane.go:112-145`. Peer presence needs no TUI wrapper and continues to work for hand-started Claude sessions. |
+| Resident wrapper | `claude-peer` with a launch token owns one long-lived `claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages` child. Without a token, `claude-peer` launches interactive Claude; Claude's product-spawned Agent Sessions stdio MCP server owns the peer connection. | The lane stream is proven at c5b280d `internal/products/claude/lane.go:112-145`. Peer presence needs no TUI wrapper and continues to work for hand-started Claude sessions. |
 | Open and resume | Fresh adds `--session-id <daemon session_id> --name <row name>`; resume uses `--resume <native_id>`. Claude supports all five open fields: `cwd`, `permission_mode`, `model`, `reasoning_effort`, and `arguments`; the wrapper maps model to `--model` and effort to `--effort` when it starts the child after open. | c5b280d maps the other fields at `lane.go:112-141`; Claude's product CLI help exposes both `--model <model>` and `--effort <level>`. Process flags are available because no child exists before open. |
 | Run | Write one stream-json user frame, keep the run callback pending, and convert the exact result frame to the terminal result. | `lane.go:173-225` already proves the single stream write plus terminal observation. |
 | Tools | In lane mode the wrapper serves loopback HTTP MCP and supplies that endpoint in Claude's launch configuration. In peer mode Claude starts the stdio MCP entry, which takes launcher environment first and otherwise confirms its parent session through `claude agents --json` before hello. | The two entry forms share the caller kit but never coexist for one session; peer identity is proven by `cmd/agent-sessions/connector.go:449-487`, not inferred from process position. |
@@ -1126,7 +1154,7 @@ must remain net-negative after the kit is accounted separately.
 
 | Ledger item | Decision | Source-backed reason |
 | --- | --- | --- |
-| Resident wrapper | `codex-peer --lane` owns one session-specific App Server client/subscription. Plain `codex-peer` launches interactive Codex; Codex's product-spawned Agent Sessions stdio MCP server owns the peer connection. | The lane surface is already App Server RPC (`internal/bridge/codex_native.go`). Peer presence does not require the lane wrapper or a host-global coordinator. |
+| Resident wrapper | `codex-peer` with a launch token owns one session-specific App Server client/subscription. Without a token, `codex-peer` launches interactive Codex; Codex's product-spawned Agent Sessions stdio MCP server owns the peer connection. | The lane surface is already App Server RPC (`internal/bridge/codex_native.go`). Peer presence does not require the lane wrapper or a host-global coordinator. |
 | Open and resume | Fresh performs `thread/start`, names the thread, and materializes its rollout; resume performs the exact prepare/resume. It supports all five open fields: `cwd`, `permission_mode`, `model`, `reasoning_effort`, and `arguments`, stored once and applied to every run. | `CodexStartRequest` and `CodexLaneTurnRequest` at `codex_native.go:51-70` expose exactly these settings; c5's split between open and per-turn inputs is collapsed into stored open data. |
 | Run | Send one `turn/start`, await the matching `turn/completed`, and extract the final agent message. | `internal/products/codex/lane.go:75-122` and `codex_native.go:528-656` prove the end-to-end primitive. |
 | Tools | In lane mode the wrapper supplies its loopback HTTP MCP endpoint in that lane's App Server `thread/start` configuration as `mcp_servers.<id>.url`. In peer mode Codex starts the stdio MCP entry, which defers its direct peer hello until `_meta.threadId` arrives. | MCP configuration is per thread; the wrapper never reloads or mutates host-global App Server configuration, and each mode owns one connection. |
@@ -1140,21 +1168,21 @@ must remain net-negative after the kit is accounted separately.
 
 | Ledger item | Decision | Source-backed reason |
 | --- | --- | --- |
-| Resident wrapper | `grok-peer --lane` owns one private leader, one authenticated ACP primary, and one observer for the exact lane session. Plain `grok-peer` passes one new daemon UUID to Grok as both `--session-id` and `AGENT_SESSIONS_SESSION_ID`, then execs interactive Grok; Grok spawns our stdio MCP server, which owns the peer connection. | Grok Build 1.0.13 exposes the ACP agent through `grok agent stdio` / `leader` and acts as an MCP client. A hand-started peer lacking a launcher or native identity returns the launcher error and never hellos. |
-| Open and resume | The resident wrapper receives `session.open` before it starts the private leader. Fresh spawn uses `--session-id <daemon uuid>`; resume uses `--resume <native_id>`. It puts `--permission-mode`, `--reasoning-effort`, `-m`, and ordered `arguments` on that same process command line, with `cwd` as the child working directory. | Grok rejects a fresh `--session-id` that already exists, preserving native uniqueness. ACP `_meta` exposes only `yoloMode` / `autoMode`; it is not an open-field transport. All five fields are process inputs because the wrapper starts Grok after open. |
+| Resident wrapper | `grok-peer` with a launch token owns one private leader, one authenticated ACP primary, and one observer for the exact lane session. Without a token, `grok-peer` execs `grok --leader --session-id <uuid>`; it does not create a private leader. Grok spawns our stdio MCP server, which owns the peer connection and reaches the product through Grok's default leader socket. A hand-started Grok with no launcher identity never hellos. | Grok Build 1.0.13 exposes the ACP agent through `grok agent stdio` / `leader` and acts as an MCP client. The default leader socket is a product-internal hop, not another bus connection. |
+| Open and resume | The resident wrapper receives `session.open` before it starts the private leader. Fresh starts Grok with `--session-id <daemon uuid>` and attaches with ACP `session/load`; resume starts it with `--resume <native_id>` and likewise loads that exact session. It never calls `session/new`. It puts `--permission-mode`, `--reasoning-effort`, `-m`, and ordered `arguments` on that same process command line, with `cwd` as the child working directory. | Grok rejects a fresh `--session-id` that already exists, preserving native uniqueness. ACP `_meta` exposes only `yoloMode` / `autoMode`; it is not an open-field transport. All five fields are process inputs because the wrapper starts Grok after open. The existing 15-second startup hold remains inside `spawnTransactionTimeout = 60s`. |
 | Run | Call ACP `session/prompt`, consume matching update notifications, and return its stop reason and accumulated output. | `grok_native_session.go:270-308` is the resident prompt primitive. |
-| Tools | In lane mode the wrapper publishes a private endpoint and `grok/scripts/native-entry` is a local stdio MCP relay to it. In peer mode Grok, an MCP client, spawns the same installed stdio MCP entry and that entry owns the direct peer connection. | ACP is the wrapper-to-Grok control protocol; MCP is the product-facing Agent Sessions tool boundary. The two must not be conflated. |
-| Deliver | Observer interjection while running reports `injected` after the native request succeeds. While idle, Grok retains the message on its native prompt queue until the next prompt and reports `queued_for_next_turn`. | Both dispositions describe product-owned behavior; the wrapper adds no FIFO and the daemon learns no Grok condition. |
-| Interrupt and close | Interrupt sends one ACP `session/cancel` notification; `{}` means the notification was sent, not that the run has stopped. Close tears down observer, primary, leader, and its private socket directory in that order. | This is exactly Section 1's accepted-interrupt contract and the wrapper owns the complete process tree. |
+| Tools | In lane mode the wrapper publishes a private endpoint and `grok/scripts/native-entry` is a local stdio MCP relay to it. In peer mode Grok, an MCP client, spawns the installed stdio MCP entry; that entry owns the direct peer connection and delivers through the default leader socket. Without a live leader, delivery is rejected as `no_leader`. | ACP is the wrapper-to-Grok control protocol; MCP is the product-facing Agent Sessions tool boundary. The two must not be conflated. |
+| Deliver | While running, observer interjection reports `injected` only after the actor acknowledges it. While idle, Grok acknowledges retention on its native held-prompt queue and the wrapper reports `queued_for_next_turn`. | Both dispositions describe acknowledged product-owned behavior; the wrapper adds no FIFO and the daemon learns no Grok condition. |
+| Interrupt and close | Interrupt sends one ACP `session/cancel` notification; `{}` means the notification was sent, not that the run has stopped. Close sends cancel and awaits a terminal for at most 6 seconds, then closes observer, primary, and leader concurrently for at most 3 seconds; at 9 seconds it kills the wrapper-owned process group. | The product-specific 6+3-second schedule fits inside the daemon's single 10-second `closeBound`, leaves one second for wrapper EOF/reap, and cannot create another daemon clock. |
 | Exception ledger | Section 1 code exceptions: **0**. Declared unsupported open fields: **none**. Wrapper-only queue: **none**; Grok's idle prompt queue is native state. | Grok exposes running interjection, native idle queuing, and all typed open controls; no limitation leaks outward. |
 | Size cap | **750 production / 700 test logical lines**, including ACP framing and leader bootstrap but excluding the shared wrapper host. | Grok's private leader is product-specific and must not escape its ledger or recreate daemon attachment/generation state. |
-| Deletion inventory | Delete all `internal/products/grok` (2 files / 637 lines), `internal/launcher/{grok_peer.go,grok_peer_test.go}` (2 / 1,183), and `cmd/agent-sessions/grok_peer.go` (1 / 213). Rewrite `grok/.mcp.json` and `grok/scripts/native-entry` as dual-entry peer/direct or lane/local assets. Total: **5 files / 2,033 lines**. | One lane wrapper replaces the driver/leader composition; the thin peer exec plan is rehomed without wrapping the TUI. |
+| Deletion inventory | Delete all `internal/products/grok` (2 files / 637 lines), `internal/launcher/{grok_peer.go,grok_peer_test.go}` (2 / 1,183), `cmd/agent-sessions/grok_peer.go` (1 / 213), all 11 `internal/bridge/grok*.go` files (1,883), and `internal/launcher/lane_grok_test.go` (1 / 23). Rewrite `grok/.mcp.json` and `grok/scripts/native-entry` as dual-entry peer/direct or lane/local assets. Total: **17 files / 3,939 lines**. | The wrapper receives copied, product-owned ACP/leader/observer slices rather than retaining a cross-product bridge package; the thin peer exec plan is rehomed without wrapping the TUI. |
 
 ### 4.5 Qwen Code
 
 | Ledger item | Decision | Source-backed reason |
 | --- | --- | --- |
-| Resident wrapper | `qwen-peer --lane` owns one `qwen --acp` child and one ACP client for the lane session. Plain `qwen-peer` passes one daemon-chosen ID to Qwen as both `--session-id` and environment, then execs interactive Qwen; its spawned stdio MCP server owns the peer connection. | `internal/products/qwen/lane.go:102-181` proves the headless ACP lifetime. A hand-started peer lacking this identity returns the launcher error and never hellos; obsolete file-observer presence dies. |
+| Resident wrapper | `qwen-peer` with a launch token owns one `qwen --acp` child and one ACP client for the lane session. Without a token, `qwen-peer` passes one daemon-chosen ID to Qwen as both `--session-id` and environment, then execs interactive Qwen; its spawned stdio MCP server owns the peer connection. | `internal/products/qwen/lane.go:102-181` proves the headless ACP lifetime. A hand-started peer lacking this identity returns the launcher error and never hellos; obsolete file-observer presence dies. |
 | Open and resume | Initialize ACP v1, call `session/new` or capability-checked `session/resume`, verify the exact ID, then rename fresh sessions. Supported open fields are `cwd`, `permission_mode`, `model`, and `arguments`; model maps to Qwen's `-m` process flag. | `lane.go:117-178` contains the native transaction, and Qwen product help exposes `-m, --model`. `reasoning_effort` remains unsupported because Qwen exposes no corresponding flag or ACP field. |
 | Run | Start `session/prompt`, accumulate session updates, and resolve the matching future to a terminal result. | `lane.go:199-263` and `client.go` prove the one ACP request/future. |
 | Tools | In lane mode the wrapper serves loopback HTTP MCP through ACP `mcpServers`. In peer mode Qwen starts the stdio MCP entry, which owns the direct peer connection. | c5 already injects an MCP server during `session/new` (`lane.go:134`); lane mode changes only its destination, while peer mode preserves the product-spawned connector pattern. |
@@ -1168,7 +1196,7 @@ must remain net-negative after the kit is accounted separately.
 
 | Ledger item | Decision | Source-backed reason |
 | --- | --- | --- |
-| Resident wrapper | `opencode-peer --lane` or `kilo-peer --lane` owns one private authenticated `<product> serve` child and one HTTP/SSE client for exactly one lane session. Plain invocation launches the corresponding interactive product, whose JavaScript plugin owns the direct peer connection through the JS kit. | `internal/products/opencodefamily/server.go:74-148` already constructs the private lane server. An interactive product already supervises its plugin, so peer mode needs no Go wrapper. |
+| Resident wrapper | `opencode-peer` or `kilo-peer` with a launch token owns one private authenticated `<product> serve` child and one HTTP/SSE client for exactly one lane session. Without a token it launches the corresponding interactive product, whose JavaScript plugin owns the direct peer connection through the JS kit. This wrapper shim remains because `opencode serve` is a different invocation from the TUI until upstream boot honors the launch-token variable. | `internal/products/opencodefamily/server.go:74-148` already constructs the private lane server. An interactive product already supervises its plugin, so peer mode needs no Go wrapper. |
 | Open and resume | Create or fetch the exact session, apply title and permission rules, and retain model/agent/variant defaults. Both products support all five open fields. | `opencodefamily/lane.go:69-157` and `:168-187` prove cwd, permission, arguments, parsed model, and reasoning variant. |
 | Run | Call `session.promptAsync`, follow the exact event stream, then fetch the matching assistant result. | `lane.go:168-337` and `client.go` contain the existing bounded HTTP/SSE primitive. |
 | Tools | The retained OpenCode/Kilo JavaScript plugin has two explicit modes: peer mode opens the one direct daemon connection through the JS kit; lane-local mode connects only to the wrapper's private endpoint and registers the same caller tool. | The current plugins already own product SDK registration in `integrations/{opencode,kilo}/agent-sessions.mjs`; an environment-selected destination changes, not the tool surface. |
@@ -1182,7 +1210,7 @@ must remain net-negative after the kit is accounted separately.
 
 | Ledger item | Decision | Source-backed reason |
 | --- | --- | --- |
-| Resident wrapper | `pi-peer --lane` owns one `pi --mode rpc --extension <managed plugin>` JSONL child for exactly one lane session. Plain `pi-peer` launches interactive Pi, whose JavaScript extension owns the direct peer connection through the JS kit. | `internal/products/pifamily/lane.go:119-164` is the proven lane RPC launch; interactive Pi already owns the extension lifecycle. |
+| Resident wrapper | `pi-peer` with a launch token owns one `pi --mode rpc --extension <managed plugin>` JSONL child for exactly one lane session. Without a token, `pi-peer` launches interactive Pi, whose JavaScript extension owns the direct peer connection through the JS kit. | `internal/products/pifamily/lane.go:119-164` is the proven lane RPC launch; interactive Pi already owns the extension lifecycle. |
 | Open and resume | Apply the Pi argument/permission mapping, create with the daemon ID, or pass `--session <native_id>` and verify the returned state. Pi supports all five open fields: model maps to `--model` and reasoning effort to the independent `--thinking` flag before child spawn. | `pifamily/lane.go:76-173` and `quirks.go:113-134` prove the transaction; Pi product help exposes `--model <pattern>` and `--thinking <level>`. |
 | Run | Send RPC `prompt`, observe terminal JSONL events, and read the final assistant text. | `pifamily/lane.go:179-300` and `rpc.go` are the existing primitive. |
 | Tools | The retained Pi extension runs in peer mode with a direct JS-kit daemon connection, or in lane-local mode against the wrapper's private endpoint; both register the same caller tool. | `integrations/pi/pifamily.mjs:106-151` already owns product tool registration; only the selected connection mode changes. |
@@ -1196,7 +1224,7 @@ must remain net-negative after the kit is accounted separately.
 
 | Ledger item | Decision | Source-backed reason |
 | --- | --- | --- |
-| Resident wrapper | `omp-peer --lane` uses the same resident Pi-family JSONL wrapper with OMP's fixed equals-style extension/mode/session arguments and terminal quirks. Plain `omp-peer` launches interactive OMP, whose JavaScript plugin owns the direct peer connection through the JS kit. | `internal/products/pifamily/quirks.go` and `rpc_lane_test.go:388-437` prove the lane dialect; interactive OMP already supervises its plugin. |
+| Resident wrapper | `omp-peer` with a launch token uses the same resident Pi-family JSONL wrapper with OMP's fixed equals-style extension/mode/session arguments and terminal quirks. Without a token, `omp-peer` launches interactive OMP, whose JavaScript plugin owns the direct peer connection through the JS kit. | `internal/products/pifamily/quirks.go` and `rpc_lane_test.go:388-437` prove the lane dialect; interactive OMP already supervises its plugin. |
 | Open and resume | Create or resume the exact OMP session and apply mapped permissions. OMP supports all five open fields: cwd maps to `--cwd=`, model to `--model=`, and reasoning effort to `--thinking` before child spawn. | OMP product help exposes `--cwd=<value>`, `--model=<value>`, and `--thinking <level>`; the family wrapper owns their equals-style projection. |
 | Run | Send RPC `prompt`, accept OMP's declared terminal event, and read final assistant text through the family implementation. | `pifamily/rpc.go` contains the closed event decoder; OMP selects the terminal quirk rather than a second lifecycle. |
 | Tools | The retained OMP entrypoint loads the Pi-family plugin in peer/direct or lane/local mode and registers the same caller tool. | `integrations/omp/agent-sessions.mjs` is already a three-line family entrypoint; the shared plugin owns mode selection. |
@@ -1210,10 +1238,10 @@ must remain net-negative after the kit is accounted separately.
 
 | Ledger | Files | Deleted lines | Decision |
 | --- | ---: | ---: | --- |
-| Product-specific rows in Sections 4.2-4.8 | 52 | 12,583 | Delete every non-native daemon driver and product-specific depart-on-exec launcher. |
+| Product-specific rows in Sections 4.2-4.8 | 64 | 14,489 | Delete every non-native daemon driver, bridge-owned product slice, and product-specific depart-on-exec launcher. |
 | Shared wrapper boundary in Section 4.1 | 18 | 2,532 | Delete the remaining launcher package and connector self-refresh; retain only rewritten CLI/wrapper entrypoints. |
-| Section 4 subtotal | **70** | **15,115** | Replacement wrapper and test lines are reported separately against the stated caps. |
-| Cumulative Sections 2-4 floor | **133** | **28,882** | This is the minimum physical deletion from c5b280d before Section 5 migration/conformance cleanup. |
+| Section 4 subtotal | **82** | **17,021** | Replacement wrapper and test lines are reported separately against the stated caps. |
+| Cumulative Sections 2-4 floor | **145** | **30,788** | This is the minimum physical deletion from c5b280d before Section 5 migration/conformance cleanup. |
 
 ## 5. Migration and conformance
 
@@ -1228,7 +1256,7 @@ owner-controlled.
 | Phase | Source deliverable | Gate | Runtime rule |
 | ---: | --- | --- | --- |
 | 0 | Signed document, closed schema, shared validator fixtures, and deletion ledger. | Schema validates in Go and JavaScript; method/error tables are byte-identical; deletion counts reproduce from c5b280d. | No installed daemon or product runtime. |
-| 1 | Go worker kit, universal daemon, durable lane table, Go caller kit, reference caller, and `example-peer --lane` reference worker. | Daemon caps hold; unit/race/vet/build green; an in-process restart with durable rows proves every row loads offline with empty maps/reservations and no spawn; old actor/driver/control packages are absent; contract learned nothing from adapters: **yes**. | Installed-daemon integration runs only on `umka-dev1`, against an empty universal table. |
+| 1 | Go worker kit, universal daemon, durable lane table, Go caller kit, reference caller, and token-selected `example-peer` reference worker. | Daemon caps hold; unit/race/vet/build green; an in-process restart with durable rows proves every row loads offline with empty maps/reservations and no spawn; old actor/driver/control packages are absent; contract learned nothing from adapters: **yes**. | Installed-daemon integration runs only on `umka-dev1`, against an empty universal table. |
 | 2 | JavaScript worker kit, JavaScript caller kit, then the unified DSH plugin/profile. | All 14 shared lifecycle fixtures pass in both worker kits; DSH passes both cells in Section 5.5. | DSH installed-product proof only on `umka-dev1`; no other product is enabled. |
 | 3 | Resident lane wrappers and peer integrations in order: Claude, Codex, Grok, Qwen, OpenCode, Kilo, Pi, OMP. | Each product meets its size/exception ledger and passes its two conformance cells before the next product is enabled. | Product runtime proof only on `umka-dev1`; failures do not enable a compatibility path. |
 | 4 | CLI rendering, package projections, install/remove inventory, documentation, and federation. | Full unit/race/vet/build/package gates; federation assertions follow Section 5.7; all 18 cells pass in one clean candidate run. | The sole full runtime matrix runs on `umka-dev1`; no install elsewhere. |
@@ -1243,9 +1271,9 @@ against installed products is permitted only on `umka-dev1`.
 
 | Reference | Closed behavior |
 | --- | --- |
-| Reference worker | PATH-resolved `example-peer --lane`; worker hello declares all five open fields, open returns a deterministic native ID, run can echo/block/fail or never settle, interrupt and close can independently never settle, deliver is scriptable to `injected`, `queued_for_next_turn`, or `rejected`, and worker-originated session methods are scriptable. It imports no product package. |
+| Reference worker | PATH-resolved `example-peer` started with the one-use launch token in its environment and empty argv; worker hello declares all five open fields, open returns a deterministic native ID, run can echo/block/fail or never settle, interrupt and close can independently never settle, deliver is scriptable to `injected`, `queued_for_next_turn`, or `rejected`, and worker-originated session methods are scriptable. It imports no product package. |
 | Reference caller | Up to two peer connections plus the shared caller kit. They can issue every client-to-daemon method, deliberately abandon reply sinks, supersede the same identity, prove second-visible-peer and invisible-peer authorization, inspect `last_turn`, and script delivery responses. They contain no product condition. |
-| Worker invocation | The worker suite accepts only a product token and invokes that exact PATH binary with `--lane`; every vendor and `example-peer` run the identical trace. |
+| Worker invocation | The worker suite accepts only a product token and invokes that exact PATH binary with empty argv and a launch token in its environment; every vendor and `example-peer` run the identical trace. |
 | Caller invocation | The caller suite invokes the product's installed Agent Sessions tool, not a private test API; every product runs the identical trace against the reference worker. |
 
 The caller/reference size contract is final logical lines:
@@ -1288,21 +1316,21 @@ not a reason to move lines into a product integration.
 
 ### 5.5 Eighteen-cell matrix
 
-| Product | Caller cell against `example-peer --lane` | Worker cell against reference caller |
+| Product | Caller cell against token-selected `example-peer` | Worker cell against reference caller |
 | --- | --- | --- |
-| DSH | `C-DSH`: C1-C9 through the unified DSH plugin's registered tool. | `W-DSH`: W1-W9 against `dashi --lane`. |
-| Claude | `C-Claude`: C1-C9 through the product-spawned peer MCP entry. | `W-Claude`: W1-W9 against `claude-peer --lane`. |
-| Codex | `C-Codex`: C1-C9 through the product-spawned peer MCP entry. | `W-Codex`: W1-W9 against `codex-peer --lane`. |
-| Grok | `C-Grok`: C1-C9 through the product-spawned peer MCP entry. | `W-Grok`: W1-W9 against `grok-peer --lane`. |
-| Qwen | `C-Qwen`: C1-C9 through the product-spawned peer MCP entry. | `W-Qwen`: W1-W9 against `qwen-peer --lane`. |
-| OpenCode | `C-OpenCode`: C1-C9 through the JavaScript plugin in peer mode. | `W-OpenCode`: W1-W9 against `opencode-peer --lane`. |
-| Kilo | `C-Kilo`: C1-C9 through the JavaScript plugin in peer mode. | `W-Kilo`: W1-W9 against `kilo-peer --lane`. |
-| Pi | `C-Pi`: C1-C9 through the Pi-family plugin in peer mode. | `W-Pi`: W1-W9 against `pi-peer --lane`. |
-| OMP | `C-OMP`: C1-C9 through the Pi-family plugin in peer mode. | `W-OMP`: W1-W9 against `omp-peer --lane`. |
+| DSH | `C-DSH`: C1-C9 through the unified DSH plugin's registered tool. | `W-DSH`: W1-W9 against token-selected `dashi`. |
+| Claude | `C-Claude`: C1-C9 through the product-spawned peer MCP entry. | `W-Claude`: W1-W9 against token-selected `claude-peer`. |
+| Codex | `C-Codex`: C1-C9 through the product-spawned peer MCP entry. | `W-Codex`: W1-W9 against token-selected `codex-peer`. |
+| Grok | `C-Grok`: C1-C9 through the product-spawned peer MCP entry. | `W-Grok`: W1-W9 against token-selected `grok-peer`. |
+| Qwen | `C-Qwen`: C1-C9 through the product-spawned peer MCP entry. | `W-Qwen`: W1-W9 against token-selected `qwen-peer`. |
+| OpenCode | `C-OpenCode`: C1-C9 through the JavaScript plugin in peer mode. | `W-OpenCode`: W1-W9 against token-selected `opencode-peer`. |
+| Kilo | `C-Kilo`: C1-C9 through the JavaScript plugin in peer mode. | `W-Kilo`: W1-W9 against token-selected `kilo-peer`. |
+| Pi | `C-Pi`: C1-C9 through the Pi-family plugin in peer mode. | `W-Pi`: W1-W9 against token-selected `pi-peer`. |
+| OMP | `C-OMP`: C1-C9 through the Pi-family plugin in peer mode. | `W-OMP`: W1-W9 against token-selected `omp-peer`. |
 
 All eighteen cells are required. A failure may change only the failing product
-wrapper/plugin or a genuinely universal kit defect reproduced by
-`example-peer --lane`; it may not add a product branch, capability exception, or
+wrapper/plugin or a genuinely universal kit defect reproduced by token-selected
+`example-peer`; it may not add a product branch, capability exception, or
 alternate daemon path. Every cell records **contract learned nothing from the
 adapter: yes/no**, and any `no` fails the candidate.
 
