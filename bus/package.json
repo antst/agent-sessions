@@ -2,7 +2,7 @@
   "name": "@agentbus/kit",
   "version": "0.0.0",
   "main": "sdk/js/index.js",
-  "files": ["sdk/js/index.js", "sdk/js/connection.js", "sdk/js/schema.js", "internal/protocol/session.schema.json"],
+  "files": ["sdk/js/index.js", "sdk/js/connection.js", "sdk/js/caller.js", "sdk/js/schema.js", "internal/protocol/session.schema.json"],
   "scripts": {"test": "node --test sdk/js/*.test.js"},
   "publishConfig": {"access": "public"}
 }

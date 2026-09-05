@@ -1,6 +1,7 @@
 "use strict";
 
 const net = require("node:net");
+const { Caller } = require("./caller.js");
 const { Connection, ProtocolError } = require("./connection.js");
 const { schema, validate } = require("./schema.js");
 
@@ -26,6 +27,7 @@ class Worker {
     this.run = null;
     this.opened = false;
     this.closed = new Promise((resolve) => { this.finish = resolve; });
+    this.caller = new Caller(this, options.caller);
   }
   async serve() {
     let cause;
@@ -102,6 +104,7 @@ class Peer {
     this.terminal = false;
     this.closed = new Promise((resolve) => { this.finish = resolve; });
     this.ready = this._open();
+    this.caller = new Caller(this, options.caller);
   }
   call(method, params, signal) { if (!this.connection) return Promise.reject(new Error("agentbus connection closed")); return this.connection.call(method, params, signal); }
   async rehello(identity) { await this.call("session.hello", { protocol: 1, ...identity }); this.identity = identity; }
@@ -124,4 +127,4 @@ function environment(env, worker) { const values = Object.fromEntries(ENV.map((n
 function terminal(result = {}) { if (!result || typeof result !== "object") return result; if (!Object.hasOwn(result, "result")) result = { ...result, result: "" }; if (typeof result.result !== "string") return result; const characters = [...result.result]; return { ...result, result: characters.slice(0, 262144).join(""), ...(characters.length > 262144 ? { truncated: true } : {}) }; }
 function clean(error) { return String(error?.message || error || "product callback failed"); }
 
-module.exports = { connectPeer, Connection, ENV, Peer, ProtocolError, Run, serveWorker, Worker, schema, validate };
+module.exports = { Caller, connectPeer, Connection, ENV, Peer, ProtocolError, Run, serveWorker, Worker, schema, validate };

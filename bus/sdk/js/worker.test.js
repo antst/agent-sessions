@@ -4,22 +4,14 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const { Duplex } = require("node:stream");
 const { connectPeer, Connection, ProtocolError, Worker } = require("./index.js");
+const { pair, deferred } = require("./test-support.js");
 
 const rows = JSON.parse(fs.readFileSync(path.join(__dirname, "../../internal/protocol/session-lifecycle.fixtures.json"), "utf8"));
 const openRequest = { name: "parent/leaf@local", groups: ["session:parent"], resume_session_id: "product-session", open: { cwd: "/tmp", permission_mode: "ask", model: "model", reasoning_effort: "high", arguments: ["--flag"] } };
 const target = { session_id: "product-session@local" };
 const delivery = { message_id: "m", from: { session_id: "peer@local", name: "peer@local", product: "peer", groups: [] }, body: "body" };
 
-class MemorySocket extends Duplex {
-  _read() {}
-  _write(chunk, _encoding, callback) { if (this.failNext) { this.failNext = false; callback(new Error("write failed")); return; } if (!this.peer.destroyed) this.peer.push(Buffer.from(chunk)); callback(); }
-  _destroy(error, callback) { if (!this.peer.destroyed) this.peer.destroy(); callback(error); }
-}
-
-function pair() { const one = new MemorySocket(), two = new MemorySocket(); one.peer = two; two.peer = one; return [one, two]; }
-function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 function aborted(signal) { if (signal.aborted) return Promise.resolve(); return new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true })); }
 function errorCode(promise, code) { return assert.rejects(promise, (error) => error instanceof ProtocolError && error.code === code); }
 
@@ -41,7 +33,7 @@ class FakeProduct {
   async interrupt(cancel, run) { this.calls[3]++; assert.equal(run.Interrupted(), true); this.interrupted?.resolve(); if (this.hangInterrupt) await aborted(cancel); }
   async deliver(cancel) {
     this.calls[4]++; if (this.deliverStart) { this.deliverStart.resolve(); await aborted(cancel); throw cancel.reason; }
-    if (this.outbound) await this.worker.call("session.list", {}); return { disposition: "injected" };
+    if (this.outbound) await this.worker.caller.list({}); return { disposition: "injected" };
   }
   async close(cancel) { this.calls[5]++; assert.equal(cancel.aborted, true); this.closeStart?.resolve(); if (this.closeEnd) await this.closeEnd.promise; }
 }
