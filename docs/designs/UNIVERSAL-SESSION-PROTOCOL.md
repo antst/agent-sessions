@@ -18,7 +18,8 @@ daemon.
 Each frame is one UTF-8 JSON object followed by a newline and is at most 1 MiB;
 an oversized frame is closed silently because no request ID can be assumed.
 Request IDs are integers in `[1, 2^53-1]`, with each direction counting from
-one in its independent ID space. When JSON repeats a member, the last value
+one in its independent ID space; gaps are allowed, and only range and
+per-direction uniqueness matter. When JSON repeats a member, the last value
 wins on both Go and JavaScript implementations. Notifications, batches,
 unknown fields, explicit nulls, and a second hello are invalid. The first
 request is `session.hello`. The daemon admits no other request from a spawned
@@ -33,10 +34,25 @@ listener; one shared key replaces federation's SNI lookup. A keyed daemon never
 accepts plain frames. A kit without the required key reports `daemon requires
 local key`; a keyed client connecting to a plain daemon reports the TLS
 handshake failure. The key is never a wire field, argument, or log value.
+Clients read the daemon Unix-socket path from `AGENT_SESSIONS_SOCKET`, falling
+back to the documented default path when absent. Every spawned lane receives
+that variable alongside `AGENT_SESSIONS_LAUNCH_TOKEN` and, when configured,
+`AGENT_SESSIONS_LOCAL_KEY`.
 
-Every session ID assigned by the daemon, including an ID placed into a thin
-peer launcher's environment, is an RFC 4122 version-4 UUID. This grammar is a
-daemon check because the shared schema deliberately has no `pattern` keyword.
+Every session has one canonical ID `uuid@host` and one canonical name
+`name@host`; every output uses those forms on the session's own daemon and on
+every federated host. The UUID part assigned by the daemon, including one
+placed into a thin peer launcher's environment, is RFC 4122 version 4. A caller
+may use bare `uuid` or bare `name` as shorthand for its own daemon's host.
+Resolution splits a qualified name on its last `@`. Name parts are 1–128
+printable characters with no whitespace or control character; `/` and `@` are
+allowed. The last `@` is always the canonical host boundary. Host parts match
+`^[a-z0-9][a-z0-9-]{0,31}$`. For identity input, no `@` means a bare local part:
+the daemon appends the caller's host, then tries exact ID before exact name. An
+input containing `@` is always split at the last one, and an unknown right part
+is `unknown_host` rather than a bare name. These grammars
+are daemon checks because the shared schema deliberately has no `pattern`
+keyword.
 The wire has no generic tool frame: after hello, a peer or committed worker
 originates the ordinary client-to-daemon methods in this section. Product-facing
 start/wait/status/interrupt/list/send tools are caller-kit sugar over them.
@@ -70,7 +86,9 @@ There are eleven methods.
 #### `session.hello`
 
 The session sends `session.hello` first. The request is one closed union. A peer
-supplies `session_id`, `name`, `groups`, and `info`. A worker instead supplies a
+supplies a bare RFC UUID `session_id` and an unqualified `name` part, plus
+`groups` and `info`; the name part may itself contain `@` or `/`. The daemon
+qualifies both parts with its effective host before installing the peer. A worker instead supplies a
 one-use `launch_token`, its supported non-identity open fields, its ordered
 extra-argument descriptions, and optionally the product version. The branches are mutually
 exclusive: a request with both discriminants or neither is invalid. A worker
@@ -83,7 +101,7 @@ reservation. The result is `{}`.
 
 The daemon sends the displaced connection the ID-bearing request
 `session.superseded` with `{}` when a new peer connection claims the same
-identity. The displaced client marks that identity terminal before its
+canonical identity. The displaced client marks that identity terminal before its
 best-effort `{}` response, closes, and never reconnects that identity. The new
 connection is already current, so every request from the displaced connection
 is rejected. The daemon writes the supersession request before closing the old
@@ -97,23 +115,23 @@ race is bounded and cannot flap indefinitely.
 
 A connected session sends `session.list` with an optional `session_id` filter.
 The result contains the matching visible sessions, or all visible sessions when
-the filter is absent. Each item reports identity, whether its one
+the filter is absent. Each item reports canonical `uuid@host` and `name@host`, whether its one
 connection is open, whether one `turn.run` is outstanding, whether it was
 explicitly closed, the lane native ID when applicable, and the lane's optional
-`last_turn`. A remote item also carries its federated `host`. This single method
+`last_turn`. The host is already carried by both canonical identities, so no
+separate summary host field exists. This single method
 replaces peer listing, lane listing, lane status, and lost-caller result
 recovery. Its optional `hosts` array advertises product names by host. Whenever
 the local optional product list is configured, the daemon's effective local
 host identity is present, even when that list is empty; federated hosts
 contribute their published lists.
 Advertisement never gates launch: the service PATH remains authoritative.
-Lane-row identity is immutable. Peers have no durable rows: same-ID
+Lane-row identity is immutable. Peers have no durable rows: same-canonical-ID
 peer hello wholly replaces the transient peer's name, groups, info, and
 connection. A session outside the caller's visibility is indistinguishable
-from a missing session and yields `unknown_session`. Federated `session_id`
-values are host-qualified composite IDs; `host` is only informational, and a
-local ID never crosses a host boundary unqualified. Host presence is a daemon
-invariant rather than a JSON-schema constraint.
+from a missing session and yields `unknown_session`. Federation forwards
+canonical identities unchanged; receiving daemons never relabel them. Host
+qualification is a daemon invariant rather than a JSON-schema constraint.
 
 #### `message.send`
 
@@ -122,14 +140,17 @@ A connected session sends `message.send` to exactly one `target`, one explicit
 connections, sends each one `message.deliver`, and returns one truthful receipt
 per attempted delivery. The request retains one message body; explicit
 multicast and group expansion do not create another protocol method.
-Resolution tries exact session ID, then host-qualified ID, then visible name.
+Resolution tries exact canonical session ID, then canonical visible name. Bare
+input is first qualified with the caller's own host. A foreign host part that
+is not federated is `unknown_host` rather than an unresolved session; for an
+explicit target list that error is checked before any delivery is attempted.
 An ambiguous name produces a rejected receipt with reason `ambiguous` and no
 resolved IDs. Recipients are deduplicated by session ID, with one receipt each.
 
 #### `message.deliver`
 
 The daemon sends `message.deliver` to the target session with the message ID,
-authoritative source identity, and body. Every product implements delivery while
+authoritative canonical `uuid@host` and `name@host` source identity, and body. Every product implements delivery while
 idle and while a turn is running. Its result is exactly one closed receipt:
 `injected`, `queued_for_next_turn`, or `rejected` with a nonempty reason. A
 non-native wrapper may implement `queued_for_next_turn` by prepending the body to
@@ -149,12 +170,15 @@ readiness object or readiness phase.
 
 #### `lane.spawn`
 
-A session sends `lane.spawn` either with a caller-chosen `name`, product, open
+A session sends `lane.spawn` either with a caller-chosen name leaf, product, open
 options, optional `extra_groups`, and optional `host` for a new lane, or with
-`resume_session_id` alone for a durable offline lane. A new row's groups are the
-union of the caller's host-qualified groups, including its private session
-group, and `extra_groups`; a caller never sends the complete authoritative
-group set. Absent `host`, or `host` equal to the local daemon, spawns locally;
+`resume_session_id` alone for a durable offline lane. A new row's groups are
+exactly the parent's private session group, the lane's newly allocated private
+session group, and `extra_groups`. The parent's other memberships are not
+inherited; name hierarchy and group visibility are independent facts. The daemon composes the lane's canonical name as `<parent name
+part>/<leaf>@<target host>`. Nested spawns extend that path; the leaf itself may
+contain `/` or `@`, and the last `@` remains the host boundary. A composed name
+part beyond 128 characters is invalid request data. Absent `host`, or `host` equal to the local daemon, spawns locally;
 another connected host forwards the identical request one hop and performs the
 entire transaction there. The row exists only on that authoritative target.
 Resume never carries `host`: its session ID already selects the host. The
@@ -178,7 +202,8 @@ uniqueness of `(product,native_id)`; a fresh collision fails the spawn.
 #### `session.open`
 
 The daemon sends `session.open` only to a token-authenticated worker. It carries
-the daemon session ID, always-present row-authoritative `name` and `groups`, the
+the canonical daemon session ID, always-present canonical row-authoritative
+composed `name` and `groups`, the
 stored native ID when resuming, and one closed `open` object containing only the
 non-identity options accepted by `lane.spawn`. Values of `permission_mode`,
 `model`, and `reasoning_effort` are product-native strings passed through
@@ -264,8 +289,11 @@ this version has none.
   `already_connected`; lanes never use supersession to manufacture a second
   worker connection.
 - New `lane.spawn` requires a name not held by any non-closed row on that
-  daemon; collision returns `name_taken`. Closed rows remain visible history
+  host; collision returns `name_taken`. Closed rows remain visible history
   but do not reserve names.
+- A new lane receives exactly its parent's private session group, its own
+  private session group, and explicit `extra_groups`; no other parent group is
+  inherited. With no extra group, only the parent can see and drive it.
 - `lane.spawn` with `resume_session_id` naming an explicitly closed row returns
   `closed`. The row remains visible only for identity and `last_turn` history.
 - The per-row lock serializes concurrent spawn, resume, and close transactions.
@@ -281,8 +309,9 @@ this version has none.
 - Caller timeout or disappearance does not cancel the forwarded run. The daemon
   drains its response, writes `last_turn` first, and discards only the abandoned
   response. There is no result queue beyond the one overwrite-only row value.
-- Worker EOF interrupts or closes any native run through product cleanup, fails
-  pending calls exactly once, and leaves a non-closed durable row offline.
+- Worker EOF cancels every callback, never invokes interrupt afterward, calls
+  native close once if open committed, fails pending calls exactly once, and
+  leaves a non-closed durable row offline.
 - `session.close` has one 10-second deadline from request send through process
   reap. Deadline expiry closes the socket, sends KILL, and adds no grace period.
 - Same-identity replacement atomically makes the new peer current, sends
@@ -294,9 +323,9 @@ this version has none.
 - A worker binary absent from PATH fails as `unknown_product`. A binary that
   starts but exits before hello fails describe or spawn with bounded trailing
   stderr and its exit code when one exists. Neither fabricates readiness.
-- Optional `host` on `lane.describe` or new `lane.spawn`, and host-qualified
-  session IDs on later operations, select the same one-hop daemon forwarder.
-  An unconnected explicit or qualified host returns `unknown_host`; federation
+- Optional `host` on `lane.describe` or new `lane.spawn`, and canonical
+  `uuid@host` identities on later operations, select the same one-hop daemon
+  forwarder. An unconnected explicit or canonical host returns `unknown_host`; federation
   never creates a second request shape or retry path.
 
 This protocol deliberately does not compensate for five losses. A daemon crash
@@ -350,7 +379,7 @@ and closes the connection without writing one.
 
 | Code | Message | Raised by |
 | ---: | --- | --- |
-| `-32600` | `invalid_frame` | Any method whose envelope or closed params are invalid, but only when a valid request ID is recoverable. |
+| `-32600` | `invalid_frame` | Any method whose envelope, closed params, or daemon-checked identity grammar is invalid, but only when a valid request ID is recoverable. This includes a composed lane name beyond 128 characters. |
 | `-32602` | `invalid_hello` | `session.hello` when its union, protocol, identity, or token is invalid. |
 | `-32001` | `unknown_session` | `message.send`, resume `lane.spawn`, `turn.run`, `turn.interrupt`, or `session.close` when the named row or peer does not exist or is invisible to the caller. |
 | `-32002` | `not_connected` | `turn.run`, `turn.interrupt`, or `session.close` when a non-closed durable row has no connection. |
@@ -364,8 +393,8 @@ and closes the connection without writing one.
 | `-32010` | `timeout` | `lane.describe` or `lane.spawn` when its one spawn/open transaction bound expires. |
 | `-32011` | `not_committed` | Any worker-originated client-to-daemon session method received after hello but before native-ID commit. |
 | `-32012` | `superseded` | Any request from a peer connection displaced by the atomic same-identity swap. |
-| `-32013` | `name_taken` | New `lane.spawn` when another non-closed row on that daemon already holds the requested name. |
-| `-32014` | `unknown_host` | `lane.describe` or new `lane.spawn` naming an unfederated `host`, or any operation using a host-qualified ID whose host is not connected. |
+| `-32013` | `name_taken` | New `lane.spawn` when another non-closed row on that host already holds the requested name. |
+| `-32014` | `unknown_host` | `lane.describe` or new `lane.spawn` naming an unfederated `host`, or any canonical identity input whose host part is neither local nor connected. |
 | `-32603` | `internal` | A durable-table write fails after in-memory cleanup, or a worker interrupt/close callback fails; it has no other use. |
 
 ## 2. Daemon
@@ -383,18 +412,19 @@ Only lanes have durable rows. A row has exactly these columns:
 
 | Column | Meaning |
 | --- | --- |
-| `session_id` | Daemon-assigned immutable RFC 4122 version-4 UUID and primary key. |
+| `session_id` | Immutable canonical `uuid@host` and primary key; the daemon assigns the RFC 4122 version-4 UUID part. |
 | `product` | Immutable binary name executed as `<product> --lane`. |
-| `name` | Immutable caller-chosen lane name. |
-| `groups` | Immutable union of the spawning caller's host-qualified groups and `extra_groups`. |
+| `name` | Immutable canonical `name@host`; for a lane the stored name part is `<parent name part>/<caller leaf>` and the host is where the lane runs. |
+| `groups` | Immutable set containing the parent's private session group, the lane's own private session group, and explicit `extra_groups`; no other parent membership is inherited. |
 | `native_id` | Absent before commit; immutable after `session.open`. |
 | `open` | The original closed `SessionOpenOptions` JSON, replayed byte-for-byte on resume. |
 | `last_turn` | Absent until a terminal turn; thereafter the one overwrite-only recovery value. |
 | `closed` | False until explicit `session.close`; never becomes false again. |
 | `created_at` | Daemon timestamp assigned with `session_id`. |
 
-There are no durable peer rows. A peer hello creates or replaces one transient
-entry containing its asserted identity and exact connection. EOF removes that
+There are no durable peer rows. The daemon qualifies a peer hello's bare UUID
+and name parts with its effective host, then creates or replaces one transient
+entry containing that canonical identity and exact connection. EOF removes that
 exact entry. Lane EOF removes only the live connection; its row remains offline
 and resumable. `SessionSummary.kind` is derived: a durable row is a lane and a
 transient entry is a peer.
@@ -408,15 +438,21 @@ Daemon configuration consists of an optional federation hub address, the
 daemon's federation secret when a hub is used, an optional host name, an
 optional list of product names matching the product grammar, and an optional
 `local_key`. With no hub the daemon is standalone and needs no federation
-secret; every optional value may be absent.
+secret; every optional value may be absent. The effective host is the configured
+host name, or the reserved `local` when none is configured. Configuring a hub
+requires an explicit non-`local` host name. A hub rejects `local` and duplicate
+host names during the authenticated handshake, so `@local` is never federated.
 The hub's symmetric configuration is one map from host name to opaque secret,
 with a unique secret for every host. The product list is an advertisement for
 discovery, not a registry or allowlist: the service PATH alone decides whether
-a lane can launch.
+a lane can launch. `agent-sessions secret` generates and prints 32 random bytes
+encoded as base64; the daemon and hub reject any configured federation secret
+or `local_key` shorter than 32 decoded bytes. Config files containing secrets
+must be mode 0600.
 
 Three in-memory indexes are the complete live authority:
 
-- `connections[session_id]` points to the exact current connection and, for a
+- `connections[session_id]` uses the canonical `uuid@host` and points to the exact current connection and, for a
   spawned lane, its process supervisor. Admission checks pointer identity on
   every request.
 - `pending[session_id]` contains at most one forwarded `turn.run`: its input,
@@ -443,9 +479,11 @@ The daemon accepts a socket, completes the required local TLS handshake when
 `local_key` is configured, enforces the framing limits in Section 1, and
 requires `session.hello` first. Local TLS reuses the Section 2.5 derivation and
 pinning code with `client` and `daemon` labels, one expected key, and no SNI
-lookup. A peer hello is installed by one atomic map swap after consulting the
-durable row table and rejecting an ID owned by a lane as specified in Section
-1.1. The displaced exact pointer becomes inadmissible immediately; the daemon
+lookup. It rejects a peer hello unless `session_id` is a bare RFC UUID and
+`name` is one valid unqualified name part, then appends its effective host to
+both. That canonical ID is installed by one atomic map swap after consulting
+the durable row table and rejecting an ID owned by a lane as specified in
+Section 1.1. The displaced exact pointer becomes inadmissible immediately; the daemon
 writes `session.superseded` through its ordinary per-connection request-ID
 sequence with an immediate write deadline and closes it without waiting for the
 acknowledgement. All of its pending calls fail once. No reconnect lease or grace
@@ -497,9 +535,12 @@ closes the supervised process without sending `session.open`. Describe creates
 no row, native session, connection entry, or product-specific readiness state.
 
 `lane.spawn` runs one sequential transaction while holding the row lock. For a
-new lane it validates the open object, allocates identity and groups, and keeps
-the prospective row private. Its name must be unique among non-closed rows on
-that daemon; closed rows do not reserve names. For resume it checks `closed`
+new lane it validates the open object, composes `<parent name part>/<caller
+leaf>@<target host>`, allocates the UUID and its private session group, adds
+only the parent's private session group and `extra_groups`, and keeps the prospective
+row private. The full composed name part must fit the 128-character grammar and
+be unique among non-closed rows on that host; closed rows do not reserve names.
+For resume it checks `closed`
 before connection,
 then reuses the immutable row identity and stored open object. It creates the
 reservation, starts `<product> --lane`, consumes hello,
@@ -540,8 +581,9 @@ per-product override.
 
 ### 2.4 Routing, turns, and close
 
-Every request resolves the caller from its exact current connection, resolves
-the target among visible sessions, and then forwards the closed method without
+Every request resolves the caller from its exact current connection, qualifies
+a bare target with the caller's own host, resolves the resulting canonical ID
+or name among visible sessions, and then forwards the closed method without
 translation. Invisible and absent targets are both `unknown_session`. The
 daemon derives source identity and groups from its current peer entry or lane
 row; caller-supplied authority never crosses the route.
@@ -601,33 +643,41 @@ receipt unchanged. Offline lanes and failed calls produce rejected receipts.
 If EOF or supersession ends the target connection before a receipt arrives,
 the sender receives rejected reason `no_receipt`; whether product code acted is
 unknowable and is deliberately not promised.
-Names are resolved only after exact local and host-qualified IDs; ambiguity is
-a rejected unresolved receipt rather than a guessed delivery.
+Canonical names are resolved only after canonical IDs; ambiguity is a rejected
+unresolved receipt rather than a guessed delivery. An input containing `@` is
+always parsed at the last `@`; it is never retried as a local bare name.
 
 Federation carries the same closed request and response objects between trusted
-daemons. A daemon publishes only transient peers and durable lane summaries;
-the receiving daemon qualifies every remote ID with its authoritative host and
-never persists a remote row. `session.list` merges those summaries and
-`message.send` forwards a host-qualified delivery once. Federation snapshots
+daemons. A daemon publishes only transient peers and durable lane summaries,
+already containing canonical `uuid@host` and `name@host`; every receiver keeps
+those values byte-identical and never persists a remote row. `session.list`
+merges those summaries and `message.send` forwards a canonical delivery once. Federation snapshots
 also carry each daemon's optional advertised product list; `session.list`
 returns those lists without treating them as verified installation state.
 
 Hub-to-daemon transport is standard TLS 1.3 from Go's standard library. For a
-configured host secret, both sides derive Ed25519 keypairs deterministically by
-HKDF-SHA256 over that secret with fixed labels: `host` for the daemon identity
-and `hub` for the hub identity toward that host. Derived keypairs are never
-stored or transmitted. The daemon presents a self-signed certificate for its
-derived host key and sends its effective host name as SNI. The hub selects that
-name in `GetCertificate`, looks up its unique secret, derives the matching hub
-key, and presents its self-signed certificate. Each side's
+configured secret and label, key derivation is exactly HKDF-SHA256 with empty
+salt, info `agent-sessions/v1/<label>`, and 32 output bytes, passed as the seed
+to `ed25519.NewKeyFromSeed`. Federation uses labels `host` for the daemon
+identity and `hub` for the hub identity toward that host. Derived keypairs are
+never stored or transmitted. The daemon presents a self-signed X.509
+certificate over its derived host key and sends its effective host name as SNI.
+SNI is cleartext by design because the host name is not secret. The hub selects
+that name in `GetCertificate`, looks up its unique secret, derives the matching
+hub key, and presents its self-signed certificate. Each side's
 `VerifyPeerCertificate` pins only the peer public key to the independently
 derived expected key; it intentionally applies no CA, certificate-expiry, or
 certificate-hostname semantics.
 
-The key match is the federation identity. An unknown SNI name, wrong secret, or
-name/key mismatch fails the TLS handshake before any summary or request is
-accepted. Secrets never leave configuration, TLS 1.3 supplies forward secrecy,
-and no custom application handshake exists. The local daemon socket remains
+The key match is the federation identity. The hub is the owner's trusted party:
+it decrypts and routes federation traffic rather than acting as a byte tunnel.
+An unknown, reserved `local`, or
+already-connected SNI name, wrong secret, or name/key mismatch fails the TLS
+handshake before any summary or request is accepted. A copied mode-0600 config
+can impersonate that host because identity is the derived key, not a machine.
+Secrets never leave configuration, TLS 1.3 supplies forward secrecy, and no
+custom application handshake exists. There is deliberately no separate expiry
+or revocation system: rotation is an edit to both configurations. The local daemon socket remains
 the trusted transport described in Section 1. This transport is capped at
 **120 production and 120 test logical lines** inside `internal/daemon`'s
 existing 1,100-line budget; tests cover derivation, pinning, mismatch, and
@@ -636,15 +686,15 @@ may add at most **40 production and 60 test logical lines**; it does not create
 a separate transport package or budget.
 
 Visible remote lanes remain controllable without a second public wire. The one
-forwarder accepts a host-qualified message recipient, a host-qualified session
-ID for resume `lane.spawn`, `turn.run`, `turn.interrupt`, or `session.close`, or
+forwarder accepts a canonical message recipient, a canonical session ID for
+resume `lane.spawn`, `turn.run`, `turn.interrupt`, or `session.close`, or
 explicit `host` on new `lane.spawn` and `lane.describe`. Absent `host`, or
 `host` equal to the local daemon, stays local. Otherwise the connected target
 daemon performs the entire reservation, process, row, visibility,
 connection, and pending transaction locally and returns the identical response
 or error. Its table is the only home of a spawned row; the origin later exposes
-it through a host-qualified federation summary. An unconnected explicit or
-qualified host returns `unknown_host` before product or session lookup.
+its already-canonical identities through a federation summary. An unconnected
+explicit or canonical host returns `unknown_host` before product or session lookup.
 
 A federated turn is one outstanding RPC at each hop; caller loss has the same
 sink-only effect, and the authoritative daemon alone writes `last_turn`.
@@ -780,7 +830,7 @@ members. This is the complete product-facing contract:
 | `open(cancel, request)` | Create or resume from the typed request and return the exact native ID. |
 | `run(cancel, input)` | Start one native turn, observe it to a terminal result, and return that result. |
 | `interrupt(cancel)` | Ask the one current native turn to stop. |
-| `deliver(cancel, message)` | Inject now or queue for the next turn and return the truthful closed receipt. |
+| `deliver(cancel, request)` | Receive the full closed `MessageDeliverRequest` `{message_id,from,body}`, inject now or queue for the next turn, and return the truthful closed receipt. |
 | `close(cancel)` | Stop accepting work, close native state, and release product resources. |
 
 These are primitives, not a daemon adapter interface. They live in the product
@@ -789,6 +839,9 @@ daemon. A product can replace our kit with its own implementation by passing the
 same conformance fixtures; no daemon or schema change follows.
 `cancel` is a Go context or JavaScript `AbortSignal`; control EOF cancels every
 callback, and close cancels remaining work after the terminal boundary.
+App-ready means the product can accept `open()` and can serve its first `run()`;
+the vendor decides how to establish that fact, and the kit sends hello only
+afterward.
 
 `permission_mode`, `model`, and `reasoning_effort` are opaque product-native
 strings. The kit checks only whether each field was declared; `open()` validates
@@ -810,9 +863,10 @@ Callback failures map exactly once:
 | `deliver` | Rejected receipt with the callback message as `reason`. |
 | `close` | `internal`, followed by ordinary kit exit. |
 
-The worker kit reads `AGENT_SESSIONS_LAUNCH_TOKEN` and the optional
-`AGENT_SESSIONS_LOCAL_KEY` once, removes both from the process environment, and
-connects to the daemon endpoint. The local key selects TLS and is retained only
+The worker kit reads `AGENT_SESSIONS_SOCKET`,
+`AGENT_SESSIONS_LAUNCH_TOKEN`, and the optional `AGENT_SESSIONS_LOCAL_KEY`;
+it removes both secrets from the process environment and connects to the
+named daemon endpoint. The local key selects TLS and is retained only
 in the kit's private connection material; neither secret is logged, returned,
 or copied into product configuration. The kit sends the worker branch of
 `session.hello` only after `hello()` succeeds. `session.open` is the only call
@@ -858,8 +912,14 @@ new runs are `busy`, and delivery is rejected as `closing` before product code.
 The kit owns final process ordering: it calls `close()`, writes the close
 response, closes its socket, and then resolves its `closed` signal. The product
 awaits that signal before process exit; `closed` is a kit signal, not a seventh
-callback. An ordinary worker EOF cancels product contexts, invokes close once,
-and exits rather than reconnecting with a consumed token.
+callback.
+
+The three stop paths are distinct. `interrupt()` asks the current run to stop;
+orderly `session.close` follows the preceding close sequence; control EOF first
+cancels every callback context, never invokes `interrupt()` afterward, then
+calls `close()` exactly once only if `open()` previously succeeded, and exits.
+A describe probe whose connection closes before open therefore exits without a
+`close()` call. Worker mode never reconnects with a consumed token.
 
 A peer-mode connection behaves differently only at the connection boundary:
 ordinary daemon EOF reconnects the same asserted peer identity, while
@@ -879,8 +939,7 @@ rows:
 
 1. app-ready hello, one open, and worker-originated session methods rejected before the open
    result but accepted on the same connection after it;
-2. describe hello followed by EOF, proving open is never called and close is
-   called once;
+2. describe hello followed by EOF, proving open and close are never called;
 3. completed, interrupted, and failed run results, including empty output and
    character-bounded truncation with the exact `truncated` flag;
 4. a blocked run plus a second run rejected before product code;
@@ -899,8 +958,9 @@ rows:
 12. idle close followed by delivery, proving `closing` and zero delivery calls;
 13. a non-run callback that originates a session method and receives its response;
     and
-14. single token read plus environment removal, followed by connect failure and
-    process exit without reconnect.
+14. endpoint selection plus single launch-token/local-key reads and secret
+    environment removal, followed by connect failure and process exit without
+    reconnect.
 
 There are no product names, native IDs, clocks, sleeps, or network sockets in
 the fixture data. Tests control every callback and frame boundary
@@ -984,8 +1044,8 @@ rename is a no-op on the wire. The registered Agent Sessions tool exposes the
 caller kit's start/wait/status/interrupt/spawn/describe/close/list/send surface
 defined once in Sections 4 and 5. The close callback cancels if needed, flushes
 the session, and returns; a separate outer plugin task awaits the kit's
-`closed` signal and then calls `appExit(0)`. Control EOF follows the same
-product cleanup and exit path.
+`closed` signal and then calls `appExit(0)`. After open, control EOF follows the
+same product cleanup and exit path; a describe EOF has no native close.
 
 The DSH-specific layer is capped at 300 production and 300 test logical lines,
 excluding the generic JavaScript kit and shared fixtures. Its conformance result
@@ -1025,7 +1085,7 @@ must remain net-negative after the kit is accounted separately.
 | --- | --- | --- |
 | Process and connection | Lane mode starts one resident wrapper, which owns one product session and the one daemon connection. Peer mode has no wrapper around the interactive TUI: the product-spawned stdio MCP server or JavaScript plugin owns the direct peer connection. | The connection holder is the integration process the product already supervises. Wrapping an interactive TUI would add terminal, signal, resize, and hand-started-session failure modes without improving the protocol. |
 | Installed entry forms | One installed integration image is named `<native>-peer` and exposes two entry forms: plain invocation launches the interactive product whose MCP/plugin holds a direct peer connection; `--lane` holds a worker connection and owns a headless child. | Sharing code and kits is required; sharing process topology would violate the one-connection rule in one of the two modes. |
-| Peer identity | Identity is fixed before peer hello in this order: launcher-provided environment inherited by the product and its MCP/plugin process first; otherwise Claude resolves its parent through `claude agents --json` (`cmd/agent-sessions/connector.go:449-487`), while DSH/OpenCode/Kilo/Pi/OMP read their in-process session ID; otherwise Codex defers hello until the first tool call supplies `_meta.threadId` (`connector.go:247-251`). Grok and Qwen launchers pass their daemon-chosen ID both through native `--session-id` and the environment, following `internal/launcher/grok_peer.go:640-680`; a hand-started Grok or Qwen process without either source serves every Agent Sessions tool with an error naming the required launcher and never sends hello. | Identity is a launcher or product fact, never a guessed process-global. Environment also carries the launcher-chosen name and groups; product-native resolution fills only facts the integration can prove. |
+| Peer identity | Identity is fixed before peer hello in this order: launcher environment `AGENT_SESSIONS_SESSION_ID`, `AGENT_SESSIONS_SESSION_NAME`, `AGENT_SESSIONS_GROUPS`, `AGENT_SESSIONS_SOCKET`, and optional `AGENT_SESSIONS_LOCAL_KEY`, inherited unchanged by the product and its MCP/plugin process; otherwise Claude resolves its parent through `claude agents --json` (`cmd/agent-sessions/connector.go:449-487`), while DSH/OpenCode/Kilo/Pi/OMP read their in-process session ID; otherwise Codex defers hello until the first tool call supplies `_meta.threadId` (`connector.go:247-251`). Fresh Grok and Qwen peer launchers pass one new daemon UUID both through native `--session-id` and `AGENT_SESSIONS_SESSION_ID`; a hand-started Grok or Qwen process without either source serves every Agent Sessions tool with an error naming the required launcher and never sends hello. | Identity is a launcher or product fact, never a guessed process-global. Launcher environment carries the bare session UUID, name part, and groups; product-native resolution fills only facts the integration can prove. |
 | Product boundary | The wrapper exposes the six Section 3 callbacks locally and contains every product import, argument translation, native protocol, and delivery compromise. | Deleting one wrapper when a vendor adopts the native kit must require no daemon, schema, or caller-kit change. |
 | Child launch | The lane wrapper connects and sends worker hello before starting a native child. It receives and validates `session.open`, then spawns the child with the stored cwd, model, reasoning, permission, and ordered argument values. | Process-level flags are ordinary open fields for wrappers because the product does not exist until open. Native products start before open and therefore need session-level primitives instead. |
 | Child lifetime | If the native child dies while idle, the wrapper reaps it and exits immediately; worker EOF makes the row offline and explicitly resumable. | A live worker connection must never advertise a dead product or synthesize an internal restart policy. |
@@ -1068,13 +1128,13 @@ must remain net-negative after the kit is accounted separately.
 
 | Ledger item | Decision | Source-backed reason |
 | --- | --- | --- |
-| Resident wrapper | `grok-peer --lane` owns one private leader, one authenticated ACP primary, and one observer for the exact lane session. Plain `grok-peer` passes one daemon-chosen ID to Grok as both `--session-id` and environment, then execs interactive Grok; its spawned stdio MCP server owns the peer connection. | `internal/bridge/grok_native_session.go:16-210` proves the lane process tree and `internal/launcher/grok_peer.go:640-680` proves environment projection. A hand-started peer lacking this identity returns the launcher error and never hellos. |
-| Open and resume | Start the private leader, open or resume the ACP session, then apply model and mode. It supports all five open fields; `model` and `reasoning_effort` are promoted from c5 argument/mode translation into typed open data. | `internal/products/grok/lane.go:98-170` and `grok_native_session.go:248-268` prove native model and mode setters plus cwd, permission, and argument handling. |
+| Resident wrapper | `grok-peer --lane` owns one private leader, one authenticated ACP primary, and one observer for the exact lane session. Plain `grok-peer` passes one new daemon UUID to Grok as both `--session-id` and `AGENT_SESSIONS_SESSION_ID`, then execs interactive Grok; Grok spawns our stdio MCP server, which owns the peer connection. | Grok Build 1.0.13 exposes the ACP agent through `grok agent stdio` / `leader` and acts as an MCP client. A hand-started peer lacking a launcher or native identity returns the launcher error and never hellos. |
+| Open and resume | The resident wrapper receives `session.open` before it starts the private leader. Fresh spawn uses `--session-id <daemon uuid>`; resume uses `--resume <native_id>`. It puts `--permission-mode`, `--reasoning-effort`, `-m`, and ordered `arguments` on that same process command line, with `cwd` as the child working directory. | Grok rejects a fresh `--session-id` that already exists, preserving native uniqueness. ACP `_meta` exposes only `yoloMode` / `autoMode`; it is not an open-field transport. All five fields are process inputs because the wrapper starts Grok after open. |
 | Run | Call ACP `session/prompt`, consume matching update notifications, and return its stop reason and accumulated output. | `grok_native_session.go:270-308` is the resident prompt primitive. |
-| Tools | In lane mode the wrapper publishes a private endpoint and `grok/scripts/native-entry` is a local stdio relay to it. In peer mode the same installed MCP entry owns the direct peer connection instead. | Grok's product interface is stdio MCP in both cases; an explicit entry mode selects exactly one destination and one presence owner. |
-| Deliver | Observer interjection is used idle or running and reports `injected` only after the native request succeeds. | `internal/products/grok/lane.go:251-260` already sends delivery through the observer without starting a prompt. |
-| Interrupt and close | Interrupt sends ACP cancel once. Close tears down observer, primary, leader, and its private socket directory in that order. | `lane.go:263-285` and `cmd/agent-sessions/grok_peer.go:151-183` prove the exact cleanup ownership. |
-| Exception ledger | Section 1 code exceptions: **0**. Declared unsupported open fields: **none**. Wrapper-only queue: **none**. | Grok exposes native interjection and all typed open controls; no limitation leaks outward. |
+| Tools | In lane mode the wrapper publishes a private endpoint and `grok/scripts/native-entry` is a local stdio MCP relay to it. In peer mode Grok, an MCP client, spawns the same installed stdio MCP entry and that entry owns the direct peer connection. | ACP is the wrapper-to-Grok control protocol; MCP is the product-facing Agent Sessions tool boundary. The two must not be conflated. |
+| Deliver | Observer interjection while running reports `injected` after the native request succeeds. While idle, Grok retains the message on its native prompt queue until the next prompt and reports `queued_for_next_turn`. | Both dispositions describe product-owned behavior; the wrapper adds no FIFO and the daemon learns no Grok condition. |
+| Interrupt and close | Interrupt sends one ACP `session/cancel` notification; `{}` means the notification was sent, not that the run has stopped. Close tears down observer, primary, leader, and its private socket directory in that order. | This is exactly Section 1's accepted-interrupt contract and the wrapper owns the complete process tree. |
+| Exception ledger | Section 1 code exceptions: **0**. Declared unsupported open fields: **none**. Wrapper-only queue: **none**; Grok's idle prompt queue is native state. | Grok exposes running interjection, native idle queuing, and all typed open controls; no limitation leaks outward. |
 | Size cap | **750 production / 700 test logical lines**, including ACP framing and leader bootstrap but excluding the shared wrapper host. | Grok's private leader is product-specific and must not escape its ledger or recreate daemon attachment/generation state. |
 | Deletion inventory | Delete all `internal/products/grok` (2 files / 637 lines), `internal/launcher/{grok_peer.go,grok_peer_test.go}` (2 / 1,183), and `cmd/agent-sessions/grok_peer.go` (1 / 213). Rewrite `grok/.mcp.json` and `grok/scripts/native-entry` as dual-entry peer/direct or lane/local assets. Total: **5 files / 2,033 lines**. | One lane wrapper replaces the driver/leader composition; the thin peer exec plan is rehomed without wrapping the TUI. |
 
@@ -1193,18 +1253,18 @@ not a reason to move lines into a product integration.
 | Trace | Caller against reference worker |
 | --- | --- |
 | C1 | Two peer connections prove exact session identity, visibility-filtered list, and the full tool schema; the second visible peer can run, interrupt, and close the lane. |
-| C2 | Describe without open or residue; fresh spawn with identity, groups, all declared open fields, and ordered arguments; discovery advertises configured product names without gating an unlisted executable and a listed-but-missing name returns `unknown_product`; explicit `host` naming the other daemon in a two-daemon fixture describes and creates the row only there, while an unfederated host returns `unknown_host`. |
+| C2 | Describe without open or residue; fresh spawn composes `<parent name part>/<leaf>@<target host>` and assigns only both private session groups plus `extra_groups`, with all declared open fields and ordered arguments; discovery advertises configured product names without gating an unlisted executable and a listed-but-missing name returns `unknown_product`; explicit `host` naming the other daemon in a two-daemon fixture describes and creates the row only there, while an unfederated host returns `unknown_host`. |
 | C3 | Local-kit start returns a local ID while one wire `turn.run` remains outstanding; status is running and bounded wait timeout does not cancel it. |
 | C4 | Wait returns the terminal, including exact result truncation metadata; an abandoned caller sink still yields the same `last_turn` through filtered list. |
 | C5 | Send resolves ID/name/group, deduplicates, and returns dispositions `injected`, `queued_for_next_turn`, or `rejected`, including exact rejected reasons `ambiguous` and `no_receipt`; an invisible peer receives `unknown_session`. |
 | C6 | Concurrent interrupts coalesce to one worker interrupt and idle interrupt maps `not_running`. |
 | C7 | Explicit close during a run orders terminal-if-observed before closed; the one 10-second `closeBound` covers request through reap, and expiry KILL invents no terminal or second wait. |
-| C8 | Peer EOF reconnects; same-ID hello supersedes the displaced identity terminally with no flap. |
-| C9 | The caller drives the remote row by host-qualified ID; offline resume replays stored open byte-for-byte; `closed` is checked before `not_connected`, and `name_taken`, `already_connected`, `not_connected`, and disconnected-host `unknown_host` match Section 1.4; cleanup leaves no connection, process, token, or pending call. |
+| C8 | Peer EOF reconnects; a hello resolving to the same canonical ID supersedes the displaced identity terminally with no flap. |
+| C9 | The caller drives the remote row by canonical ID; offline resume replays stored open byte-for-byte; `closed` is checked before `not_connected`, and `name_taken`, `already_connected`, `not_connected`, and disconnected-host `unknown_host` match Section 1.4; cleanup leaves no connection, process, token, or pending call. |
 
 | Trace | Worker against reference caller |
 | --- | --- |
-| W1 | Describe launch scrubs the token, sends one valid hello after app-ready, never opens, and exits on EOF without reconnect. |
+| W1 | Describe launch reads the endpoint, scrubs the token and optional local key, sends one valid hello after app-ready, never opens or closes natively, and exits on EOF without reconnect. |
 | W2 | Fresh and resumed open return the exact native ID; resume mismatch, unsupported field or value, typed-field/argument conflict, duplicate native ID, exit, and timeout fail truthfully. |
 | W3 | Worker-originated client-to-daemon session methods are `not_committed` before open commit and succeed on the same socket after commit. |
 | W4 | Completed, interrupted, failed, empty-output, and over-limit native results produce the exact terminal and `truncated` shapes; a second run is busy. |
@@ -1255,11 +1315,11 @@ from the same conformance matrix.
 
 | Gate | Assertion |
 | --- | --- |
-| Identity | Remote summaries carry host-qualified session IDs; `host` is informational and local IDs never cross unqualified. |
+| Identity | Every local and remote summary emits the same canonical `uuid@host` and `name@host`; no separate host field or receiving-side relabeling exists. A standalone daemon uses `local`, and a federated daemon requires a configured non-`local` unique host name. |
 | Visibility | The authoritative daemon filters by groups; the receiving daemon trusts that assertion and never persists a remote row. |
-| Messaging | One host-qualified message is forwarded once, produces one receipt, and is never retried or duplicated after federation reconnect. |
-| Control and creation | The capped function forwards host-qualified resume/run/interrupt/close and explicit-host spawn/describe exactly one hop; caller loss removes only the reply sink, and the authoritative host alone stores the row and `last_turn`. |
-| Federation authentication | A correct host/secret pair federates; a wrong secret, unknown host name, or name/key mismatch fails the TLS handshake. Changing one side's secret disconnects that host until both configurations match. |
+| Messaging | One canonical remote message is forwarded once, produces one receipt, and is never retried or duplicated after federation reconnect. Bare input selects the caller's own host; qualified input is split only at the last `@`. |
+| Control and creation | The capped function forwards canonical remote resume/run/interrupt/close and explicit-host spawn/describe exactly one hop; caller loss removes only the reply sink, and the authoritative host alone stores the row and `last_turn`. |
+| Federation authentication | `agent-sessions secret` produces 32 random bytes in base64; either side rejects a decoded secret shorter than 32 bytes. A correct host/secret pair federates; a wrong secret, unknown or reserved `local` name, duplicate host, or name/key mismatch fails the TLS handshake. Changing one side's secret disconnects that host until both configurations match; no separate expiry or revocation exists, and secret-bearing config is mode 0600. |
 | Optional local encryption | A keyed daemon rejects a keyless client; a keyed client fails truthfully against a plain daemon; matching keys connect; and a spawned lane receives and scrubs both `AGENT_SESSIONS_LAUNCH_TOKEN` and `AGENT_SESSIONS_LOCAL_KEY`. |
 | Reconnect | A disconnected host removes transient remote summaries and fails pending one-hop calls once; reconnect republishes a fresh snapshot and never replays a request. |
 
