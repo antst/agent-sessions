@@ -24,6 +24,7 @@ type pending struct {
 	method string
 	result any
 	done   chan error
+	seen   func() error
 }
 
 type Conn struct {
@@ -52,11 +53,21 @@ func (c *Conn) Done() <-chan struct{}    { return c.ctx.Done() }
 func (c *Conn) Context() context.Context { return c.ctx }
 
 func (c *Conn) Call(ctx context.Context, method string, params, result any) error {
+	return c.call(ctx, method, params, result, nil)
+}
+
+// CallObserved runs seen after a valid result is decoded and before the reader
+// accepts the next frame.
+func (c *Conn) CallObserved(ctx context.Context, method string, params, result any, seen func() error) error {
+	return c.call(ctx, method, params, result, seen)
+}
+
+func (c *Conn) call(ctx context.Context, method string, params, result any, seen func() error) error {
 	raw, err := protocol.EncodeParams(method, params)
 	if err != nil {
 		return err
 	}
-	p := pending{method: method, result: result, done: make(chan error, 1)}
+	p := pending{method: method, result: result, done: make(chan error, 1), seen: seen}
 	c.writeMu.Lock()
 	c.stateMu.Lock()
 	var id int64
@@ -198,6 +209,11 @@ func (c *Conn) receiveResponse(frame protocol.Frame) {
 	if frame.Error == nil {
 		if err = protocol.UnmarshalResult(p.method, frame.Result, p.result); err != nil {
 			c.close(err)
+		} else if p.seen != nil {
+			err = p.seen()
+			if err != nil {
+				c.close(err)
+			}
 		}
 	}
 	p.done <- err
