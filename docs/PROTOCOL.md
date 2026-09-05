@@ -33,6 +33,14 @@ back to the documented default path when absent. Every spawned lane receives
 that variable alongside `AGENT_SESSIONS_LAUNCH_TOKEN` and, when configured,
 `AGENT_SESSIONS_LOCAL_KEY`.
 
+A product is a binary; started with a launch token in its environment it is a
+lane worker, with no mode argument. Lane-only workers such as non-AI tools are
+never started without a token, so a worker flag would be dead syntax for them.
+A flag plus a token would also create two sources of truth and require errors
+for both disagreement cases; the token alone leaves one fact and zero
+consistency checks. Per-spawn tokens are single-use and expiring, so an
+ordinary human shell never contains one.
+
 Every session has one canonical ID `uuid@host` and one canonical name
 `name@host`; every output uses those forms on the session's own daemon and on
 every federated host. The UUID part assigned by the daemon, including one
@@ -155,8 +163,8 @@ its next native turn; that queue is invisible to the daemon and to this wire.
 A session sends `lane.describe` with a product token and optional `host`.
 Absent `host`, or `host` equal to the local daemon, runs locally; another
 connected host forwards the identical request one hop and performs the complete
-probe there. The authoritative daemon starts `<product> --lane` from its
-service PATH with a rowless one-use token, consumes its worker hello, returns the declared open
+probe there. The authoritative daemon starts `<product>` from its service PATH
+with empty argv and a rowless one-use launch token in its environment, consumes its worker hello, returns the declared open
 fields, extra arguments, and optional product version, then closes it without
 sending `session.open`. The hello is emitted only after app-ready. Exit before
 hello fails with the exit code and bounded trailing stderr; there is no
