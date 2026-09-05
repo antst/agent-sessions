@@ -317,16 +317,10 @@ func (s *session) finishRequest(id int64, state *requestState, result answer) {
 	if state.frame.Method != "turn.run" || s.runPending(state.target) {
 		return
 	}
-	var ready []int64
 	for closeID, closeState := range s.requests {
 		if closeState.frame.Method == "session.close" && closeState.target == state.target && closeState.held != nil {
-			ready = append(ready, closeID)
-		}
-	}
-	for _, closeID := range ready {
-		closeState := s.requests[closeID]
-		if closeState != nil {
 			s.finishRequest(closeID, closeState, *closeState.held)
+			return
 		}
 	}
 }

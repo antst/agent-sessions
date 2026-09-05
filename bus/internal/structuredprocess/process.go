@@ -3,11 +3,11 @@ package structuredprocess
 import (
 	"bytes"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const stderrLimit = 64 << 10
@@ -42,7 +42,7 @@ func Start(path string, environment []string) (*Process, error) {
 	p := &Process{cmd: command, done: make(chan struct{})}
 	go func() {
 		_ = command.Wait()
-		_ = readEnd.Close()
+		_ = readEnd.SetReadDeadline(time.Now())
 		raw := <-tail
 		exit := -1
 		if command.ProcessState != nil {
@@ -54,22 +54,53 @@ func Start(path string, environment []string) (*Process, error) {
 	return p, nil
 }
 
-func readTail(reader io.Reader, result chan<- []byte) {
+func readTail(reader *os.File, result chan<- []byte) {
+	defer reader.Close()
 	buffer := make([]byte, 4096)
 	var tail []byte
 	for {
 		count, err := reader.Read(buffer)
 		if count != 0 {
-			tail = append(tail, buffer[:count]...)
-			if len(tail) > stderrLimit {
-				tail = append([]byte(nil), tail[len(tail)-stderrLimit:]...)
-			}
+			tail = appendTail(tail, buffer[:count])
 		}
 		if err != nil {
+			tail = drainTail(reader, tail, buffer)
 			result <- tail
 			return
 		}
 	}
+}
+
+func drainTail(reader *os.File, tail, buffer []byte) []byte {
+	raw, err := reader.SyscallConn()
+	if err != nil {
+		return tail
+	}
+	_ = reader.SetReadDeadline(time.Time{})
+	_ = raw.Read(func(fd uintptr) bool {
+		for {
+			count, readErr := syscall.Read(int(fd), buffer)
+			if count > 0 {
+				tail = appendTail(tail, buffer[:count])
+			}
+			if readErr == syscall.EINTR {
+				continue
+			}
+			if readErr == nil && count > 0 {
+				continue
+			}
+			return true
+		}
+	})
+	return tail
+}
+
+func appendTail(tail, part []byte) []byte {
+	tail = append(tail, part...)
+	if len(tail) > stderrLimit {
+		tail = append([]byte(nil), tail[len(tail)-stderrLimit:]...)
+	}
+	return tail
 }
 
 func splitLines(raw []byte) []string {
