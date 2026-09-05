@@ -448,7 +448,7 @@ and closes the connection without writing one.
 | `-32602` | `invalid_hello` | `session.hello` when its union, protocol, identity, or token is invalid. |
 | `-32001` | `unknown_session` | `message.send`, resume `lane.spawn`, `turn.run`, `turn.interrupt`, or `session.close` when the named row or peer does not exist or is invisible to the caller. |
 | `-32002` | `not_connected` | `turn.run`, `turn.interrupt`, or `session.close` when a durable row has no connection. |
-| `-32003` | `busy` | `turn.run` when the target already has an outstanding run, or any routed call when that worker already has 256 unanswered calls. A delivery at that bound returns a rejected receipt with reason `busy`. |
+| `-32003` | `busy` | `turn.run` when the target already has an outstanding run; any routed call when that worker already has 256 unanswered calls; or `session.close` while a spawn, resume, or close transaction owns that session's row lock. A delivery at the outbound bound returns a rejected receipt with reason `busy`. |
 | `-32004` | `not_running` | `turn.interrupt` when the target has no outstanding run. |
 | `-32005` | `already_connected` | Resume `lane.spawn` when the durable row already has its worker connection. |
 | `-32007` | `unknown_product` | `lane.describe` or new `lane.spawn` when the product token is invalid or its binary is absent from the target host's service PATH. |
@@ -683,6 +683,9 @@ has two worker processes; a concurrent fresh spawn sees the composed-name
 reservation. A lost successful reply is recovered by listing visible lanes by
 name, not by replaying spawn.
 
+A child that exits before hello still goes through that same one-shot process
+cleanup, so descendants in its process group do not survive the failed launch.
+
 Caller EOF never cancels describe, spawn, resume, or close. The transaction
 runs to its commit or cleanup boundary and only its reply sink disappears;
 describe still reaps its probe and a successful spawn still publishes its row.
@@ -729,7 +732,9 @@ its returned disposition is copied into the sender's receipt. The daemon queues
 only bounded outbound calls needed to preserve one connection's wire order; it
 does not queue product work or results.
 
-`session.close` takes the row lock first, then rereads the row and current
+`session.close` tries the row lock first. If a spawn, resume, or close
+transaction already owns it, close returns `busy` immediately; admission never
+waits on the reader. After taking the lock it rereads the row and current
 connection; a row removed by a preceding `forget` is `unknown_session`. It sends
 close while any run remains outstanding. The worker kit interrupts and awaits
 that same run. The one `closeBound = 10s` deadline starts when the daemon sends
@@ -746,7 +751,9 @@ reader or descendant pipe EOF.
 The row then remains offline and resumable. With `forget:true`, the daemon
 deletes the row only after that cleanup; later control or resume resolves to
 `unknown_session`. Forced cleanup fails the pending run once and persists no
-fabricated result.
+fabricated result. The daemon releases the row lock after cleanup and optional
+forget, before writing the close response to the caller; a non-reading caller
+cannot keep an offline row locked.
 
 Once close begins, the kit keeps the existing run slot occupied until process
 exit even if the native run has already settled. A later `turn.run` is `busy`
@@ -759,8 +766,8 @@ with `spawnTransactionTimeout = 60s`, it is one of exactly two daemon lane-path
 clocks.
 
 The daemon sends at most one `session.close` request on a worker connection.
-Concurrent public close calls serialize on the row lock; after the first
-finishes, the next sees the row offline. A second `session.close` frame on the
+A concurrent public close receives `busy`; after the first finishes, a later
+close sees the row offline. A second `session.close` frame on the
 same worker connection is therefore a protocol violation and closes that
 connection without a reply.
 
