@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"log"
+	"syscall"
 	"time"
 
 	"github.com/antst/agent-sessions/bus/internal/conn"
@@ -59,6 +60,7 @@ type session struct {
 	forget        bool
 	launchResult  *answer
 	processExited bool
+	stopSignal    syscall.Signal
 }
 
 func newSession(daemon *Daemon) *session {

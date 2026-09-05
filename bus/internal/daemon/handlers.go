@@ -299,7 +299,7 @@ func (s *session) consumeReply(event replyEvent) {
 		s.result(state.frame, protocol.MessageSendResult{MessageID: state.messageID, Deliveries: state.deliveries})
 		return
 	}
-	if state.frame.Method == "session.close" && s.runPending(state.target) {
+	if state.frame.Method == "session.close" && event.answer.code == 0 && s.runPending(state.target) {
 		value := event.answer
 		state.held = &value
 		return
@@ -314,14 +314,19 @@ func (s *session) finishRequest(id int64, state *requestState, result answer) {
 	} else {
 		s.result(state.frame, result.value)
 	}
-	if state.frame.Method != "turn.run" {
+	if state.frame.Method != "turn.run" || s.runPending(state.target) {
 		return
 	}
+	var ready []int64
 	for closeID, closeState := range s.requests {
 		if closeState.frame.Method == "session.close" && closeState.target == state.target && closeState.held != nil {
-			value := *closeState.held
-			s.finishRequest(closeID, closeState, value)
-			return
+			ready = append(ready, closeID)
+		}
+	}
+	for _, closeID := range ready {
+		closeState := s.requests[closeID]
+		if closeState != nil {
+			s.finishRequest(closeID, closeState, *closeState.held)
 		}
 	}
 }

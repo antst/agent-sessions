@@ -55,36 +55,33 @@ func (d *Daemon) startProduct(start *launch) {
 			}
 			return
 		}
-		started := processEvent{launch: start, child: child}
 		select {
 		case <-start.claimed:
-			start.owner.inbox <- started
-			<-child.Done()
-			child.Stop()
-			start.owner.inbox <- processEvent{launch: start, child: child, exited: true}
+			d.finishClaimed(start, child, false)
 		case <-child.Done():
 			if !d.finishUnclaimed(start, child, answer{code: protocol.SpawnFailed, data: failure(child, "worker exited before hello")}) {
-				child.Stop()
-				start.owner.inbox <- started
-				start.owner.inbox <- processEvent{launch: start, child: child, exited: true}
+				d.finishClaimed(start, child, false)
 			}
 		case <-start.timer.C:
 			if !d.finishUnclaimed(start, child, answer{code: protocol.Timeout}) {
-				start.owner.inbox <- started
-				start.owner.inbox <- spawnTimeout{launch: start}
-				<-child.Done()
-				child.Stop()
-				start.owner.inbox <- processEvent{launch: start, child: child, exited: true}
+				d.finishClaimed(start, child, true)
 			}
 		case <-d.shutdown:
 			if !d.finishUnclaimed(start, child, answer{code: protocol.Internal}) {
-				start.owner.inbox <- started
-				<-child.Done()
-				child.Stop()
-				start.owner.inbox <- processEvent{launch: start, child: child, exited: true}
+				d.finishClaimed(start, child, false)
 			}
 		}
 	}()
+}
+
+func (d *Daemon) finishClaimed(start *launch, child *structuredprocess.Process, timedOut bool) {
+	start.owner.inbox <- processEvent{launch: start, child: child}
+	if timedOut {
+		start.owner.inbox <- spawnTimeout{launch: start}
+	}
+	<-child.Done()
+	child.Stop()
+	start.owner.inbox <- processEvent{launch: start, child: child, exited: true}
 }
 
 func (d *Daemon) finishUnclaimed(start *launch, child *structuredprocess.Process, result answer) bool {

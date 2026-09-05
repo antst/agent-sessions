@@ -10,6 +10,7 @@ import (
 
 	"github.com/antst/agent-sessions/bus/internal/conn"
 	"github.com/antst/agent-sessions/bus/internal/protocol"
+	"github.com/antst/agent-sessions/bus/internal/structuredprocess"
 )
 
 func reviewSession(t *testing.T) (*Daemon, *session, net.Conn) {
@@ -136,5 +137,56 @@ func TestReviewInterruptedRowWriteDoesNotBlockRestart(t *testing.T) {
 	must(t, err)
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d", len(rows))
+	}
+}
+
+func TestReviewBusyRunDoesNotReleaseHeldClose(t *testing.T) {
+	_, s, _ := reviewSession(t)
+	target := &entry{}
+	s.requests[1] = &requestState{frame: protocol.Frame{ID: 1, Method: "turn.run"}, target: target}
+	s.requests[2] = &requestState{frame: protocol.Frame{ID: 2, Method: "turn.run"}, target: target}
+	s.requests[3] = &requestState{frame: protocol.Frame{ID: 3, Method: "session.close"}, target: target}
+	s.owned = 3
+	s.consumeReply(replyEvent{requestID: 3, answer: answer{value: struct{}{}}})
+	s.consumeReply(replyEvent{requestID: 2, answer: answer{code: protocol.Busy}})
+	if s.requests[3] == nil {
+		t.Fatal("busy response to second run released close before first run terminal")
+	}
+}
+
+func TestReviewAllCloseRepliesFinishAfterRun(t *testing.T) {
+	_, s, _ := reviewSession(t)
+	target := &entry{}
+	s.requests[1] = &requestState{frame: protocol.Frame{ID: 1, Method: "turn.run"}, target: target}
+	s.requests[2] = &requestState{frame: protocol.Frame{ID: 2, Method: "session.close"}, target: target}
+	s.requests[3] = &requestState{frame: protocol.Frame{ID: 3, Method: "session.close"}, target: target}
+	s.owned = 3
+	s.consumeReply(replyEvent{requestID: 2, answer: answer{value: struct{}{}}})
+	s.consumeReply(replyEvent{requestID: 3, answer: answer{code: protocol.Busy}})
+	s.consumeReply(replyEvent{requestID: 1, answer: answer{value: &protocol.TurnResult{Outcome: "completed", Result: "done"}}})
+	if len(s.requests) != 0 {
+		t.Fatalf("%d completed close reply remains held with no pending run or helper", len(s.requests))
+	}
+}
+
+func TestReviewLateChildKeepsHardStopIntent(t *testing.T) {
+	_, s, _ := reviewSession(t)
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	path := filepath.Join(dir, "worker")
+	must(t, os.WriteFile(path, []byte("#!/bin/sh\ntrap '' TERM\nprintf ready > \"$REVIEW_READY\"\nwhile :; do sleep 1; done\n"), 0o700))
+	child, err := structuredprocess.Start(path, append(os.Environ(), "REVIEW_READY="+ready))
+	must(t, err)
+	t.Cleanup(child.Stop)
+	waitFile(t, ready)
+	s.launch = newLaunch("worker", false, true)
+	t.Cleanup(func() { s.launch.timer.Stop() })
+	s.abortLaunch(answer{code: protocol.Timeout})
+	s.hardStop()
+	s.handleProcess(processEvent{launch: s.launch, child: child})
+	select {
+	case <-child.Done():
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("late child received TERM after the spawn deadline requested KILL")
 	}
 }

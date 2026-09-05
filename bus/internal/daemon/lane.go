@@ -124,8 +124,8 @@ func (s *session) handleProcess(event processEvent) {
 	}
 	if event.child != nil && !event.exited {
 		s.child = event.child
-		if s.stopping {
-			s.child.Signal(syscall.SIGTERM)
+		if s.stopSignal != 0 {
+			s.child.Signal(s.stopSignal)
 		}
 		return
 	}
@@ -152,23 +152,24 @@ func (s *session) abortLaunch(value answer) {
 }
 
 func (s *session) orderlyStop() {
-	if !s.stopping {
-		s.stopping = true
-	}
-	s.wire.Close()
-	if s.child != nil {
-		s.child.Signal(syscall.SIGTERM)
-	}
+	s.recordStop(syscall.SIGTERM)
 	if !s.processExited && s.closeTimer == nil {
 		s.closeTimer = time.NewTimer(closeBound)
 	}
 }
 
 func (s *session) hardStop() {
+	s.recordStop(syscall.SIGKILL)
+}
+
+func (s *session) recordStop(signal syscall.Signal) {
 	s.stopping = true
+	if s.stopSignal == 0 || signal == syscall.SIGKILL {
+		s.stopSignal = signal
+	}
 	s.wire.Close()
 	if s.child != nil {
-		s.child.Signal(syscall.SIGKILL)
+		s.child.Signal(s.stopSignal)
 	}
 }
 
