@@ -10,8 +10,18 @@ import (
 	"github.com/antst/agent-sessions/bus/internal/rpc"
 )
 
+const supersedeWriteBound = time.Second
+
 func (d *Daemon) handle(_ context.Context, connection *live, request *rpc.Request) {
 	if request.Method == "session.hello" {
+		d.mapsMutex.Lock()
+		stale := !connection.worker && connection.sessionID != "" && d.connections[connection.sessionID] != connection
+		d.mapsMutex.Unlock()
+		if stale {
+			d.fail(connection, request, protocol.Superseded, nil)
+			_ = connection.wire.Close()
+			return
+		}
 		d.hello(connection, request)
 		return
 	}
@@ -24,7 +34,7 @@ func (d *Daemon) handle(_ context.Context, connection *live, request *rpc.Reques
 	case "session.list":
 		go d.list(connection, request, caller)
 	case "message.send":
-		go d.sendMessage(connection, request, caller)
+		d.sendMessage(connection, request, caller)
 	case "lane.describe":
 		go d.describe(connection, request, caller)
 	case "lane.spawn":
@@ -58,14 +68,11 @@ func (d *Daemon) peerHello(connection *live, request *rpc.Request, hello *protoc
 		return
 	}
 	id, name := qualify(hello.SessionID, d.host), qualify(hello.Name, d.host)
-	if _, lane := d.table.get(id); lane {
-		d.invalidHello(connection, request)
-		return
-	}
-	declared := normalized(hello.Groups)
+	declared := append([]string(nil), hello.Groups...)
 	d.mapsMutex.Lock()
-	again := connection.role != ""
-	if connection.role == "worker" {
+	_, lane := d.table.get(id)
+	again := connection.sessionID != ""
+	if connection.worker || lane {
 		d.mapsMutex.Unlock()
 		d.invalidHello(connection, request)
 		return
@@ -86,11 +93,13 @@ func (d *Daemon) peerHello(connection *live, request *rpc.Request, hello *protoc
 		if d.connections[oldID] == connection {
 			delete(d.connections, oldID)
 		}
-		d.detach(connection)
-	} else {
-		connection.role = "peer"
 	}
 	displaced := d.connections[id]
+	if displaced != nil && displaced.worker {
+		d.mapsMutex.Unlock()
+		d.invalidHello(connection, request)
+		return
+	}
 	oldCancel := connection.cancelIdentity
 	connection.sessionID, connection.name = id, name
 	connection.product, connection.declaredGroups = hello.Product, declared
@@ -111,10 +120,11 @@ func (d *Daemon) peerHello(connection *live, request *rpc.Request, hello *protoc
 func (d *Daemon) workerHello(connection *live, request *rpc.Request, hello *protocol.WorkerHello) {
 	d.mapsMutex.Lock()
 	reservation := d.reservations[hello.LaunchToken]
-	if reservation != nil && reservation.product == hello.Product && connection.role == "" {
-		delete(d.reservations, hello.LaunchToken)
-		connection.role, connection.product = "worker", hello.Product
+	if reservation != nil && reservation.product == hello.Product && connection.sessionID == "" && !connection.worker {
+		reservation.product = ""
+		connection.worker, connection.product = true, hello.Product
 		connection.identityCtx, connection.cancelIdentity = context.WithCancel(connection.wire.Context())
+		connection.startSender()
 	} else {
 		reservation = nil
 	}
@@ -128,24 +138,24 @@ func (d *Daemon) workerHello(connection *live, request *rpc.Request, hello *prot
 			_ = connection.wire.Close()
 			return
 		}
-		reservation.hello <- launchResult{connection: connection, hello: hello.HelloDescription}
+		reservation.hello <- workerStart{connection: connection, hello: hello.HelloDescription}
 	}()
 }
 
 func (d *Daemon) caller(connection *live) (source, int) {
 	d.mapsMutex.Lock()
 	defer d.mapsMutex.Unlock()
-	if connection.role == "" {
+	if connection.sessionID == "" && !connection.worker {
 		return source{}, protocol.InvalidHello
 	}
-	if connection.role == "worker" && !connection.committed {
+	if connection.worker && !connection.committed {
 		return source{}, protocol.NotCommitted
 	}
 	current := d.connections[connection.sessionID] == connection
 	if !current {
 		return source{}, protocol.Superseded
 	}
-	return source{live: connection, sessionID: connection.sessionID, name: connection.name, product: connection.product,
+	return source{sessionID: connection.sessionID, name: connection.name, product: connection.product,
 		groups: append([]string(nil), connection.groups...), private: connection.privateGroup, ctx: connection.identityCtx}, 0
 }
 
@@ -156,19 +166,11 @@ func (d *Daemon) supersede(connection *live) {
 	if cancel != nil {
 		cancel()
 	}
-	_ = connection.fd.SetWriteDeadline(time.Now().Add(time.Millisecond))
+	_ = connection.fd.SetWriteDeadline(time.Now().Add(supersedeWriteBound))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_ = connection.wire.Call(ctx, "session.superseded", struct{}{}, &struct{}{})
 	_ = connection.wire.Close()
-}
-
-func (d *Daemon) detach(connection *live) {
-	for target, pending := range d.pending {
-		if pending.caller == connection || pending.target == connection {
-			delete(d.pending, target)
-		}
-	}
 }
 
 func (d *Daemon) invalidHello(connection *live, request *rpc.Request) {

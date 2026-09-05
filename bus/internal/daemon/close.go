@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"errors"
 	"syscall"
 	"time"
@@ -32,25 +31,42 @@ func (d *Daemon) closeSession(connection *live, request *rpc.Request, caller sou
 	defer lock.Unlock()
 	d.mapsMutex.Lock()
 	target := d.connections[value.SessionID]
-	run := d.pending[value.SessionID]
 	d.mapsMutex.Unlock()
 	if target == nil {
 		d.fail(connection, request, protocol.NotConnected, nil)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), closeBound)
-	defer cancel()
 	var output struct{}
-	err := target.wire.Call(ctx, "session.close", input, &output)
-	_ = target.wire.Close()
-	if err == nil {
-		target.child.signal(syscall.SIGTERM)
+	call, queued := target.enqueue("session.close", input, &output, nil)
+	if !queued {
+		d.fail(connection, request, protocol.Busy, nil)
+		return
 	}
+	timer := time.NewTimer(closeBound)
+	defer timer.Stop()
+	var err error
+	expired := false
 	select {
-	case <-target.child.done:
-	case <-ctx.Done():
-		target.child.signal(syscall.SIGKILL)
-		<-target.child.done
+	case started := <-call.started:
+		select {
+		case err = <-started:
+		case <-timer.C:
+			expired = true
+		}
+	case <-timer.C:
+		expired = true
+	}
+	_ = target.wire.Close()
+	if !expired {
+		target.child.Signal(syscall.SIGTERM)
+		select {
+		case <-target.child.Done():
+		case <-timer.C:
+			expired = true
+		}
+	}
+	if expired {
+		target.child.KillAndWait()
 	}
 	d.mapsMutex.Lock()
 	if d.connections[value.SessionID] == target {
@@ -58,9 +74,6 @@ func (d *Daemon) closeSession(connection *live, request *rpc.Request, caller sou
 		delete(d.pending, value.SessionID)
 	}
 	d.mapsMutex.Unlock()
-	if run != nil {
-		<-run.done
-	}
 	if input.Forget {
 		if deleteErr := d.table.delete(value.SessionID); deleteErr != nil {
 			d.fail(connection, request, protocol.Internal, nil)
@@ -72,7 +85,7 @@ func (d *Daemon) closeSession(connection *live, request *rpc.Request, caller sou
 	}
 	if code, data, ok := relayData(err); ok && code == protocol.Internal {
 		d.fail(connection, request, code, data)
-	} else if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, rpc.ErrClosed) {
+	} else if err != nil && !expired && !errors.Is(err, rpc.ErrClosed) {
 		d.fail(connection, request, protocol.Internal, nil)
 	} else {
 		d.result(connection, request, output)

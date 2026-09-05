@@ -63,11 +63,33 @@ func (c *Conn) CallObserved(ctx context.Context, method string, params, result a
 }
 
 func (c *Conn) call(ctx context.Context, method string, params, result any, seen func() error) error {
-	raw, err := protocol.EncodeParams(method, params)
-	if err != nil {
+	id, p := c.begin(method, params, result, seen)
+	select {
+	case err := <-p.done:
 		return err
+	case <-ctx.Done():
+		if c.drop(id, p) {
+			return ctx.Err()
+		}
+		return <-p.done
 	}
+}
+
+// Begin sends one call and returns its eventual response without tying it to a
+// caller context. It lets a connection owner serialize writes without waiting
+// for earlier responses.
+func (c *Conn) Begin(method string, params, result any, seen func() error) <-chan error {
+	_, p := c.begin(method, params, result, seen)
+	return p.done
+}
+
+func (c *Conn) begin(method string, params, result any, seen func() error) (int64, pending) {
+	raw, err := protocol.EncodeParams(method, params)
 	p := pending{method: method, result: result, done: make(chan error, 1), seen: seen}
+	if err != nil {
+		p.done <- err
+		return 0, p
+	}
 	c.writeMu.Lock()
 	c.stateMu.Lock()
 	var id int64
@@ -90,18 +112,11 @@ func (c *Conn) call(ctx context.Context, method string, params, result any, seen
 	}
 	c.writeMu.Unlock()
 	if err != nil {
-		c.drop(id, p)
-		return err
-	}
-	select {
-	case err := <-p.done:
-		return err
-	case <-ctx.Done():
-		if c.drop(id, p) {
-			return ctx.Err()
+		if id == 0 || c.drop(id, p) {
+			p.done <- err
 		}
-		return <-p.done
 	}
+	return id, p
 }
 
 func (c *Conn) Result(request *Request, value any) error {

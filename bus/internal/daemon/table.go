@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -37,14 +38,27 @@ func openTable(path string) (*table, error) {
 	if err != nil {
 		return nil, err
 	}
-	var rows map[string]row
+	var rows map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		return nil, err
 	}
-	for id, value := range rows {
+	names := map[string]bool{}
+	for id, raw := range rows {
+		var fields map[string]json.RawMessage
+		var value row
+		_ = json.Unmarshal(raw, &fields)
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if len(fields) != 6 || decoder.Decode(&value) != nil {
+			return nil, errors.New("invalid durable session table")
+		}
 		if value.SessionID != id || value.Name == "" || len(value.Groups) < 2 {
 			return nil, errors.New("invalid durable session table")
 		}
+		if names[value.Name] {
+			return nil, errors.New("duplicate durable session name")
+		}
+		names[value.Name] = true
 		t.rows[id] = cloneRow(value)
 	}
 	return t, nil
@@ -92,29 +106,6 @@ func (t *table) insert(value row) error {
 	t.rows[value.SessionID] = cloneRow(value)
 	if err := t.persist(); err != nil {
 		delete(t.rows, value.SessionID)
-		return err
-	}
-	return nil
-}
-
-func (t *table) updateName(id, name string) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for key, value := range t.rows {
-		if key != id && value.Name == name {
-			return errDuplicateRow
-		}
-	}
-	value, ok := t.rows[id]
-	if !ok {
-		return os.ErrNotExist
-	}
-	old := value.Name
-	value.Name = name
-	t.rows[id] = value
-	if err := t.persist(); err != nil {
-		value.Name = old
-		t.rows[id] = value
 		return err
 	}
 	return nil

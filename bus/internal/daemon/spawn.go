@@ -1,93 +1,218 @@
 package daemon
 
 import (
-	"context"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/antst/agent-sessions/bus/internal/protocol"
 	"github.com/antst/agent-sessions/bus/internal/rpc"
+	"github.com/antst/agent-sessions/bus/internal/structuredprocess"
 )
 
 const spawnTransactionTimeout = 60 * time.Second
 
-type launchResult struct {
+type workerStart struct {
 	connection *live
 	hello      protocol.HelloDescription
-	process    *process
-	err        error
-	code       int
-	data       any
+	process    *structuredprocess.Process
+}
+
+type launchOutcome struct {
+	code int
+	data any
+}
+
+type launchDecision struct {
+	sync.Mutex
+	done    bool
+	outcome launchOutcome
+}
+
+func (d *launchDecision) claim(makeOutcome func() launchOutcome) (launchOutcome, bool) {
+	d.Lock()
+	defer d.Unlock()
+	if d.done {
+		return d.outcome, false
+	}
+	d.done, d.outcome = true, makeOutcome()
+	return d.outcome, true
+}
+
+func (d *Daemon) beginLaunch() bool {
+	d.mapsMutex.Lock()
+	defer d.mapsMutex.Unlock()
+	if d.closing {
+		return false
+	}
+	d.spawnWG.Add(1)
+	return true
 }
 
 func (d *Daemon) describe(connection *live, request *rpc.Request, caller source) {
+	if !d.beginLaunch() {
+		return
+	}
+	defer d.spawnWG.Done()
 	input := request.Params.(*protocol.LaneDescribeRequest)
 	if code := d.localProduct(input.Product, input.Host); code != 0 {
 		d.fail(connection, request, code, nil)
 		return
 	}
-	result, code, data := d.launch(input.Product, nil, nil)
-	if code != 0 {
-		d.fail(connection, request, code, data)
+	timer := time.NewTimer(spawnTransactionTimeout)
+	defer timer.Stop()
+	worker, outcome := d.startWorker(input.Product, timer.C)
+	if outcome.code != 0 {
+		d.fail(connection, request, outcome.code, outcome.data)
 		return
 	}
-	d.stopProbe(result)
+	d.stopWorker(worker)
 	if caller.ctx.Err() == nil {
-		d.result(connection, request, result.hello)
+		d.result(connection, request, worker.hello)
 	}
 }
 
 func (d *Daemon) spawn(connection *live, request *rpc.Request, caller source) {
-	input := request.Params.(*protocol.LaneSpawnRequest)
-	value, fresh, code := d.spawnRow(caller, input)
+	if !d.beginLaunch() {
+		return
+	}
+	defer d.spawnWG.Done()
+	value, fresh, code := d.spawnRow(caller, request.Params.(*protocol.LaneSpawnRequest))
 	if code != 0 {
 		d.fail(connection, request, code, nil)
 		return
 	}
-	key := value.Name
-	if !fresh {
-		key = value.SessionID
-	}
-	lock := d.rowLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	var rowLock *sync.Mutex
 	if fresh {
-		if _, exists := d.table.byName(value.Name); exists {
+		if !d.reserveName(value.Name) {
 			d.fail(connection, request, protocol.NameTaken, nil)
 			return
 		}
+		defer d.releaseName(value.Name)
 	} else {
+		rowLock = d.rowLock(value.SessionID)
+		rowLock.Lock()
 		current, exists := d.table.get(value.SessionID)
-		if !exists || !shares(caller.groups, current.Groups) {
-			d.fail(connection, request, protocol.UnknownSession, nil)
-			return
-		}
-		value = current
 		d.mapsMutex.Lock()
 		connected := d.connections[value.SessionID] != nil
 		d.mapsMutex.Unlock()
+		if !exists || !shares(caller.groups, current.Groups) {
+			rowLock.Unlock()
+			d.fail(connection, request, protocol.UnknownSession, nil)
+			return
+		}
 		if connected {
+			rowLock.Unlock()
 			d.fail(connection, request, protocol.AlreadyConnected, nil)
 			return
 		}
+		value = current
 	}
-	private := lanePrivate(value)
-	resume := ""
+	private, resume := lanePrivate(value), ""
 	if !fresh {
 		resume = unqualify(value.SessionID)
 	}
 	open := protocol.OpenRequest{Name: value.Name, Groups: value.Groups, ResumeSessionID: resume, Open: value.Open}
-	commit := func(connection *live, child *process, opened protocol.OpenResult) (int, any) {
-		return d.commitSpawn(&value, private, fresh, resume, connection, child, opened)
+	timer := time.NewTimer(spawnTransactionTimeout)
+	defer timer.Stop()
+	worker, outcome := d.startWorker(value.Product, timer.C)
+	if outcome.code != 0 {
+		if rowLock != nil {
+			rowLock.Unlock()
+		}
+		d.fail(connection, request, outcome.code, outcome.data)
+		return
 	}
-	_, code, data := d.launch(value.Product, &open, commit)
-	if code != 0 {
-		d.fail(connection, request, code, data)
+	if unsupported(open.Open, worker.hello.SupportedOpenFields) != "" {
+		if rowLock != nil {
+			rowLock.Unlock()
+		}
+		d.stopWorker(worker)
+		d.fail(connection, request, protocol.UnsupportedOpen, nil)
+		return
+	}
+	if rowLock != nil {
+		d.mapsMutex.Lock()
+		if d.closing || d.connections[value.SessionID] != nil {
+			d.mapsMutex.Unlock()
+			rowLock.Unlock()
+			d.stopWorker(worker)
+			d.fail(connection, request, protocol.AlreadyConnected, nil)
+			return
+		}
+		worker.connection.sessionID, worker.connection.name = value.SessionID, value.Name
+		worker.connection.groups, worker.connection.privateGroup = append([]string(nil), value.Groups...), private
+		d.connections[value.SessionID] = worker.connection
+		d.mapsMutex.Unlock()
+		rowLock.Unlock()
+	}
+	decision := &launchDecision{}
+	var opened protocol.OpenResult
+	seen := func() error {
+		result, won := decision.claim(func() launchOutcome {
+			lock := rowLock
+			if fresh && validPart(opened.SessionID) {
+				lock = d.rowLock(qualify(opened.SessionID, d.host))
+			}
+			if lock == nil {
+				return launchOutcome{code: protocol.SpawnFailed, data: failure(nil, "worker returned an invalid session id")}
+			}
+			lock.Lock()
+			defer lock.Unlock()
+			code, data := d.commitSpawn(&value, private, fresh, resume, worker, opened)
+			return launchOutcome{code: code, data: data}
+		})
+		if !won || result.code != 0 {
+			return errors.New("open commit failed")
+		}
+		return nil
+	}
+	call, queued := worker.connection.enqueue("session.open", open, &opened, seen)
+	if !queued {
+		outcome = launchOutcome{code: protocol.SpawnFailed, data: failure(worker.process, "worker closed before open")}
+	} else {
+		responded := make(chan error, 1)
+		go func() { responded <- call.wait(worker.connection) }()
+		candidate := launchOutcome{}
+		select {
+		case err := <-responded:
+			if code, data, ok := relayData(err); ok {
+				candidate = launchOutcome{code: code, data: data}
+			} else if err != nil {
+				candidate = launchOutcome{code: protocol.SpawnFailed, data: failure(worker.process, err.Error())}
+			}
+		case <-worker.process.Done():
+			select {
+			case err := <-responded:
+				if code, data, ok := relayData(err); ok {
+					candidate = launchOutcome{code: code, data: data}
+				} else if err != nil {
+					candidate = launchOutcome{code: protocol.SpawnFailed, data: failure(worker.process, err.Error())}
+				}
+			case <-worker.connection.wire.Done():
+				candidate = launchOutcome{code: protocol.SpawnFailed, data: failure(worker.process, "worker exited before open")}
+			}
+		case <-timer.C:
+			candidate.code = protocol.Timeout
+		case <-d.shutdown:
+			candidate.code = protocol.Internal
+		}
+		outcome, _ = decision.claim(func() launchOutcome { return candidate })
+	}
+	if outcome.code != 0 {
+		if !fresh {
+			d.mapsMutex.Lock()
+			if d.connections[value.SessionID] == worker.connection {
+				delete(d.connections, value.SessionID)
+			}
+			d.mapsMutex.Unlock()
+		}
+		d.stopWorker(worker)
+		d.fail(connection, request, outcome.code, outcome.data)
 		return
 	}
 	if caller.ctx.Err() == nil {
@@ -95,11 +220,19 @@ func (d *Daemon) spawn(connection *live, request *rpc.Request, caller source) {
 	}
 }
 
-func (d *Daemon) commitSpawn(value *row, private string, fresh bool, resume string, connection *live, child *process, opened protocol.OpenResult) (int, any) {
+func (d *Daemon) commitSpawn(value *row, private string, fresh bool, resume string, worker workerStart, opened protocol.OpenResult) (int, any) {
 	if !validPart(opened.SessionID) || resume != "" && opened.SessionID != resume {
 		return protocol.SpawnFailed, failure(nil, "worker returned an invalid session id")
 	}
 	value.SessionID = qualify(opened.SessionID, d.host)
+	d.mapsMutex.Lock()
+	defer d.mapsMutex.Unlock()
+	if d.closing {
+		return protocol.Internal, nil
+	}
+	if claimed := d.connections[value.SessionID]; claimed != nil && claimed != worker.connection {
+		return protocol.SpawnFailed, failure(nil, "session id already exists")
+	}
 	if existing, exists := d.table.get(value.SessionID); exists && (fresh || existing.Name != value.Name) {
 		return protocol.SpawnFailed, failure(nil, "session id already exists")
 	}
@@ -112,30 +245,22 @@ func (d *Daemon) commitSpawn(value *row, private string, fresh bool, resume stri
 			return protocol.Internal, nil
 		}
 	}
-	d.mapsMutex.Lock()
-	connection.committed, connection.sessionID, connection.name = true, value.SessionID, value.Name
-	connection.groups, connection.privateGroup, connection.child = append([]string(nil), value.Groups...), private, child
-	d.connections[value.SessionID] = connection
-	d.mapsMutex.Unlock()
+	worker.connection.committed, worker.connection.sessionID, worker.connection.name = true, value.SessionID, value.Name
+	worker.connection.groups, worker.connection.privateGroup = append([]string(nil), value.Groups...), private
+	d.connections[value.SessionID] = worker.connection
 	return 0, nil
 }
 
 func (d *Daemon) spawnRow(caller source, input *protocol.LaneSpawnRequest) (row, bool, int) {
 	if input.ResumeSessionID != "" {
 		id, code := d.canonicalInput(input.ResumeSessionID)
-		if code != 0 {
-			return row{}, false, code
-		}
-		return row{SessionID: id}, false, 0
+		return row{SessionID: id}, false, code
 	}
 	if code := d.localProduct(input.Product, input.Host); code != 0 {
 		return row{}, true, code
 	}
-	if !validPart(input.Name) {
-		return row{}, true, protocol.InvalidFrame
-	}
 	part := unqualify(caller.name) + "/" + input.Name
-	if !validPart(part) {
+	if !validPart(input.Name) || !validPart(part) {
 		return row{}, true, protocol.InvalidFrame
 	}
 	private := caller.private + "/" + input.Name
@@ -143,15 +268,19 @@ func (d *Daemon) spawnRow(caller source, input *protocol.LaneSpawnRequest) (row,
 	return row{Product: input.Product, Name: qualify(part, d.host), Groups: groups, Open: *input.Open}, true, 0
 }
 
-func (d *Daemon) launch(product string, open *protocol.OpenRequest, commit func(*live, *process, protocol.OpenResult) (int, any)) (launchResult, int, any) {
+func (d *Daemon) startWorker(product string, timeout <-chan time.Time) (workerStart, launchOutcome) {
 	path, err := exec.LookPath(product)
 	if err != nil {
-		return launchResult{}, protocol.UnknownProduct, nil
+		return workerStart{}, launchOutcome{code: protocol.UnknownProduct}
 	}
 	token := randomID("token")
-	hellos := make(chan launchResult, 1)
+	hellos := make(chan workerStart, 1)
 	reservation := &reservation{product: product, hello: hellos}
 	d.mapsMutex.Lock()
+	if d.closing {
+		d.mapsMutex.Unlock()
+		return workerStart{}, launchOutcome{code: protocol.Internal}
+	}
 	d.reservations[token] = reservation
 	d.mapsMutex.Unlock()
 	defer func() {
@@ -159,71 +288,61 @@ func (d *Daemon) launch(product string, open *protocol.OpenRequest, commit func(
 		delete(d.reservations, token)
 		d.mapsMutex.Unlock()
 	}()
-	environment := replaceEnvironment(os.Environ(), map[string]string{"AGENTBUS_LAUNCH_TOKEN": token, "AGENTBUS_SOCKET": d.config.SocketPath})
-	child, err := startProcess(path, environment, io.Discard)
+	environment := structuredprocess.Environment(os.Environ(), map[string]string{"AGENTBUS_LAUNCH_TOKEN": token, "AGENTBUS_SOCKET": d.config.SocketPath})
+	child, err := structuredprocess.Start(path, environment)
 	if err != nil {
-		return launchResult{}, protocol.SpawnFailed, failure(nil, err.Error())
+		return workerStart{}, launchOutcome{code: protocol.SpawnFailed, data: failure(nil, err.Error())}
 	}
-	timer := time.NewTimer(spawnTransactionTimeout)
-	defer timer.Stop()
-	var hello launchResult
+	d.mapsMutex.Lock()
+	reservation.process = child
+	closing := d.closing
+	d.mapsMutex.Unlock()
+	if closing {
+		child.KillAndWait()
+		return workerStart{}, launchOutcome{code: protocol.Internal}
+	}
 	select {
-	case hello = <-hellos:
-	case <-child.done:
-		return launchResult{}, protocol.SpawnFailed, failure(child, "worker exited before hello")
-	case <-timer.C:
-		child.killAndWait()
-		return launchResult{}, protocol.Timeout, nil
+	case worker := <-hellos:
+		worker.process = child
+		d.mapsMutex.Lock()
+		worker.connection.child = child
+		d.mapsMutex.Unlock()
+		return worker, launchOutcome{}
+	case <-child.Done():
+		return workerStart{}, launchOutcome{code: protocol.SpawnFailed, data: failure(child, "worker exited before hello")}
+	case <-timeout:
+		child.KillAndWait()
+		return workerStart{}, launchOutcome{code: protocol.Timeout}
+	case <-d.shutdown:
+		child.KillAndWait()
+		return workerStart{}, launchOutcome{code: protocol.Internal}
 	}
-	result := launchResult{connection: hello.connection, hello: hello.hello, process: child}
-	if open == nil {
-		return result, 0, nil
-	}
-	if unsupported(open.Open, result.hello.SupportedOpenFields) != "" {
-		d.stopProbe(result)
-		return launchResult{}, protocol.UnsupportedOpen, nil
-	}
-	opened := make(chan launchResult, 1)
-	go func() {
-		var value protocol.OpenResult
-		code, data := 0, any(nil)
-		seen := func() error {
-			code, data = commit(result.connection, child, value)
-			if code != 0 {
-				return errors.New("open commit failed")
-			}
-			return nil
-		}
-		err := result.connection.wire.CallObserved(context.Background(), "session.open", open, &value, seen)
-		opened <- launchResult{err: err, code: code, data: data}
-	}()
-	var event launchResult
-	select {
-	case event = <-opened:
-	case <-child.done:
-		event = <-opened
-	case <-timer.C:
-		d.stopProbe(result)
-		return launchResult{}, protocol.Timeout, nil
-	}
-	if event.err == nil {
-		return result, 0, nil
-	}
-	d.stopProbe(result)
-	if event.code != 0 {
-		return launchResult{}, event.code, event.data
-	}
-	if code, data, ok := relayData(event.err); ok {
-		return launchResult{}, code, data
-	}
-	return launchResult{}, protocol.SpawnFailed, failure(child, event.err.Error())
 }
 
-func (d *Daemon) stopProbe(value launchResult) {
-	if value.connection != nil {
-		_ = value.connection.wire.Close()
+func (d *Daemon) stopWorker(worker workerStart) {
+	if worker.connection != nil {
+		_ = worker.connection.wire.Close()
 	}
-	value.process.killAndWait()
+	worker.process.KillAndWait()
+}
+
+func (d *Daemon) reserveName(name string) bool {
+	d.mapsMutex.Lock()
+	defer d.mapsMutex.Unlock()
+	if d.reservedNames[name] || d.closing {
+		return false
+	}
+	if _, exists := d.table.byName(name); exists {
+		return false
+	}
+	d.reservedNames[name] = true
+	return true
+}
+
+func (d *Daemon) releaseName(name string) {
+	d.mapsMutex.Lock()
+	delete(d.reservedNames, name)
+	d.mapsMutex.Unlock()
 }
 
 func (d *Daemon) localProduct(product, host string) int {
@@ -247,17 +366,18 @@ func unsupported(open protocol.OpenOptions, supported []string) string {
 	return ""
 }
 
-func failure(child *process, message string) protocol.SpawnFailedData {
+func failure(child *structuredprocess.Process, message string) protocol.SpawnFailedData {
 	lines := []string{message}
 	if child != nil {
-		lines = append(child.stderr.lines(), message)
+		stderr, exit := child.Details()
+		lines = append(stderr, message)
+		data := protocol.SpawnFailedData{StderrTail: lines}
+		if exit >= 0 {
+			data.ExitCode = &exit
+		}
+		return data
 	}
-	data := protocol.SpawnFailedData{StderrTail: lines}
-	if child != nil && child.exit >= 0 {
-		exit := child.exit
-		data.ExitCode = &exit
-	}
-	return data
+	return protocol.SpawnFailedData{StderrTail: lines}
 }
 
 func unqualify(value string) string { return value[:strings.LastIndexByte(value, '@')] }
