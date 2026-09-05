@@ -17,7 +17,13 @@ const ToolName, ProtocolVersion = "agent_sessions", "2025-06-18"
 var Actions = []string{"list", "send", "spawn", "describe", "run", "start", "wait", "status", "interrupt", "close", "forget"}
 
 type Backend interface {
-	Call(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	Call(context.Context, string, any) (json.RawMessage, error)
+}
+
+type BackendFunc func(context.Context, string, any) (json.RawMessage, error)
+
+func (call BackendFunc) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	return call(ctx, method, params)
 }
 
 type Server struct {
@@ -45,6 +51,7 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 		stop := context.AfterFunc(ctx, func() { _ = closer.Close() })
 		defer stop()
 	}
+	caller := sessionkit.NewCaller(s.Backend.Call)
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 1<<20)
 	var calls sync.WaitGroup
@@ -56,7 +63,7 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 		calls.Add(1)
 		go func() {
 			defer calls.Done()
-			s.handle(ctx, body, output)
+			s.handle(ctx, caller, body, output)
 		}()
 	}
 	readErr := scanner.Err()
@@ -75,7 +82,7 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 	return s.writeErr
 }
 
-func (s *Server) handle(ctx context.Context, body []byte, output io.Writer) {
+func (s *Server) handle(ctx context.Context, caller *sessionkit.Caller, body []byte, output io.Writer) {
 	request, failed := decodeRequest(body)
 	if failed != nil {
 		s.write(output, request.ID, nil, failed)
@@ -84,24 +91,24 @@ func (s *Server) handle(ctx context.Context, body []byte, output io.Writer) {
 	if len(request.ID) == 0 {
 		return
 	}
-	result, failed := s.call(ctx, request)
+	result, failed := s.call(ctx, caller, request)
 	s.write(output, request.ID, result, failed)
 }
 
-func (s *Server) call(ctx context.Context, request request) (any, *failure) {
+func (s *Server) call(ctx context.Context, caller *sessionkit.Caller, request request) (any, *failure) {
 	switch request.Method {
 	case "initialize":
 		return map[string]any{"protocolVersion": ProtocolVersion, "capabilities": map[string]any{"tools": map[string]any{}}, "serverInfo": map[string]string{"name": "agent-sessions", "version": "unified"}}, nil
 	case "tools/list":
 		return map[string]any{"tools": []any{toolDefinition()}}, nil
 	case "tools/call":
-		return s.callTool(ctx, request.Params)
+		return s.callTool(ctx, caller, request.Params)
 	default:
 		return nil, &failure{Code: -32601, Message: "Method not found: " + request.Method}
 	}
 }
 
-func (s *Server) callTool(ctx context.Context, raw json.RawMessage) (any, *failure) {
+func (s *Server) callTool(ctx context.Context, caller *sessionkit.Caller, raw json.RawMessage) (any, *failure) {
 	var call struct {
 		Name      string `json:"name"`
 		Arguments struct {
@@ -118,18 +125,80 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) (any, *failu
 	} else if !object(arguments) {
 		return nil, &failure{Code: -32602, Message: "Invalid params"}
 	}
-	result, err := s.Backend.Call(ctx, call.Arguments.Action, arguments)
+	result, err := callAction(ctx, caller, call.Arguments.Action, arguments)
 	if err != nil {
 		return nil, errorFailure(err)
 	}
-	if len(result) == 0 {
-		result = json.RawMessage(`{}`)
-	}
-	var structured any
-	if !json.Valid(result) || json.Unmarshal(result, &structured) != nil {
+	encoded, err := json.Marshal(result)
+	if err != nil {
 		return nil, &failure{Code: -32603, Message: "Agentbus backend returned an invalid response"}
 	}
-	return map[string]any{"content": []map[string]string{{"type": "text", "text": string(result)}}, "structuredContent": structured}, nil
+	return map[string]any{"content": []map[string]string{{"type": "text", "text": string(encoded)}}, "structuredContent": result}, nil
+}
+
+func callAction(ctx context.Context, caller *sessionkit.Caller, action string, raw json.RawMessage) (any, error) {
+	switch action {
+	case "list":
+		return withContext(ctx, raw, caller.List)
+	case "send":
+		return withContext(ctx, raw, caller.Send)
+	case "spawn":
+		return withContext(ctx, raw, caller.Spawn)
+	case "describe":
+		return withContext(ctx, raw, caller.Describe)
+	case "run":
+		return withContext(ctx, raw, caller.Run)
+	case "start":
+		return withRequest(raw, caller.Start)
+	case "wait":
+		return withRequest(raw, caller.Wait)
+	case "status":
+		return withRequest(raw, caller.Status)
+	case "interrupt":
+		return withoutResult(ctx, raw, caller.Interrupt)
+	case "close":
+		return withoutResult(ctx, raw, caller.Close)
+	case "forget":
+		request, err := decode[sessionkit.SessionCloseRequest](raw)
+		request.Forget = true
+		if err == nil {
+			err = caller.Close(ctx, request)
+		}
+		return struct{}{}, err
+	default:
+		return nil, errors.New("unsupported action")
+	}
+}
+
+func withContext[T, R any](ctx context.Context, raw json.RawMessage, call func(context.Context, T) (R, error)) (any, error) {
+	request, err := decode[T](raw)
+	if err != nil {
+		return nil, err
+	}
+	return call(ctx, request)
+}
+
+func withRequest[T, R any](raw json.RawMessage, call func(T) (R, error)) (any, error) {
+	request, err := decode[T](raw)
+	if err != nil {
+		return nil, err
+	}
+	return call(request)
+}
+
+func withoutResult[T any](ctx context.Context, raw json.RawMessage, call func(context.Context, T) error) (any, error) {
+	request, err := decode[T](raw)
+	if err == nil {
+		err = call(ctx, request)
+	}
+	return struct{}{}, err
+}
+
+func decode[T any](raw json.RawMessage) (result T, err error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	err = decoder.Decode(&result)
+	return
 }
 
 func decodeRequest(body []byte) (request, *failure) {

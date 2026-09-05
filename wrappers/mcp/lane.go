@@ -6,20 +6,21 @@ import (
 	"errors"
 	"net"
 	"os"
+
+	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
 )
 
 const LaneSocketEnv = "AGENTBUS_LANE_SOCKET"
 
 type LaneBackend struct{ path string }
 
-type laneCall struct {
-	Action    string          `json:"action"`
-	Arguments json.RawMessage `json:"arguments"`
-}
-
-type laneReply struct {
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  *failure        `json:"error,omitempty"`
+type laneFrame struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      int64           `json:"id"`
+	Method  string          `json:"method,omitempty"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *failure        `json:"error,omitempty"`
 }
 
 func NewLaneBackend() (*LaneBackend, error) {
@@ -30,24 +31,13 @@ func NewLaneBackend() (*LaneBackend, error) {
 	return &LaneBackend{path: path}, nil
 }
 
-func (b *LaneBackend) Call(ctx context.Context, action string, arguments json.RawMessage) (json.RawMessage, error) {
-	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", b.path)
+func (b *LaneBackend) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	client, err := sessionkit.Dial(b.path)
 	if err != nil {
 		return nil, err
 	}
-	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
-	defer func() { stop(); _ = connection.Close() }()
-	if err = json.NewEncoder(connection).Encode(laneCall{Action: action, Arguments: arguments}); err != nil {
-		return nil, err
-	}
-	var reply laneReply
-	if err = json.NewDecoder(connection).Decode(&reply); err != nil {
-		return nil, err
-	}
-	if reply.Error != nil {
-		return nil, reply.Error
-	}
-	return reply.Result, nil
+	defer client.Close()
+	return client.Call(ctx, method, params)
 }
 
 func ServeLane(ctx context.Context, listener net.Listener, backend Backend) error {
@@ -62,16 +52,22 @@ func ServeLane(ctx context.Context, listener net.Listener, backend Backend) erro
 
 func serveLaneCall(ctx context.Context, connection net.Conn, backend Backend) {
 	defer connection.Close()
-	var call laneCall
-	reply := laneReply{}
-	if err := json.NewDecoder(connection).Decode(&call); err != nil {
-		reply.Error = errorFailure(err)
-	} else if !validAction(call.Action) {
-		reply.Error = &failure{Code: -32602, Message: "Invalid params"}
-	} else if result, err := backend.Call(ctx, call.Action, call.Arguments); err != nil {
-		reply.Error = errorFailure(err)
+	var request laneFrame
+	response := laneFrame{JSONRPC: "2.0"}
+	if err := json.NewDecoder(connection).Decode(&request); err != nil || request.JSONRPC != "2.0" || request.ID < 1 || request.Method == "" {
+		response.Error = &failure{Code: -32600, Message: "invalid_frame"}
+	} else if result, err := backend.Call(ctx, request.Method, request.Params); err != nil {
+		response.ID, response.Error = request.ID, wireFailure(err)
 	} else {
-		reply.Result = result
+		response.ID, response.Result = request.ID, result
 	}
-	_ = json.NewEncoder(connection).Encode(reply)
+	_ = json.NewEncoder(connection).Encode(response)
+}
+
+func wireFailure(err error) *failure {
+	var protocol *sessionkit.ProtocolError
+	if errors.As(err, &protocol) {
+		return &failure{Code: protocol.Code, Message: protocol.Message, Data: protocol.Data}
+	}
+	return &failure{Code: -32603, Message: "internal"}
 }
