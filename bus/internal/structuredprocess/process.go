@@ -3,73 +3,104 @@ package structuredprocess
 import (
 	"bytes"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 )
 
 const stderrLimit = 64 << 10
 
-type tailBuffer struct {
-	mu   sync.Mutex
-	data []byte
-}
-
-func (b *tailBuffer) Write(value []byte) (int, error) {
-	b.mu.Lock()
-	b.data = append(b.data, value...)
-	if len(b.data) > stderrLimit {
-		b.data = append([]byte(nil), b.data[len(b.data)-stderrLimit:]...)
-	}
-	b.mu.Unlock()
-	return len(value), nil
-}
-
-func (b *tailBuffer) bytes() []byte {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]byte(nil), b.data...)
+type processDetails struct {
+	stderr []string
+	exit   int
 }
 
 type Process struct {
-	cmd  *exec.Cmd
-	done chan struct{}
-	tail *tailBuffer
-	mu   sync.Mutex
-	exit int
-	stop sync.Once
+	cmd     *exec.Cmd
+	done    chan struct{}
+	details processDetails
 }
 
 func Start(path string, environment []string) (*Process, error) {
-	read, write, err := os.Pipe()
+	readEnd, writeEnd, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
 	command := exec.Command(path)
-	command.Env, command.Stderr = environment, write
+	command.Env, command.Stderr = environment, writeEnd
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := command.Start(); err != nil {
-		_ = read.Close()
-		_ = write.Close()
+	if err = command.Start(); err != nil {
+		_ = readEnd.Close()
+		_ = writeEnd.Close()
 		return nil, err
 	}
-	_ = write.Close()
-	p := &Process{cmd: command, done: make(chan struct{}), tail: &tailBuffer{}, exit: -1}
-	go func() { _, _ = io.Copy(p.tail, read); _ = read.Close() }()
+	_ = writeEnd.Close()
+	tail := make(chan []byte, 1)
+	go readTail(readEnd, tail)
+	p := &Process{cmd: command, done: make(chan struct{})}
 	go func() {
 		_ = command.Wait()
-		p.mu.Lock()
+		_ = readEnd.SetReadDeadline(time.Now())
+		raw := <-tail
+		exit := -1
 		if command.ProcessState != nil {
-			p.exit = command.ProcessState.ExitCode()
+			exit = command.ProcessState.ExitCode()
 		}
-		p.mu.Unlock()
+		p.details = processDetails{stderr: splitLines(raw), exit: exit}
 		close(p.done)
 	}()
 	return p, nil
+}
+
+func readTail(reader *os.File, result chan<- []byte) {
+	defer reader.Close()
+	buffer := make([]byte, 4096)
+	var tail []byte
+	for {
+		count, err := reader.Read(buffer)
+		if count != 0 {
+			tail = appendTail(tail, buffer[:count])
+		}
+		if err != nil {
+			tail = drainTail(reader, tail, buffer)
+			result <- tail
+			return
+		}
+	}
+}
+
+func drainTail(reader *os.File, tail, buffer []byte) []byte {
+	raw, err := reader.SyscallConn()
+	if err != nil {
+		return tail
+	}
+	_ = reader.SetReadDeadline(time.Time{})
+	_ = raw.Read(func(fd uintptr) bool {
+		for {
+			count, readErr := syscall.Read(int(fd), buffer)
+			if count > 0 {
+				tail = appendTail(tail, buffer[:count])
+			}
+			if readErr == syscall.EINTR {
+				continue
+			}
+			if readErr == nil && count > 0 {
+				continue
+			}
+			return true
+		}
+	})
+	return tail
+}
+
+func appendTail(tail, part []byte) []byte {
+	tail = append(tail, part...)
+	if len(tail) > stderrLimit {
+		tail = append([]byte(nil), tail[len(tail)-stderrLimit:]...)
+	}
+	return tail
 }
 
 func splitLines(raw []byte) []string {
@@ -86,11 +117,15 @@ func splitLines(raw []byte) []string {
 func (p *Process) Done() <-chan struct{} { return p.done }
 
 func (p *Process) Details() ([]string, int) {
-	p.mu.Lock()
-	exit := p.exit
-	p.mu.Unlock()
-	return splitLines(p.tail.bytes()), exit
+	select {
+	case <-p.done:
+		return append([]string(nil), p.details.stderr...), p.details.exit
+	default:
+		return nil, -1
+	}
 }
+
+func (p *Process) Signal(signal syscall.Signal) { p.signal(signal) }
 
 func (p *Process) signal(signal syscall.Signal) {
 	if p == nil || p.cmd.Process == nil {
@@ -101,34 +136,13 @@ func (p *Process) signal(signal syscall.Signal) {
 	}
 }
 
-// Stop signals the owned group, reaps the direct child, then kills any
-// descendants that survived it. It runs once for each process.
-func (p *Process) Stop(grace time.Duration) {
+func (p *Process) Stop() {
 	if p == nil {
 		return
 	}
-	p.stop.Do(func() {
-		if grace > 0 {
-			p.signal(syscall.SIGTERM)
-			timer := time.NewTimer(grace)
-			select {
-			case <-p.done:
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-			case <-timer.C:
-				p.signal(syscall.SIGKILL)
-				<-p.done
-			}
-		} else {
-			p.signal(syscall.SIGKILL)
-			<-p.done
-		}
-		p.signal(syscall.SIGKILL)
-	})
+	p.signal(syscall.SIGTERM)
+	p.signal(syscall.SIGKILL)
+	<-p.done
 }
 
 func Environment(base []string, values map[string]string) []string {
