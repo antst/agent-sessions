@@ -913,7 +913,7 @@ product-side fate.
 | 140 | `internal/daemon/attachment_test.go` | Tests the deleted engine. | Daemon admission and transaction tests. |
 | 314 | `internal/daemon/control.go` | Role-based side control envelope dies. | The universal schema-driven method router. |
 | 268 | `internal/daemon/control_test.go` | Tests the deleted envelope. | Shared schema and method-direction tests. |
-| 399 | `internal/daemon/control_unix.go` | Side control server dies. | One universal endpoint using `internal/livepresence`. |
+| 399 | `internal/daemon/control_unix.go` | Side control server dies. | One universal endpoint using `bus/internal/rpc`. |
 | 189 | `internal/daemon/control_unix_test.go` | Tests the deleted server. | Universal endpoint framing and close tests. |
 | 92 | `internal/daemon/lane.go` | Daemon lane transition helper dies. | Direct durable-row transaction functions. |
 | 89 | `internal/daemon/lane_test.go` | Tests the deleted helper. | Row transaction table tests. |
