@@ -25,6 +25,15 @@ request is `session.hello`. The daemon admits no other request from a spawned
 worker until `session.open` has returned a native ID and that ID is durably
 committed.
 
+The local Unix socket is trusted and plain by default. When the daemon's
+optional `local_key` is configured, every peer and worker connection instead
+uses TLS 1.3 on that same socket. The R1 key derivation and public-key pinning
+apply with fixed labels `client` for the connecting side and `daemon` for the
+listener; one shared key replaces federation's SNI lookup. A keyed daemon never
+accepts plain frames. A kit without the required key reports `daemon requires
+local key`; a keyed client connecting to a plain daemon reports the TLS
+handshake failure. The key is never a wire field, argument, or log value.
+
 Every session ID assigned by the daemon, including an ID placed into a thin
 peer launcher's environment, is an RFC 4122 version-4 UUID. This grammar is a
 daemon check because the shared schema deliberately has no `pattern` keyword.
@@ -396,9 +405,10 @@ replayed or reaped from a prior incarnation because its workers exited on EOF.
 Restart is therefore a table load, not a lifecycle transition.
 
 Daemon configuration consists of an optional federation hub address, the
-daemon's federation secret when a hub is used, an optional host name, and an
-optional list of product names matching the product grammar. With no hub the
-daemon is standalone and needs no secret; every optional value may be absent.
+daemon's federation secret when a hub is used, an optional host name, an
+optional list of product names matching the product grammar, and an optional
+`local_key`. With no hub the daemon is standalone and needs no federation
+secret; every optional value may be absent.
 The hub's symmetric configuration is one map from host name to opaque secret,
 with a unique secret for every host. The product list is an advertisement for
 discovery, not a registry or allowlist: the service PATH alone decides whether
@@ -429,14 +439,17 @@ authorization decision is stored in a row.
 
 ### 2.2 Connection admission
 
-The daemon accepts a socket, enforces the framing limits in Section 1, and
-requires `session.hello` first. A peer hello is installed by one atomic map
-swap after consulting the durable row table and rejecting an ID owned by a lane
-as specified in Section 1.1. The displaced exact pointer becomes inadmissible
-immediately; the daemon writes `session.superseded` through its ordinary
-per-connection request-ID sequence with an immediate write deadline and closes
-it without waiting for the acknowledgement. All of its pending calls fail
-once. No reconnect lease or grace timer exists.
+The daemon accepts a socket, completes the required local TLS handshake when
+`local_key` is configured, enforces the framing limits in Section 1, and
+requires `session.hello` first. Local TLS reuses the Section 2.5 derivation and
+pinning code with `client` and `daemon` labels, one expected key, and no SNI
+lookup. A peer hello is installed by one atomic map swap after consulting the
+durable row table and rejecting an ID owned by a lane as specified in Section
+1.1. The displaced exact pointer becomes inadmissible immediately; the daemon
+writes `session.superseded` through its ordinary per-connection request-ID
+sequence with an immediate write deadline and closes it without waiting for the
+acknowledgement. All of its pending calls fail once. No reconnect lease or grace
+timer exists.
 
 A worker hello resolves a one-use reservation created by `lane.describe` or
 `lane.spawn`. The reservation binds token, product, transaction, and expiry.
@@ -455,12 +468,14 @@ PID, peer-credential, descendant, signature, or capability machinery.
 The product token is exactly a binary name on the daemon's service PATH.
 Native and wrapped products have one process contract: exec `<product> --lane`
 with `AGENT_SESSIONS_LAUNCH_TOKEN` in the environment and no other daemon-added
-argument. Callers name the product binary but never supply an executable path.
+argument. When configured, the daemon also supplies `AGENT_SESSIONS_LOCAL_KEY`;
+the worker kit consumes and scrubs both variables before product code runs.
+Callers name the product binary but never supply an executable path.
 The daemon has no executable registry, fixed-argument table, or product
 allowlist, and no product-specific configuration beyond the advertised names.
 Its optional product list only advertises likely availability; an unlisted
 executable works, while a listed name missing from PATH is `unknown_product`.
-The hub address, effective host name, and host secret configure federation
+The hub address, effective host name, host secret, and local key configure
 transport only and never participate in product resolution.
 
 Wrapped products are our binaries named `claude-peer`, `codex-peer`,
@@ -616,7 +631,9 @@ and no custom application handshake exists. The local daemon socket remains
 the trusted transport described in Section 1. This transport is capped at
 **120 production and 120 test logical lines** inside `internal/daemon`'s
 existing 1,100-line budget; tests cover derivation, pinning, mismatch, and
-rotation by configuration edit.
+rotation by configuration edit. Optional local encryption reuses that code and
+may add at most **40 production and 60 test logical lines**; it does not create
+a separate transport package or budget.
 
 Visible remote lanes remain controllable without a second public wire. The one
 forwarder accepts a host-qualified message recipient, a host-qualified session
@@ -793,10 +810,12 @@ Callback failures map exactly once:
 | `deliver` | Rejected receipt with the callback message as `reason`. |
 | `close` | `internal`, followed by ordinary kit exit. |
 
-The worker kit reads `AGENT_SESSIONS_LAUNCH_TOKEN` once, removes it from the
-process environment, and connects to the daemon endpoint. It sends the worker
-branch of `session.hello` only after `hello()` succeeds. It never logs, returns,
-or copies the token into product configuration. `session.open` is the only call
+The worker kit reads `AGENT_SESSIONS_LAUNCH_TOKEN` and the optional
+`AGENT_SESSIONS_LOCAL_KEY` once, removes both from the process environment, and
+connects to the daemon endpoint. The local key selects TLS and is retained only
+in the kit's private connection material; neither secret is logged, returned,
+or copied into product configuration. The kit sends the worker branch of
+`session.hello` only after `hello()` succeeds. `session.open` is the only call
 that invokes `open()`. Until that result is written, the kit has no public
 session identity and the daemon rejects its worker-originated session methods.
 
@@ -896,8 +915,11 @@ The size contract is final logical lines:
 | Shared lifecycle fixture data | — | 220 |
 
 Schema validation and generic connection framing are counted in Section 2,
-not duplicated into either worker host. A kit exceeding these limits has grown
-product policy or a third lifecycle fact and must be simplified.
+not duplicated into either worker host. Optional local-TLS key loading,
+scrubbing, and connection setup may add at most **20 production logical lines
+per kit**; its proofs remain inside each kit's existing test cap. A kit
+exceeding these limits has grown product policy or a third lifecycle fact and
+must be simplified.
 
 ### 3.4 DSH: the first native worker
 
@@ -1008,6 +1030,7 @@ must remain net-negative after the kit is accounted separately.
 | Child launch | The lane wrapper connects and sends worker hello before starting a native child. It receives and validates `session.open`, then spawns the child with the stored cwd, model, reasoning, permission, and ordered argument values. | Process-level flags are ordinary open fields for wrappers because the product does not exist until open. Native products start before open and therefore need session-level primitives instead. |
 | Child lifetime | If the native child dies while idle, the wrapper reaps it and exits immediately; worker EOF makes the row offline and explicitly resumable. | A live worker connection must never advertise a dead product or synthesize an internal restart policy. |
 | Tool ingress | In lane mode the wrapper serves loopback HTTP MCP when the product accepts HTTP; otherwise a packaged stdio helper or JavaScript plugin connects only to a private wrapper endpoint. In peer mode that same MCP entry or plugin connects directly to the daemon through the peer kit. | Each mode still has exactly one daemon connection: wrapper-owned for a lane, product-integration-owned for a peer. Private lane helpers never become presence. |
+| Local encryption handoff | Thin peer launchers place `AGENT_SESSIONS_LOCAL_KEY` in the product environment when configured, and the product-spawned MCP entry or JavaScript plugin consumes and scrubs it. A lane wrapper consumes the key for its daemon connection and never passes it to its loopback HTTP MCP, stdio helper, JavaScript plugin endpoint, or native child. | Only connections to the daemon use optional local TLS; private wrapper hops are not daemon connections and carry no daemon key. |
 | Wrapper-only queue | A wrapper that lacks native append/injection owns one in-memory FIFO capped at 64 deliveries and 1 MiB total after rendering and newline separators. The shared wrapper host alone renders every entry with the exact c5 carrier `internal/sessiontools.RenderNativeMessage` (`internal/sessiontools/envelope.go:11-32`), preserves arrival order, joins rendered entries with newlines, and prepends the result before caller input. At run start it atomically swaps the FIFO; overflow is rejected as `queue_full`. | One renderer prevents product wrappers from changing sender metadata or queue semantics. `queued_for_next_turn` remains truthful; loss with wrapper exit is the accepted loss in Section 1.2. |
 | Caller tool surface | Every product exposes the same caller-kit start/wait/status/interrupt/spawn/describe/close/list/send operations; product plugins do not invent wire methods. | Tool presentation is kit sugar over the eleven methods and is identical for native and wrapped products. |
 | Shared size cap | Wrapper host, local HTTP MCP, stdio/plugin bridge protocol, and bounded FIFO together: **400 production / 400 test logical lines**. | Product-independent scaffolding larger than the daemon router would be a second protocol implementation. |
@@ -1237,6 +1260,7 @@ from the same conformance matrix.
 | Messaging | One host-qualified message is forwarded once, produces one receipt, and is never retried or duplicated after federation reconnect. |
 | Control and creation | The capped function forwards host-qualified resume/run/interrupt/close and explicit-host spawn/describe exactly one hop; caller loss removes only the reply sink, and the authoritative host alone stores the row and `last_turn`. |
 | Federation authentication | A correct host/secret pair federates; a wrong secret, unknown host name, or name/key mismatch fails the TLS handshake. Changing one side's secret disconnects that host until both configurations match. |
+| Optional local encryption | A keyed daemon rejects a keyless client; a keyed client fails truthfully against a plain daemon; matching keys connect; and a spawned lane receives and scrubs both `AGENT_SESSIONS_LAUNCH_TOKEN` and `AGENT_SESSIONS_LOCAL_KEY`. |
 | Reconnect | A disconnected host removes transient remote summaries and fails pending one-hop calls once; reconnect republishes a fresh snapshot and never replays a request. |
 
 ### 5.8 Test rehoming
