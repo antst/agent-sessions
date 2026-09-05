@@ -172,12 +172,19 @@ readiness object or readiness phase.
 
 A session sends `lane.spawn` either with a caller-chosen name leaf, product, open
 options, optional `extra_groups`, and optional `host` for a new lane, or with
-`resume_session_id` alone for a durable offline lane. A new row's groups are
-exactly the parent's private session group, the lane's newly allocated private
-session group, and `extra_groups`. The parent's other memberships are not
-inherited; name hierarchy and group visibility are independent facts. The daemon composes the lane's canonical name as `<parent name
-part>/<leaf>@<target host>`. Nested spawns extend that path; the leaf itself may
-contain `/` or `@`, and the last `@` remains the host boundary. A composed name
+`resume_session_id` alone for a durable offline lane. A peer's private group is
+`session:<uuid@host>`. A lane's private group is `<parent private group>/<leaf>`;
+its default groups are exactly its parent's private group and that new private
+group, plus `extra_groups`. The parent's other memberships are not inherited,
+and the daemon permits any explicit extra group without checking the parent's
+membership. The daemon composes the lane's canonical name as `<parent name
+part>/<leaf>@<target host>`. Nested spawns extend both paths: peer `pA@pdev`
+with ID `u@pdev` has private group `session:u@pdev`; after it spawns `pD` and
+that lane spawns `pE`, the grandchild is named `pA/pD/pE@host` and has private
+group `session:u@pdev/pD/pE`. Each level sees exactly one level down by
+default; granting the grandparent's private group or a shared group through
+`extra_groups` widens visibility explicitly. The leaf itself may contain `/` or
+`@`, and the last `@` remains the host boundary. A composed name
 part beyond 128 characters is invalid request data. Absent `host`, or `host` equal to the local daemon, spawns locally;
 another connected host forwards the identical request one hop and performs the
 entire transaction there. The row exists only on that authoritative target.
@@ -291,9 +298,11 @@ this version has none.
 - New `lane.spawn` requires a name not held by any non-closed row on that
   host; collision returns `name_taken`. Closed rows remain visible history
   but do not reserve names.
-- A new lane receives exactly its parent's private session group, its own
-  private session group, and explicit `extra_groups`; no other parent group is
-  inherited. With no extra group, only the parent can see and drive it.
+- A peer private group is `session:<uuid@host>`; a lane private group recursively
+  appends `/<leaf>` to its parent's. A new lane receives exactly its parent's
+  private group, its own private group, and explicit `extra_groups`; no other
+  parent group is inherited. With no extra group, only its parent sees it by
+  default. The trusted daemon accepts any explicit extra group.
 - `lane.spawn` with `resume_session_id` naming an explicitly closed row returns
   `closed`. The row remains visible only for identity and `last_turn` history.
 - The per-row lock serializes concurrent spawn, resume, and close transactions.
@@ -415,7 +424,7 @@ Only lanes have durable rows. A row has exactly these columns:
 | `session_id` | Immutable canonical `uuid@host` and primary key; the daemon assigns the RFC 4122 version-4 UUID part. |
 | `product` | Immutable binary name executed as `<product> --lane`. |
 | `name` | Immutable canonical `name@host`; for a lane the stored name part is `<parent name part>/<caller leaf>` and the host is where the lane runs. |
-| `groups` | Immutable set containing the parent's private session group, the lane's own private session group, and explicit `extra_groups`; no other parent membership is inherited. |
+| `groups` | Immutable full set containing the parent's private group, the recursively composed `<parent private group>/<leaf>`, and explicit `extra_groups`; no other parent membership is inherited. |
 | `native_id` | Absent before commit; immutable after `session.open`. |
 | `open` | The original closed `SessionOpenOptions` JSON, replayed byte-for-byte on resume. |
 | `last_turn` | Absent until a terminal turn; thereafter the one overwrite-only recovery value. |
@@ -536,10 +545,13 @@ no row, native session, connection entry, or product-specific readiness state.
 
 `lane.spawn` runs one sequential transaction while holding the row lock. For a
 new lane it validates the open object, composes `<parent name part>/<caller
-leaf>@<target host>`, allocates the UUID and its private session group, adds
-only the parent's private session group and `extra_groups`, and keeps the prospective
-row private. The full composed name part must fit the 128-character grammar and
-be unique among non-closed rows on that host; closed rows do not reserve names.
+leaf>@<target host>`, allocates its UUID, composes `<parent private
+group>/<leaf>`, adds only that group, the parent private group, and
+`extra_groups`, and keeps the prospective row private. The full composed name
+part must fit the 128-character grammar and be unique among non-closed rows on
+that host; closed rows do not reserve names. Siblings are thereby unique, and
+two different parents with the same name part collide on the same composed
+child name; the second spawn receives `name_taken`.
 For resume it checks `closed`
 before connection,
 then reuses the immutable row identity and stored open object. It creates the
@@ -1253,7 +1265,7 @@ not a reason to move lines into a product integration.
 | Trace | Caller against reference worker |
 | --- | --- |
 | C1 | Two peer connections prove exact session identity, visibility-filtered list, and the full tool schema; the second visible peer can run, interrupt, and close the lane. |
-| C2 | Describe without open or residue; fresh spawn composes `<parent name part>/<leaf>@<target host>` and assigns only both private session groups plus `extra_groups`, with all declared open fields and ordered arguments; discovery advertises configured product names without gating an unlisted executable and a listed-but-missing name returns `unknown_product`; explicit `host` naming the other daemon in a two-daemon fixture describes and creates the row only there, while an unfederated host returns `unknown_host`. |
+| C2 | Describe without open or residue; two-level spawn composes matching name/private-group paths, gives each lane only its parent and own private groups plus `extra_groups`, and proves explicit ancestor-group widening; all declared open fields and ordered arguments survive. Discovery advertises configured product names without gating an unlisted executable and a listed-but-missing name returns `unknown_product`; explicit `host` naming the other daemon in a two-daemon fixture describes and creates the row only there, while an unfederated host returns `unknown_host`. |
 | C3 | Local-kit start returns a local ID while one wire `turn.run` remains outstanding; status is running and bounded wait timeout does not cancel it. |
 | C4 | Wait returns the terminal, including exact result truncation metadata; an abandoned caller sink still yields the same `last_turn` through filtered list. |
 | C5 | Send resolves ID/name/group, deduplicates, and returns dispositions `injected`, `queued_for_next_turn`, or `rejected`, including exact rejected reasons `ambiguous` and `no_receipt`; an invisible peer receives `unknown_session`. |
