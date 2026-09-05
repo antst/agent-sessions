@@ -9,7 +9,7 @@
       "properties": {
         "protocol": {"type": "integer", "const": 1},
         "product": {"type": "string", "minLength": 1},
-        "session_id": {"type": "string", "minLength": 1},
+        "session_id": {"type": "string", "minLength": 1, "maxLength": 128},
         "name": {"type": "string", "minLength": 1, "maxLength": 128},
         "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
         "info": {"type": "object", "additionalProperties": true},
@@ -74,48 +74,23 @@
     "SessionSummary": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["session_id", "kind", "product", "name", "groups", "connected", "running", "closed"],
+      "required": ["session_id", "kind", "product", "name", "groups", "connected", "running"],
       "properties": {
-        "session_id": {"type": "string", "minLength": 1},
+        "session_id": {"type": "string", "minLength": 1, "maxLength": 161},
         "kind": {"enum": ["peer", "lane"]},
         "product": {"type": "string", "minLength": 1},
         "name": {"type": "string", "minLength": 1, "maxLength": 161},
         "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
         "connected": {"type": "boolean"},
         "running": {"type": "boolean"},
-        "closed": {"type": "boolean"},
-        "native_id": {"type": "string", "minLength": 1},
-        "last_turn": {"$ref": "#/$defs/LastTurn"},
         "info": {"type": "object", "additionalProperties": true}
       },
       "allOf": [
         {
-          "if": {"properties": {"kind": {"const": "lane"}}, "required": ["kind"]},
-          "then": {"required": ["native_id"]},
-          "else": {"not": {"required": ["native_id"]}}
-        },
-        {
           "if": {"properties": {"connected": {"const": false}}, "required": ["connected"]},
           "then": {"properties": {"running": {"const": false}}}
-        },
-        {
-          "if": {"properties": {"closed": {"const": true}}, "required": ["closed"]},
-          "then": {"properties": {"connected": {"const": false}, "running": {"const": false}}}
         }
       ]
-    },
-    "LastTurn": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["input", "outcome", "result", "finished_at"],
-      "properties": {
-        "input": {"type": "string", "minLength": 1, "maxLength": 262144},
-        "outcome": {"enum": ["completed", "interrupted", "failed"]},
-        "result": {"type": "string", "maxLength": 262144},
-        "truncated": {"type": "boolean"},
-        "native_stop_reason": {"type": "string", "minLength": 1},
-        "finished_at": {"type": "integer", "minimum": 0}
-      }
     },
     "MessageSendRequest": {
       "type": "object",
@@ -300,29 +275,25 @@
     "LaneSpawnResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["session_id", "native_id"],
-      "properties": {
-        "session_id": {"type": "string", "minLength": 1},
-        "native_id": {"type": "string", "minLength": 1}
-      }
+      "required": ["session_id"],
+      "properties": {"session_id": {"type": "string", "minLength": 1}}
     },
     "SessionOpenRequest": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["session_id", "name", "groups", "open"],
+      "required": ["name", "groups", "open"],
       "properties": {
-        "session_id": {"type": "string", "minLength": 1},
         "name": {"type": "string", "minLength": 1, "maxLength": 161},
         "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
-        "resume_native_id": {"type": "string", "minLength": 1},
+        "resume_session_id": {"type": "string", "minLength": 1},
         "open": {"$ref": "#/$defs/SessionOpenOptions"}
       }
     },
     "SessionOpenResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["native_id"],
-      "properties": {"native_id": {"type": "string", "minLength": 1}}
+      "required": ["session_id"],
+      "properties": {"session_id": {"type": "string", "minLength": 1, "maxLength": 128}}
     },
     "TurnRunRequest": {
       "type": "object",
@@ -355,7 +326,10 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["session_id"],
-      "properties": {"session_id": {"type": "string", "minLength": 1}}
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1},
+        "forget": {"type": "boolean"}
+      }
     },
     "SessionCloseResult": {"type": "object", "additionalProperties": false},
     "RPCErrorResponse": {
@@ -373,8 +347,8 @@
       "additionalProperties": false,
       "required": ["code", "message"],
       "properties": {
-        "code": {"enum": [-32600, -32602, -32603, -32001, -32002, -32003, -32004, -32005, -32006, -32007, -32008, -32009, -32010, -32011, -32012, -32013, -32014]},
-        "message": {"enum": ["invalid_frame", "invalid_hello", "internal", "unknown_session", "not_connected", "busy", "not_running", "already_connected", "closed", "unknown_product", "unsupported_open_field", "spawn_failed", "timeout", "not_committed", "superseded", "name_taken", "unknown_host"]},
+        "code": {"enum": [-32600, -32602, -32603, -32001, -32002, -32003, -32004, -32005, -32007, -32008, -32009, -32010, -32011, -32012, -32013, -32014]},
+        "message": {"enum": ["invalid_frame", "invalid_hello", "internal", "unknown_session", "not_connected", "busy", "not_running", "already_connected", "unknown_product", "unsupported_open_field", "spawn_failed", "timeout", "not_committed", "superseded", "name_taken", "unknown_host"]},
         "data": {"$ref": "#/$defs/SpawnFailedData"}
       },
       "allOf": [
@@ -385,7 +359,6 @@
         {"if": {"properties": {"code": {"const": -32003}}}, "then": {"properties": {"message": {"const": "busy"}}}},
         {"if": {"properties": {"code": {"const": -32004}}}, "then": {"properties": {"message": {"const": "not_running"}}}},
         {"if": {"properties": {"code": {"const": -32005}}}, "then": {"properties": {"message": {"const": "already_connected"}}}},
-        {"if": {"properties": {"code": {"const": -32006}}}, "then": {"properties": {"message": {"const": "closed"}}}},
         {"if": {"properties": {"code": {"const": -32007}}}, "then": {"properties": {"message": {"const": "unknown_product"}}}},
         {"if": {"properties": {"code": {"const": -32008}}}, "then": {"properties": {"message": {"const": "unsupported_open_field"}}}},
         {"if": {"properties": {"code": {"const": -32009}}}, "then": {"properties": {"message": {"const": "spawn_failed"}}}},

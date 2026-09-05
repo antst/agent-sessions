@@ -23,7 +23,7 @@ type sessionFixtureFile struct {
 }
 
 func TestUniversalSessionSchemaFixtures(t *testing.T) {
-	shared := filepath.Join("..", "..", "integrations", "shared")
+	shared := filepath.Join("..", "..", "protocol")
 	rawSchema, err := os.ReadFile(filepath.Join(shared, "session.schema.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +71,7 @@ func TestUniversalSessionSchemaFixtures(t *testing.T) {
 }
 
 func TestUniversalSessionSchemaRejectsUnsharedKeywords(t *testing.T) {
-	path := filepath.Join("..", "..", "integrations", "shared", "session.schema.json")
+	path := filepath.Join("..", "..", "protocol", "session.schema.json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +130,7 @@ func repeatedSessionFixture(t *testing.T, raw []byte, path []string, text string
 }
 
 func TestUniversalSessionSchemaDefinitionsStayClosed(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "integrations", "shared", "session.schema.json"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "protocol", "session.schema.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,21 +138,21 @@ func TestUniversalSessionSchemaDefinitionsStayClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"DeliveryReceipt", "DeliverySource", "ExtraArgument", "HostProducts", "LaneDescribeRequest", "LaneDescribeResult", "LaneSpawnRequest", "LaneSpawnResult", "LastTurn", "MessageDeliverRequest", "MessageDeliverResult", "MessageSendDelivery", "MessageSendRequest", "MessageSendResult", "RPCError", "RPCErrorResponse", "SessionCloseRequest", "SessionCloseResult", "SessionHelloRequest", "SessionHelloResult", "SessionListRequest", "SessionListResult", "SessionOpenOptions", "SessionOpenRequest", "SessionOpenResult", "SessionSummary", "SessionSupersededRequest", "SessionSupersededResult", "SpawnFailedData", "TurnInterruptRequest", "TurnInterruptResult", "TurnRunRequest", "TurnRunResult"}
+	want := []string{"DeliveryReceipt", "DeliverySource", "ExtraArgument", "HostProducts", "LaneDescribeRequest", "LaneDescribeResult", "LaneSpawnRequest", "LaneSpawnResult", "MessageDeliverRequest", "MessageDeliverResult", "MessageSendDelivery", "MessageSendRequest", "MessageSendResult", "RPCError", "RPCErrorResponse", "SessionCloseRequest", "SessionCloseResult", "SessionHelloRequest", "SessionHelloResult", "SessionListRequest", "SessionListResult", "SessionOpenOptions", "SessionOpenRequest", "SessionOpenResult", "SessionSummary", "SessionSupersededRequest", "SessionSupersededResult", "SpawnFailedData", "TurnInterruptRequest", "TurnInterruptResult", "TurnRunRequest", "TurnRunResult"}
 	if got := schema.Definitions(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("definitions = %v, want %v", got, want)
 	}
 }
 
 func TestGeneratedProtocolMatchesDesign(t *testing.T) {
-	design, err := os.ReadFile(filepath.Join("..", "..", "docs", "designs", "UNIVERSAL-SESSION-PROTOCOL.md"))
+	design, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "designs", "UNIVERSAL-SESSION-PROTOCOL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	wire := protocolSection(t, string(design), "## 1. Wire\n", "## 2. Daemon\n")
 	kit := protocolSection(t, string(design), "### 3.1 Product contract\n", "### 3.2 Full-duplex lifecycle\n")
 	want := wire + strings.TrimSuffix(kit, "\n")
-	got, err := os.ReadFile(filepath.Join("..", "..", "docs", "PROTOCOL.md"))
+	got, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "PROTOCOL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
