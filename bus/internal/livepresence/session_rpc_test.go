@@ -113,6 +113,36 @@ func TestSessionRPCCloseFailsPendingCallOnce(t *testing.T) {
 	}
 }
 
+func TestSessionRPCCloseWinsBeforeAPausedCallWrites(t *testing.T) {
+	local, remote := net.Pipe()
+	blocked := &blockingCloseConn{Conn: local, entered: make(chan struct{}), release: make(chan struct{})}
+	rpc, err := NewSessionRPC(blocked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remote.Close()
+	beforeWrite, releaseWrite := make(chan struct{}), make(chan struct{})
+	rpc.testBeforeWrite = func() { close(beforeWrite); <-releaseWrite }
+	called := make(chan error, 1)
+	go func() { called <- rpc.Call(context.Background(), true, "session.list", struct{}{}, &struct{}{}) }()
+	<-beforeWrite
+	closed := make(chan error, 1)
+	go func() { closed <- rpc.Close() }()
+	<-blocked.entered
+	close(releaseWrite)
+	if err := <-called; err == nil {
+		t.Fatal("call succeeded after terminal mark")
+	}
+	_ = remote.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+	if _, err := bufio.NewReader(remote).ReadByte(); err == nil {
+		t.Fatal("paused call wrote after terminal mark")
+	}
+	close(blocked.release)
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSessionRPCTerminalMarkRejectsLateWorkBeforeCloseReturns(t *testing.T) {
 	local, remote := net.Pipe()
 	blocked := &blockingCloseConn{Conn: local, entered: make(chan struct{}), release: make(chan struct{})}

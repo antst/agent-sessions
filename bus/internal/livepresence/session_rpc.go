@@ -113,15 +113,16 @@ type SessionRPC struct {
 	wire   *Connection
 	schema *SessionSchema
 
-	mu        sync.Mutex
-	next      int64
-	closed    bool
-	closeDone chan struct{}
-	closeErr  error
-	pending   map[string]sessionPending
-	requests  map[string]bool
-	seen      map[string]bool
-	unmatched sync.Once
+	mu              sync.Mutex
+	next            int64
+	closed          bool
+	closeDone       chan struct{}
+	closeErr        error
+	pending         map[string]sessionPending
+	requests        map[string]bool
+	seen            map[string]bool
+	unmatched       sync.Once
+	testBeforeWrite func()
 }
 
 func NewSessionRPC(connection net.Conn) (*SessionRPC, error) {
@@ -169,8 +170,21 @@ func (r *SessionRPC) Call(ctx context.Context, client bool, method string, param
 	r.pending[key] = sessionPending{result: spec.Result, response: response}
 	r.mu.Unlock()
 
-	if err := r.wire.Write(Frame{JSONRPC: "2.0", ID: id, Method: method, Params: body}); err != nil {
-		r.abandon(key, response, true)
+	if r.testBeforeWrite != nil {
+		r.testBeforeWrite()
+	}
+	r.mu.Lock()
+	if r.closed {
+		delete(r.pending, key)
+		r.mu.Unlock()
+		return errors.New("session connection closed")
+	}
+	err = r.wire.Write(Frame{JSONRPC: "2.0", ID: id, Method: method, Params: body})
+	if err != nil {
+		delete(r.pending, key)
+	}
+	r.mu.Unlock()
+	if err != nil {
 		return err
 	}
 	select {
@@ -275,8 +289,9 @@ func (r *SessionRPC) finish(request, response Frame) error {
 		return errors.New("session request is no longer pending")
 	}
 	delete(r.requests, string(request.ID))
+	err := r.wire.Write(response)
 	r.mu.Unlock()
-	return r.wire.Write(response)
+	return err
 }
 
 func (r *SessionRPC) reject(request Frame) error {
@@ -285,8 +300,9 @@ func (r *SessionRPC) reject(request Frame) error {
 		r.mu.Unlock()
 		return ErrConnectionClosed
 	}
+	err := r.wire.Write(Failure(request.ID, SessionInvalidFrame, "invalid_frame", nil))
 	r.mu.Unlock()
-	return r.wire.Write(Failure(request.ID, SessionInvalidFrame, "invalid_frame", nil))
+	return err
 }
 
 func (r *SessionRPC) abandon(key string, response chan Frame, drop bool) {
