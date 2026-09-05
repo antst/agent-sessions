@@ -395,11 +395,14 @@ connections, pending turns, row locks, and reservations start empty. Nothing is
 replayed or reaped from a prior incarnation because its workers exited on EOF.
 Restart is therefore a table load, not a lifecycle transition.
 
-Daemon configuration consists only of an optional federation hub address, an
-optional host name, and an optional list of product names matching the product
-grammar. With no hub the daemon is standalone; all three values may be absent.
-The product list is an advertisement for discovery, not a registry or allowlist:
-the service PATH alone decides whether a lane can launch.
+Daemon configuration consists of an optional federation hub address, the
+daemon's federation secret when a hub is used, an optional host name, and an
+optional list of product names matching the product grammar. With no hub the
+daemon is standalone and needs no secret; every optional value may be absent.
+The hub's symmetric configuration is one map from host name to opaque secret,
+with a unique secret for every host. The product list is an advertisement for
+discovery, not a registry or allowlist: the service PATH alone decides whether
+a lane can launch.
 
 Three in-memory indexes are the complete live authority:
 
@@ -457,6 +460,8 @@ The daemon has no executable registry, fixed-argument table, or product
 allowlist, and no product-specific configuration beyond the advertised names.
 Its optional product list only advertises likely availability; an unlisted
 executable works, while a listed name missing from PATH is `unknown_product`.
+The hub address, effective host name, and host secret configure federation
+transport only and never participate in product resolution.
 
 Wrapped products are our binaries named `claude-peer`, `codex-peer`,
 `grok-peer`, `qwen-peer`, `opencode-peer`, `kilo-peer`, `pi-peer`, and
@@ -591,6 +596,27 @@ never persists a remote row. `session.list` merges those summaries and
 `message.send` forwards a host-qualified delivery once. Federation snapshots
 also carry each daemon's optional advertised product list; `session.list`
 returns those lists without treating them as verified installation state.
+
+Hub-to-daemon transport is standard TLS 1.3 from Go's standard library. For a
+configured host secret, both sides derive Ed25519 keypairs deterministically by
+HKDF-SHA256 over that secret with fixed labels: `host` for the daemon identity
+and `hub` for the hub identity toward that host. Derived keypairs are never
+stored or transmitted. The daemon presents a self-signed certificate for its
+derived host key and sends its effective host name as SNI. The hub selects that
+name in `GetCertificate`, looks up its unique secret, derives the matching hub
+key, and presents its self-signed certificate. Each side's
+`VerifyPeerCertificate` pins only the peer public key to the independently
+derived expected key; it intentionally applies no CA, certificate-expiry, or
+certificate-hostname semantics.
+
+The key match is the federation identity. An unknown SNI name, wrong secret, or
+name/key mismatch fails the TLS handshake before any summary or request is
+accepted. Secrets never leave configuration, TLS 1.3 supplies forward secrecy,
+and no custom application handshake exists. The local daemon socket remains
+the trusted transport described in Section 1. This transport is capped at
+**120 production and 120 test logical lines** inside `internal/daemon`'s
+existing 1,100-line budget; tests cover derivation, pinning, mismatch, and
+rotation by configuration edit.
 
 Visible remote lanes remain controllable without a second public wire. The one
 forwarder accepts a host-qualified message recipient, a host-qualified session
@@ -1210,6 +1236,7 @@ from the same conformance matrix.
 | Visibility | The authoritative daemon filters by groups; the receiving daemon trusts that assertion and never persists a remote row. |
 | Messaging | One host-qualified message is forwarded once, produces one receipt, and is never retried or duplicated after federation reconnect. |
 | Control and creation | The capped function forwards host-qualified resume/run/interrupt/close and explicit-host spawn/describe exactly one hop; caller loss removes only the reply sink, and the authoritative host alone stores the row and `last_turn`. |
+| Federation authentication | A correct host/secret pair federates; a wrong secret, unknown host name, or name/key mismatch fails the TLS handshake. Changing one side's secret disconnects that host until both configurations match. |
 | Reconnect | A disconnected host removes transient remote summaries and fails pending one-hop calls once; reconnect republishes a fresh snapshot and never replays a request. |
 
 ### 5.8 Test rehoming
