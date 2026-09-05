@@ -26,9 +26,9 @@ type Turn interface {
 type StartTurn func(context.Context, string) (Turn, error)
 
 type creation struct {
-	done         chan struct{}
-	interrupted  bool
-	interruptErr error
+	done        chan struct{}
+	interrupted bool
+	turn        Turn
 }
 
 // Handoff owns the only boundary between queued delivery and a native turn.
@@ -38,7 +38,6 @@ type Handoff struct {
 	queueSize int
 	starting  *creation
 	active    Turn
-	pending   bool
 }
 
 func (h *Handoff) Run(ctx context.Context, input string, start StartTurn) (sessionkit.TurnResult, error) {
@@ -48,8 +47,7 @@ func (h *Handoff) Run(ctx context.Context, input string, start StartTurn) (sessi
 		return sessionkit.TurnResult{}, errors.New("turn already active")
 	}
 	queued := append([]string(nil), h.queue...)
-	starting := &creation{done: make(chan struct{}), interrupted: h.pending}
-	h.pending = false
+	starting := &creation{done: make(chan struct{})}
 	h.starting = starting
 	prompt := prepend(queued, input)
 	h.mu.Unlock()
@@ -63,10 +61,7 @@ func (h *Handoff) Run(ctx context.Context, input string, start StartTurn) (sessi
 	if err == nil {
 		h.queue = append([]string(nil), h.queue[len(queued):]...)
 		h.queueSize = len(strings.Join(h.queue, "\n"))
-		h.active = turn
-		if starting.interrupted {
-			starting.interruptErr = turn.Interrupt(ctx)
-		}
+		starting.turn, h.active = turn, turn
 	}
 	close(starting.done)
 	h.mu.Unlock()
@@ -112,25 +107,22 @@ func (h *Handoff) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 
 func (h *Handoff) Interrupt(ctx context.Context) error {
 	h.mu.Lock()
-	if h.starting != nil {
-		starting := h.starting
+	starting, turn := h.starting, h.active
+	if starting != nil {
 		starting.interrupted = true
-		h.mu.Unlock()
+	}
+	h.mu.Unlock()
+	if starting != nil {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-starting.done:
-			return starting.interruptErr
+			turn = starting.turn
 		}
 	}
-	if h.active != nil {
-		err := h.active.Interrupt(ctx)
-		h.mu.Unlock()
-		return err
+	if turn != nil {
+		return turn.Interrupt(ctx)
 	}
-	// The worker run slot may be installed before its Run callback is scheduled.
-	h.pending = true
-	h.mu.Unlock()
 	return nil
 }
 

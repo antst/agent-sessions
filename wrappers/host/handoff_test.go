@@ -12,15 +12,16 @@ import (
 )
 
 type fakeTurn struct {
-	done       chan struct{}
-	waiting    chan struct{}
-	injected   chan string
-	interrupt  chan struct{}
-	injecting  chan struct{}
-	inject     chan struct{}
-	active     atomic.Bool
-	outcome    string
-	interrupts atomic.Int32
+	done           chan struct{}
+	waiting        chan struct{}
+	injected       chan string
+	interrupt      chan struct{}
+	injecting      chan struct{}
+	inject         chan struct{}
+	interruptBlock chan struct{}
+	active         atomic.Bool
+	outcome        string
+	interrupts     atomic.Int32
 }
 
 func (t *fakeTurn) Wait(context.Context) (sessionkit.TurnResult, error) {
@@ -43,6 +44,9 @@ func (t *fakeTurn) Inject(_ context.Context, message string) (bool, error) {
 func (t *fakeTurn) Interrupt(context.Context) error {
 	t.interrupts.Add(1)
 	close(t.interrupt)
+	if t.interruptBlock != nil {
+		<-t.interruptBlock
+	}
 	return nil
 }
 
@@ -102,6 +106,7 @@ func TestHandoffQueueAndInterrupt(t *testing.T) {
 	_, _ = h.Deliver(context.Background(), delivery("queued"))
 	turn := newFakeTurn(true)
 	turn.outcome = "interrupted"
+	turn.interruptBlock = make(chan struct{})
 	started := make(chan string, 1)
 	release := make(chan struct{})
 	run := asyncRun(h, func(context.Context, string) (Turn, error) {
@@ -120,11 +125,12 @@ func TestHandoffQueueAndInterrupt(t *testing.T) {
 	waitStartingInterrupt(h)
 	close(release)
 	<-turn.interrupt
-	must(t, <-interrupted)
 	close(turn.done)
 	if result := <-run; result.Outcome != "interrupted" || turn.interrupts.Load() != 1 {
 		t.Fatalf("result = %#v, interrupts = %d", result, turn.interrupts.Load())
 	}
+	close(turn.interruptBlock)
+	must(t, <-interrupted)
 	var nextPrompt string
 	nextTurn := newFakeTurn(false)
 	next := asyncRun(h, func(_ context.Context, prompt string) (Turn, error) {
@@ -193,21 +199,25 @@ func TestHandoffTerminalInjectionRace(t *testing.T) {
 	}
 }
 
-func TestHandoffPendingInterrupt(t *testing.T) {
+func TestHandoffBlockedActiveInterruptDoesNotBlockTerminal(t *testing.T) {
 	h := &Handoff{}
-	must(t, h.Interrupt(context.Background()))
 	turn := newFakeTurn(true)
-	turn.outcome = "interrupted"
-	called := false
-	run := asyncRun(h, func(ctx context.Context, prompt string) (Turn, error) {
-		called = true
-		return turn, nil
-	})
+	turn.interruptBlock = make(chan struct{})
+	run := asyncRun(h, func(context.Context, string) (Turn, error) { return turn, nil })
+	<-turn.waiting
+	interrupted := asyncInterrupt(h)
 	<-turn.interrupt
 	close(turn.done)
-	if result := <-run; !called || result.Outcome != "interrupted" {
-		t.Fatalf("start called = %v, result = %#v", called, result)
+	if result := <-run; result.Outcome != "completed" {
+		t.Fatalf("result = %#v", result)
 	}
+	receipt, err := h.Deliver(context.Background(), delivery("after"))
+	must(t, err)
+	if receipt.Disposition != "queued_for_next_turn" {
+		t.Fatalf("receipt = %#v", receipt)
+	}
+	close(turn.interruptBlock)
+	must(t, <-interrupted)
 }
 
 func TestHandoffQueueBounds(t *testing.T) {
