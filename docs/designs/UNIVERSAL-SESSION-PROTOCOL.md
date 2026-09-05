@@ -969,8 +969,8 @@ members. This is the complete product-facing contract:
 | --- | --- |
 | `hello(cancel)` | Return fixed product, version, supported open fields, and ordered extra-argument declarations after app-ready. |
 | `open(cancel, request)` | Create or resume from the typed request, apply its composed name as the product title where supported, and return the exact product session ID. |
-| `run(cancel, input)` | Start one native turn, observe it to a terminal result, and return that result. |
-| `interrupt(cancel)` | Ask the one current native turn to stop. |
+| `run(cancel, run, input)` | Start one native turn for the kit-owned `Run` token, observe it to a terminal result, and return that result. |
+| `interrupt(cancel, run)` | Ask the native turn identified by that same `Run` token to stop. |
 | `deliver(cancel, request)` | Receive the full closed `MessageDeliverRequest` `{message_id,from,body}`, inject now or queue for the next turn, and return the truthful closed receipt. |
 | `close(cancel)` | Stop accepting work, close native state, and release product resources. |
 
@@ -1028,6 +1028,17 @@ present or absent. The product's opened session reference is data, not a
 lifecycle state. There is no generation, projection, collector, archive phase,
 deadline, or reconnect state machine.
 
+The kit creates one `Run` token when it installs the run slot and passes that
+same object, with the same per-run cancellation context, to `run()` and
+`interrupt()`. `Run.Interrupted()` exposes the kit's coalesced interrupt mark;
+the kit sets it before calling `interrupt()`. `Run.Native` is the product's one
+product-synchronized slot for its native turn. The product publishes that slot
+under its own handoff lock and then rechecks `Run.Interrupted()`; `interrupt()`
+reads the slot under the same lock. Whichever side observes the other performs
+the one native interrupt. Once `run()` returns, the kit issues no new native
+interrupt, including while it writes the terminal result. A product or wrapper
+keeps no second starting, active, or interrupt-requested lifecycle bits.
+
 Before mutating an existing session, a native product must acquire exclusivity
 that excludes any competing process and hold it through native cleanup. A
 fresh product-minted ID is acquired immediately after allocation and before
@@ -1048,7 +1059,7 @@ request IDs correlate worker-originated session methods and inbound results, so
 `deliver`, `interrupt`, `session.close`, and those methods all proceed while
 `turn.run` is outstanding.
 
-The run slot is installed before `run()` starts. Under one slot mutex, the run
+The `Run` token is installed before `run()` starts. Under one slot mutex, the run
 handler validates the terminal result, writes its response, and clears the
 slot. A failed write closes the connection and leaves the slot occupied. A
 second run receives `busy` while native work remains; one arriving during the
@@ -1098,7 +1109,8 @@ delivery, and worker-originated session-method API are otherwise shared.
 
 ### 3.3 Go and JavaScript parity
 
-The schema generates the public SDK types `WorkerCallbacks`,
+The public SDK exposes `WorkerCallbacks`, the kit-owned `Run`, and the wire types
+generated from the schema:
 `HelloDescription`, `ExtraArgument`, `OpenOptions`, `OpenRequest`, `OpenResult`,
 `TurnResult`, `DeliverySource`, `DeliveryRequest`, `DeliveryReceipt`,
 `SessionSummary`, `HostProducts`, and `ProtocolError`; wrappers and products do
@@ -1128,8 +1140,9 @@ kits. The lifecycle cases are:
 3. completed, interrupted, and failed run results, including empty output and
    character-bounded truncation with the exact `truncated` flag;
 4. a blocked run plus a second run rejected before product code;
-5. concurrent interrupt requests for one run, with exactly one native
-   interrupt;
+5. concurrent interrupt requests for one run, with the kit mark visible on the
+   shared token, exactly one native interrupt callback, and no native turn
+   created when interruption wins the product handoff;
 6. delivery and a worker-originated session method completing while run remains blocked;
 7. close during run, with the terminal run response written before the close
    response;
