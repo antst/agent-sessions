@@ -960,7 +960,7 @@ lines, not as additions hidden behind relocation accounting:
 
 | Surface | Maximum | Constraint |
 | --- | ---: | --- |
-| `bus/internal/daemon` + `bus/internal/conn` | **1,400 proposed; owner decision pending** | Directory, session owners, row files, launch, delivery, federation, and the daemon socket pair together. |
+| `bus/internal/daemon` + `bus/internal/conn` | 1,400 | Directory, session owners, row files, launch, delivery, federation, and the daemon socket pair together. |
 | Largest daemon router file | 450 | No product literal, argv parser, or product callback. |
 | Durable row files | 120 | Load, write+rename, and delete for the six stored columns. |
 | Connection admission | 150 | First hello, both peer re-hello branches, and supersession. |
