@@ -1204,6 +1204,13 @@ peer identity every fixed `peerReconnectInterval = 2s`, with no backoff,
 jitter, or attempt cap. A call made while disconnected fails `not_connected`
 and is never replayed. `session.superseded` tombstones that identity instance
 and stops retries permanently.
+The peer kit keeps one JSON-round-trip snapshot as the desired identity. After
+each hello response it compares what it sent with that desired value and sends
+the current value immediately until they match; a change crossed with connect
+or another re-hello therefore cannot leave the older value installed. Its
+`rehello(name, info)` call preserves the product, session ID, and groups. While
+disconnected it stores the new desired name and information and returns
+`not_connected`.
 The product's current title is the peer name. A same-ID re-hello updates that
 name and information in place only when the declared groups slice is exactly
 equal, including order. A
@@ -1221,12 +1228,16 @@ generated from the schema:
 `SessionSummary`, `HostProducts`, and `ProtocolError`; wrappers and products do
 not hand-maintain protocol-shaped duplicates. The worker entry is
 `serveWorker(callbacks, env)`, which returns the kit-owned `closed` signal. Peer
-mode is `connectPeer(identity, deliver)` plus `rehello(identity)`. A
+mode is `connectPeer(identity, deliver)` plus `rehello(name, info)`. A
 connection-bound client supplies `list`, `send`, `describe`, `spawn`, `resume`,
 `run`, `interrupt`, and `close(forget)` and is usable from every callback
 without blocking the reader. Go also exports one thin no-hello client:
 `Dial(socket)`, `Call(ctx, method, params)`, and `Close`; the caller kit and a
 wrapper's private lane socket use that one framed implementation.
+
+Go constructs one caller for each worker before `Serve` and binds it to the
+worker's current connection through `Worker.Call`; repeated `Worker.Caller()`
+calls return that same object, including when called before `Serve`.
 
 `start`, `status`, and `wait` are caller conveniences for resident callers such
 as plugins and the shared MCP server. They are not wire methods or
@@ -1247,7 +1258,8 @@ worker mode has none.
 The Go host and JavaScript worker mode implement the preceding algorithm, not
 two interpretations of it. Each uses a small interpreter over the published
 schema with no external validation library. Both are tested against
-`bus/internal/protocol/session.fixtures.json`, and both run the same ordinary
+`bus/internal/protocol/session.fixtures.json`; both caller kits also execute
+`bus/internal/protocol/caller-sugar.fixtures.json`. Both run the same ordinary
 table-driven lifecycle cases with fake product callbacks and a fake duplex
 connection. The schema and fixtures are published for vendors to test their
 kits. The lifecycle cases are:
@@ -1299,9 +1311,10 @@ The size contract is final logical lines:
 | Reference surface | Production | Tests |
 | --- | ---: | ---: |
 | Go transport (`bus/internal/rpc`) | 200 | 250 |
-| Go worker host | 200 | 250 |
+| Go worker host | 205 | 250 |
 | JavaScript client plus worker mode | 200 | 250 |
-| Go caller kit | 250 | 250 |
+| Go caller kit | 250 | 400 |
+| Go no-hello client (`client.go`) | 30 | — |
 | JavaScript caller kit | 150 | 150 |
 | Reference caller | 200 | 200 |
 | Reference worker | 250 | 150 |
@@ -1309,7 +1322,8 @@ The size contract is final logical lines:
 | Shared lifecycle fixture data | — | 220 |
 
 Generic connection framing is counted in Section 2, not duplicated into either
-worker host. A kit
+worker host. The no-hello client's tests are counted in the Go caller-kit test
+budget; it has no separate test allowance. A kit
 exceeding these limits has grown product policy or a third lifecycle fact and
 must be simplified.
 
@@ -1619,7 +1633,8 @@ The caller/reference size contract is final logical lines:
 
 | Reference surface | Production | Tests |
 | --- | ---: | ---: |
-| Go caller kit | 250 | 250 |
+| Go caller kit | 250 | 400 |
+| Go no-hello client (`client.go`) | 30 | — |
 | JavaScript caller kit, additional to the 200-line JavaScript client/worker cap | 150 | 150 |
 | Reference caller | 200 | 200 |
 | Reference worker | 250 | 150 |
