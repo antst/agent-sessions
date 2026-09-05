@@ -30,7 +30,8 @@ type Run struct {
 	interrupted atomic.Bool
 }
 
-func (r *Run) Interrupted() bool { return r.interrupted.Load() }
+func (r *Run) Interrupted() bool     { return r.interrupted.Load() }
+func (r *Run) Done() <-chan struct{} { return r.done }
 
 type Worker struct {
 	product WorkerCallbacks
@@ -68,7 +69,9 @@ func (w *Worker) Serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	w.mu.Lock()
 	w.conn = rpc.New(fd, true, w.handle)
+	w.mu.Unlock()
 	w.context, w.cancel = context.WithCancel(w.conn.Context())
 	request := protocol.WorkerHello{Protocol: 1, LaunchToken: token, HelloDescription: hello}
 	if err = w.conn.Call(ctx, "session.hello", request, &struct{}{}); err == nil {
@@ -82,6 +85,15 @@ func (w *Worker) Serve(ctx context.Context) error {
 
 func (w *Worker) Call(ctx context.Context, method string, params, result any) error {
 	return w.conn.Call(ctx, method, params, result)
+}
+
+func (w *Worker) Shutdown() {
+	w.mu.Lock()
+	connection := w.conn
+	w.mu.Unlock()
+	if connection != nil {
+		_ = connection.Close()
+	}
 }
 
 func (w *Worker) handle(_ context.Context, request *rpc.Request) {

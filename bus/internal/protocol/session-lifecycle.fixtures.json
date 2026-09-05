@@ -13,6 +13,8 @@
     {"name":"terminal-before-interrupt", "calls":[1,1,1,0,0,0]},
     {"name":"idle-close-deliver", "calls":[1,1,0,0,1,1]},
     {"name":"callback-originated-method", "calls":[1,1,1,0,1,0]},
-    {"name":"environment", "calls":[0,0,0,0,0,0]}
+    {"name":"environment", "calls":[0,0,0,0,0,0]},
+    {"name":"run-done", "calls":[1,1,1,0,0,0]},
+    {"name":"shutdown", "calls":[1,0,0,0,0,0]}
   ]
 }
