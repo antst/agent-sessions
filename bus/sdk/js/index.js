@@ -104,7 +104,7 @@ class Peer {
     this.ready = this._open();
     this.caller = new Caller(this, options.caller);
   }
-  call(method, params, signal) { if (!this.connection) throw new Error("not connected"); return this.connection.call(method, params, signal); }
+  call(method, params, signal) { if (!this.connection) return Promise.reject(new Error("not connected")); return this.connection.call(method, params, signal); }
   async rehello(identity) { const next = snapshot(identity); await this.call("session.hello", { protocol: 1, ...next }); this.identity = next; }
   shutdown() { this.terminal = true; this.connection?.close(); this.finish(); }
   async _open() {

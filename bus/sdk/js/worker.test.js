@@ -45,6 +45,13 @@ test("connection write failure rejects once", async (t) => {
   await assert.rejects(connection.call("session.list", {}), /write failed/); await Promise.resolve(); assert.equal(connection.pending.size, 0);
 });
 
+test("pre-aborted call has no pending request or write", async (t) => {
+  const [clientSocket, daemonSocket] = pair(); const connection = new Connection(clientSocket, true); let seen = 0; daemonSocket.on("data", (body) => { seen += body.length; });
+  t.after(() => { connection.close(); daemonSocket.destroy(); });
+  const cancel = new AbortController(); cancel.abort(new Error("already cancelled")); await assert.rejects(connection.call("session.list", {}, cancel.signal), /already cancelled/);
+  assert.equal(seen, 0); assert.equal(connection.pending.size, 0);
+});
+
 test("worker closed resolves when product close rejects", async (t) => {
   const product = new FakeProduct(); product.closeError = true; const { worker, daemon, serving } = await harness(t, product); daemon.close();
   await worker.closed; assert.match((await serving).message, /close failed/);
@@ -123,11 +130,11 @@ async function peerLifetime() {
   const peer = connectPeer(identity, async () => { deliveries++; return { disposition: "injected" }; }, env, { connect: () => { const [client, server] = pair(); const daemon = new Connection(server, false, (request) => {
     if (request.method === "session.hello") { if (currentIdentity?.session_id === request.params.session_id && JSON.stringify(currentIdentity.groups) !== JSON.stringify(request.params.groups)) void daemon.error(request, -32602); else { currentIdentity = request.params; void daemon.result(request, {}); } }
   }); connections.push(daemon); return client; }, schedule: (call, milliseconds) => { scheduled.push({ call, milliseconds }); scheduledReady.resolve(); } });
-  await peer.ready; assert.deepEqual(env, {}); identity.groups.push("mutated"); identity.info.changed = true; connections[0].close(); await scheduledReady.promise; assert.throws(() => peer.call("session.list", {}), /not connected/); assert.equal(scheduled[0].milliseconds, 2000); scheduledReady = deferred(); scheduled.shift().call(); await peer.ready;
+  await peer.ready; assert.deepEqual(env, {}); identity.groups.push("mutated"); identity.info.changed = true; connections[0].close(); await scheduledReady.promise; await assert.rejects(peer.call("session.list", {}), /not connected/); assert.equal(connections.length, 1); assert.equal(scheduled[0].milliseconds, 2000); scheduledReady = deferred(); scheduled.shift().call(); await peer.ready;
   assert.deepEqual(currentIdentity.groups, ["shared"]); assert.deepEqual(currentIdentity.info, {}); identity.groups.pop(); delete identity.info.changed;
   assert.equal((await connections[1].call("message.deliver", delivery)).disposition, "injected"); assert.equal(deliveries, 1);
   const renamed = { ...identity, name: "renamed", groups: ["shared"], info: {} }; await peer.rehello(renamed); assert.equal(currentIdentity.name, "renamed"); renamed.groups.push("mutated"); renamed.info.changed = true;
-  connections[1].close(); await scheduledReady.promise; assert.throws(() => peer.call("session.list", {}), /not connected/); scheduled.shift().call(); await peer.ready; assert.deepEqual(currentIdentity.groups, ["shared"]); assert.deepEqual(currentIdentity.info, {});
+  connections[1].close(); await scheduledReady.promise; await assert.rejects(peer.call("session.list", {}), /not connected/); assert.equal(connections.length, 2); scheduled.shift().call(); await peer.ready; assert.deepEqual(currentIdentity.groups, ["shared"]); assert.deepEqual(currentIdentity.info, {});
   await errorCode(peer.rehello({ ...identity, groups: ["changed"] }), -32602); assert.deepEqual(peer.identity.groups, ["shared"]);
   await peer.rehello({ ...identity, session_id: "session-2", name: "other" }); assert.equal(currentIdentity.session_id, "session-2");
   await connections[2].call("session.superseded", {}); await peer.closed; assert.equal(scheduled.length, 0);
