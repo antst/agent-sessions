@@ -78,3 +78,13 @@ test("connection loss removes local runs and reports a resumable lane", async ()
   assert.deepEqual(await waiting, { turn_id: id, session_id: "lane@local", state: "unavailable", reason: "result unavailable, lane resumable" });
   assert.throws(() => caller.status({ turn_id: id }), /unknown_turn/);
 });
+
+test("wire run error becomes an unavailable result", async (t) => {
+  const [clientSocket, daemonSocket] = pair();
+  const daemon = new Connection(daemonSocket, false, (request) => { void daemon.error(request, -32004); });
+  const connection = new Connection(clientSocket, true); const caller = new Caller(connection);
+  t.after(() => { connection.close(); daemon.close(); });
+  const id = caller.start({ session_id: "lane@local", input: "work" }).turn_id;
+  assert.deepEqual(await caller.wait({ turn_id: id }), { turn_id: id, session_id: "lane@local", state: "unavailable", reason: "-32004 not_running" });
+  assert.throws(() => caller.status({ turn_id: id }), /unknown_turn/);
+});

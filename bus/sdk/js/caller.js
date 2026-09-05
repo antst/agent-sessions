@@ -30,10 +30,10 @@ class Caller {
     const id = `t-${++this.next}`;
     let finish;
     const record = { id, session_id: request.session_id, state: "running", settled: new Promise((resolve) => { finish = resolve; }) };
+    record.finish = finish;
     this.runs.set(id, record);
     this.targets.set(request.session_id, record);
-    this.run(request).then((result) => this._settle(record, "done", result), (error) => this._settle(record, error instanceof ProtocolError ? "failed" : "unavailable", error));
-    record.finish = finish;
+    Promise.resolve().then(() => this.run(request)).then((result) => this._settle(record, "done", result), (error) => this._settle(record, "unavailable", error instanceof ProtocolError ? `${error.code} ${error.message}` : "result unavailable, lane resumable"));
     return { turn_id: id };
   }
 
@@ -42,7 +42,6 @@ class Caller {
     const run = this._find(request);
     if (run.state === "running") return this._view(run);
     this.runs.delete(run.id);
-    if (run.state === "failed") throw run.result;
     return this._view(run);
   }
 
@@ -74,7 +73,7 @@ class Caller {
   _view(run) {
     const value = { turn_id: run.id, session_id: run.session_id, state: run.state };
     if (run.state === "done") value.result = run.result;
-    if (run.state === "unavailable") value.reason = "result unavailable, lane resumable";
+    if (run.state === "unavailable") value.reason = run.result;
     return value;
   }
 }

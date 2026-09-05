@@ -38,34 +38,32 @@ class Worker {
       this.connection = new Connection(stream, true, (request) => this._handle(request));
       this.connection.signal.addEventListener("abort", () => this.controller.abort(this.connection.signal.reason), { once: true });
       await this.connection.call("session.hello", { protocol: 1, launch_token: token, ...hello }, this.controller.signal); cause = await this.connection.done; throw cause;
-    } finally {
-      this.run?.finish?.(); await this._closeProduct(); this.finish(cause);
-    }
+    } finally { this.run?.finish?.(); try { await this._closeProduct(); } finally { this.finish(cause); } }
   }
   call(method, params, signal = this.controller.signal) { return this.connection.call(method, params, signal); }
   shutdown() { this.connection?.close(); }
   Shutdown() { this.shutdown(); }
   _handle(request) {
     if (request.method === "session.superseded") { void this.connection.result(request, {}).finally(() => this.shutdown()); return; }
-    if (request.method === "session.open") { void this._open(request); return; }
+    if (request.method === "session.open") { queueMicrotask(() => void this._open(request)); return; }
     if (request.method === "turn.run") {
       if (!this.opened || this.run) { void this.connection.error(request, -32003); return; }
-      const run = new Run(this.controller.signal); this.run = run; void this._run(request, run); return;
+      const run = new Run(this.controller.signal); this.run = run; queueMicrotask(() => void this._run(request, run)); return;
     }
     if (request.method === "turn.interrupt") {
       if (!this.run) { void this.connection.error(request, -32004); return; }
       if (!this.run.Done) { void this.connection.result(request, {}); return; }
       if (this.run.controller.signal.aborted) { void this.connection.error(request, -32004); return; }
-      const run = this.run, call = !run.interrupted; run.interrupted = true; void this._interrupt(request, run, call); return;
+      const run = this.run, call = !run.interrupted; run.interrupted = true; queueMicrotask(() => void this._interrupt(request, run, call)); return;
     }
-    if (request.method === "message.deliver") { if (this.run && !this.run.Done) void this.connection.result(request, { disposition: "rejected", reason: "closing" }); else void this._deliver(request); return; }
+    if (request.method === "message.deliver") { if (this.run && !this.run.Done) void this.connection.result(request, { disposition: "rejected", reason: "closing" }); else queueMicrotask(() => void this._deliver(request)); return; }
     if (request.method === "session.close") {
       const run = this.run;
       if (run && !run.Done) return this.shutdown();
       this.run = {};
       const call = run && !run.interrupted;
       if (run) run.interrupted = true;
-      void this._close(request, run, call);
+      queueMicrotask(() => void this._close(request, run, call));
     }
   }
   async _open(request) {
@@ -96,7 +94,7 @@ class Worker {
 
 class Peer {
   constructor(identity, deliver, env, options) {
-    this.identity = identity;
+    this.identity = snapshot(identity);
     this.deliver = deliver;
     this.connect = options.connect || ((path) => net.createConnection(path));
     this.schedule = options.schedule || ((call) => setTimeout(call, 2000));
@@ -106,8 +104,8 @@ class Peer {
     this.ready = this._open();
     this.caller = new Caller(this, options.caller);
   }
-  call(method, params, signal) { if (!this.connection) return Promise.reject(new Error("agentbus connection closed")); return this.connection.call(method, params, signal); }
-  async rehello(identity) { await this.call("session.hello", { protocol: 1, ...identity }); this.identity = identity; }
+  call(method, params, signal) { if (!this.connection) throw new Error("not connected"); return this.connection.call(method, params, signal); }
+  async rehello(identity) { const next = snapshot(identity); await this.call("session.hello", { protocol: 1, ...next }); this.identity = next; }
   shutdown() { this.terminal = true; this.connection?.close(); this.finish(); }
   async _open() {
     if (this.terminal) return; let connection; try { connection = new Connection(this.connect(this.socket), true, (request) => this._handle(request, connection)); } catch { this.schedule(() => { this.ready = this._open(); }, 2000); return; } this.connection = connection;
@@ -123,6 +121,7 @@ class Peer {
 
 function connectPeer(identity, deliver, env = process.env, options = {}) { return new Peer(identity, deliver, env, options); }
 function serveWorker(callbacks, env = process.env, options = {}) { const worker = new Worker(callbacks, env, options); worker.serving = worker.serve().catch((error) => error); return worker; }
+function snapshot(identity) { return { ...identity, groups: [...identity.groups], info: structuredClone(identity.info) }; }
 function environment(env, worker) { const values = Object.fromEntries(ENV.map((name) => [name, env[name]])); for (const name of ENV) delete env[name]; if (!values.AGENTBUS_SOCKET) throw new Error("agentbus socket is required"); if (values.AGENTBUS_LOCAL_KEY) throw new Error("local key transport not implemented in this build"); if (worker && !values.AGENTBUS_LAUNCH_TOKEN) throw new Error("launch token is required"); return { socket: values.AGENTBUS_SOCKET, token: values.AGENTBUS_LAUNCH_TOKEN }; }
 function terminal(result = {}) { if (!result || typeof result !== "object") return result; if (!Object.hasOwn(result, "result")) result = { ...result, result: "" }; if (typeof result.result !== "string") return result; const characters = [...result.result]; return { ...result, result: characters.slice(0, 262144).join(""), ...(characters.length > 262144 ? { truncated: true } : {}) }; }
 function clean(error) { return String(error?.message || error || "product callback failed"); }

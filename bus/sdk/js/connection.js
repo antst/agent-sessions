@@ -27,8 +27,9 @@ class Connection {
   async call(method, params, signal) {
     const spec = METHODS[method]; if (!spec) throw new Error("invalid method"); const id = ++this.next; if (!Number.isSafeInteger(id)) throw new Error("request id space exhausted");
     let accept, reject; const result = new Promise((yes, no) => { accept = yes; reject = no; }); this.pending.set(id, { method, accept, reject });
+    const response = result.then((value) => [true, value], (error) => [false, error]);
     const abort = () => { if (this.pending.delete(id)) reject(signal.reason || new Error("aborted")); }; signal?.addEventListener("abort", abort, { once: true });
-    try { await this._send({ jsonrpc: "2.0", id, method, params: JSON.parse(encode(spec[0], params)) }); return await result; }
+    try { await this._send({ jsonrpc: "2.0", id, method, params: JSON.parse(encode(spec[0], params)) }); const [ok, value] = await response; if (!ok) throw value; return value; }
     catch (error) { this.pending.delete(id); throw error; }
     finally { signal?.removeEventListener("abort", abort); }
   }

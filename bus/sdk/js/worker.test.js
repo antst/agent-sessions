@@ -24,6 +24,7 @@ class FakeProduct {
   open(_cancel, request) { this.calls[1]++; assert.deepEqual(request, openRequest); return { session_id: "product-session" }; }
   async run(cancel, run, input) {
     this.calls[2]++;
+    if (input === "admission") { assert.equal(this.admitted, true); this.started.resolve(); return { outcome: "completed", result: "" }; }
     if (input === "block") { this.started.resolve(run); await this.release.promise; if (run.Interrupted()) return { outcome: "interrupted", result: "" }; run.Native = "native"; return { outcome: "completed", result: "" }; }
     if (input === "eof") { this.started.resolve(run); await aborted(cancel); throw cancel.reason; }
     if (input === "fail") return Promise.reject(new Error("failed exactly"));
@@ -35,8 +36,26 @@ class FakeProduct {
     this.calls[4]++; if (this.deliverStart) { this.deliverStart.resolve(); await aborted(cancel); throw cancel.reason; }
     if (this.outbound) await this.worker.caller.list({}); return { disposition: "injected" };
   }
-  async close(cancel) { this.calls[5]++; assert.equal(cancel.aborted, true); this.closeStart?.resolve(); if (this.closeEnd) await this.closeEnd.promise; }
+  async close(cancel) { this.calls[5]++; assert.equal(cancel.aborted, true); this.closeStart?.resolve(); if (this.closeEnd) await this.closeEnd.promise; if (this.closeError) throw new Error("close failed"); }
 }
+
+test("connection write failure rejects once", async (t) => {
+  const [clientSocket, daemonSocket] = pair(); clientSocket.failNext = true; const connection = new Connection(clientSocket, true);
+  t.after(() => { connection.close(); daemonSocket.destroy(); });
+  await assert.rejects(connection.call("session.list", {}), /write failed/); await Promise.resolve(); assert.equal(connection.pending.size, 0);
+});
+
+test("worker closed resolves when product close rejects", async (t) => {
+  const product = new FakeProduct(); product.closeError = true; const { worker, daemon, serving } = await harness(t, product); daemon.close();
+  await worker.closed; assert.match((await serving).message, /close failed/);
+});
+
+test("one chunk is admitted before its first callback", async (t) => {
+  const product = new FakeProduct(); product.started = deferred(); const { worker } = await harness(t, product);
+  worker.connection.result = () => Promise.resolve(); worker.connection.error = () => { product.admitted = true; return Promise.resolve(); };
+  const frame = (id, input) => JSON.stringify({ jsonrpc: "2.0", id, method: "turn.run", params: { ...target, input } }) + "\n";
+  worker.connection._data(Buffer.from(frame(2, "admission") + frame(3, "again"))); await product.started.promise;
+});
 
 async function harness(t, product, options = {}) {
   const [workerSocket, daemonSocket] = pair(); const hello = deferred(); const env = { AGENTBUS_LAUNCH_TOKEN: "token", AGENTBUS_LOCAL_KEY: "", AGENTBUS_SOCKET: "/fixture/socket" }; product.env = env;
@@ -99,14 +118,17 @@ for (const row of rows) test(`lifecycle: ${row.name}`, async (t) => {
 });
 
 async function peerLifetime() {
-  const connections = [], scheduled = [], scheduledReady = deferred(); const env = { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }; let currentIdentity, deliveries = 0;
+  const connections = [], scheduled = []; let scheduledReady = deferred(); const env = { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }; let currentIdentity, deliveries = 0;
   const identity = { product: "native-product", session_id: "session-1", name: "peer", groups: ["shared"], info: {} };
   const peer = connectPeer(identity, async () => { deliveries++; return { disposition: "injected" }; }, env, { connect: () => { const [client, server] = pair(); const daemon = new Connection(server, false, (request) => {
     if (request.method === "session.hello") { if (currentIdentity?.session_id === request.params.session_id && JSON.stringify(currentIdentity.groups) !== JSON.stringify(request.params.groups)) void daemon.error(request, -32602); else { currentIdentity = request.params; void daemon.result(request, {}); } }
   }); connections.push(daemon); return client; }, schedule: (call, milliseconds) => { scheduled.push({ call, milliseconds }); scheduledReady.resolve(); } });
-  await peer.ready; assert.deepEqual(env, {}); connections[0].close(); await scheduledReady.promise; assert.equal(scheduled[0].milliseconds, 2000); scheduled.shift().call(); await peer.ready;
+  await peer.ready; assert.deepEqual(env, {}); identity.groups.push("mutated"); identity.info.changed = true; connections[0].close(); await scheduledReady.promise; assert.throws(() => peer.call("session.list", {}), /not connected/); assert.equal(scheduled[0].milliseconds, 2000); scheduledReady = deferred(); scheduled.shift().call(); await peer.ready;
+  assert.deepEqual(currentIdentity.groups, ["shared"]); assert.deepEqual(currentIdentity.info, {}); identity.groups.pop(); delete identity.info.changed;
   assert.equal((await connections[1].call("message.deliver", delivery)).disposition, "injected"); assert.equal(deliveries, 1);
-  await peer.rehello({ ...identity, name: "renamed" }); assert.equal(currentIdentity.name, "renamed"); await errorCode(peer.rehello({ ...identity, groups: ["changed"] }), -32602); assert.deepEqual(peer.identity.groups, ["shared"]);
+  const renamed = { ...identity, name: "renamed", groups: ["shared"], info: {} }; await peer.rehello(renamed); assert.equal(currentIdentity.name, "renamed"); renamed.groups.push("mutated"); renamed.info.changed = true;
+  connections[1].close(); await scheduledReady.promise; assert.throws(() => peer.call("session.list", {}), /not connected/); scheduled.shift().call(); await peer.ready; assert.deepEqual(currentIdentity.groups, ["shared"]); assert.deepEqual(currentIdentity.info, {});
+  await errorCode(peer.rehello({ ...identity, groups: ["changed"] }), -32602); assert.deepEqual(peer.identity.groups, ["shared"]);
   await peer.rehello({ ...identity, session_id: "session-2", name: "other" }); assert.equal(currentIdentity.session_id, "session-2");
-  await connections[1].call("session.superseded", {}); await peer.closed; assert.equal(scheduled.length, 0);
+  await connections[2].call("session.superseded", {}); await peer.closed; assert.equal(scheduled.length, 0);
 }
