@@ -295,12 +295,12 @@ func (p *Wrapper) start(ctx context.Context, prompt string) (host.Turn, error) {
 	}
 }
 
-func (p *Wrapper) inject(ctx context.Context, prompt string) (bool, error) {
+func (p *Wrapper) inject(ctx context.Context, prompt string) (host.Injection, error) {
 	p.mu.Lock()
 	t := p.active
 	if t == nil || !t.started {
 		p.mu.Unlock()
-		return false, nil
+		return host.NotInjected, nil
 	}
 	threadID, turnID := p.id, t.id
 	p.mu.Unlock()
@@ -309,15 +309,18 @@ func (p *Wrapper) inject(ctx context.Context, prompt string) (bool, error) {
 	}
 	err := p.app.call(ctx, "turn/steer", map[string]any{"threadId": threadID, "expectedTurnId": turnID, "input": textInput(prompt)}, &result)
 	if err != nil {
-		return false, err
+		return host.NotInjected, err
 	}
 	if result.TurnID != turnID {
-		return false, fmt.Errorf("Codex App Server steered turn %q, expected %q", result.TurnID, turnID)
+		return host.NotInjected, fmt.Errorf("Codex App Server steered turn %q, expected %q", result.TurnID, turnID)
 	}
 	p.mu.Lock()
 	active := p.active == t && t.started
 	p.mu.Unlock()
-	return active, nil
+	if active {
+		return host.Injected, nil
+	}
+	return host.NotInjected, nil
 }
 
 func (t *turn) Wait(ctx context.Context) (sessionkit.TurnResult, error) {

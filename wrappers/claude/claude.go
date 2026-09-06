@@ -178,13 +178,13 @@ func (p *Wrapper) start(ctx context.Context, prompt string) (host.Turn, error) {
 	return t, nil
 }
 
-func (p *Wrapper) inject(_ context.Context, prompt string) (bool, error) {
+func (p *Wrapper) inject(_ context.Context, prompt string) (host.Injection, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.active == nil || p.failed != nil {
-		return false, nil
+		return host.NotInjected, nil
 	}
-	return true, p.write(prompt)
+	return host.Injected, p.write(prompt)
 }
 
 func (p *Wrapper) write(prompt string) error {

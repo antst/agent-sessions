@@ -173,8 +173,8 @@ func TestLaneRunSteerAndTerminal(t *testing.T) {
 	native := <-started
 	injected := make(chan error, 1)
 	go func() {
-		ok, err := p.inject(context.Background(), "delivery")
-		if !ok && err == nil {
+		outcome, err := p.inject(context.Background(), "delivery")
+		if outcome != host.Injected && err == nil {
 			err = context.Canceled
 		}
 		injected <- err
@@ -246,21 +246,21 @@ func TestLaneTerminalBeforeSteerResponseQueuesDelivery(t *testing.T) {
 	writeRaw(t, server, `{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-3","status":"inProgress"}}}`)
 	native := <-started
 	injected := make(chan struct {
-		ok  bool
-		err error
+		outcome host.Injection
+		err     error
 	}, 1)
 	go func() {
-		ok, err := p.inject(context.Background(), "late")
+		outcome, err := p.inject(context.Background(), "late")
 		injected <- struct {
-			ok  bool
-			err error
-		}{ok, err}
+			outcome host.Injection
+			err     error
+		}{outcome, err}
 	}()
 	request = readAppRequest(t, server)
 	writeRaw(t, server, `{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-3","status":"completed"}}}`)
 	writeApp(t, server, map[string]any{"id": request.ID, "result": map[string]string{"turnId": "turn-3"}})
-	if got := <-injected; got.ok || got.err != nil {
-		t.Fatalf("inject = %v, %v", got.ok, got.err)
+	if got := <-injected; got.outcome != host.NotInjected || got.err != nil {
+		t.Fatalf("inject = %v, %v", got.outcome, got.err)
 	}
 	waited := make(chan error, 1)
 	go func() { _, err := native.Wait(context.Background()); waited <- err }()
