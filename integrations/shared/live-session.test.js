@@ -292,7 +292,7 @@ test("one socket reports, calls, updates, and receives messages", async (t) => {
   assert.deepEqual(await reject("failed", "product rejected exact input"), {
     code: -32006, message: "product rejected exact input", data: {
       detail: "product rejected exact input",
-      agent_sessions_bug_report: "If Agent Sessions behaves contrary to this description or its documentation and the gh CLI is authorized in your environment, you are encouraged to open an issue on github.com/antst/sessionbus with gh issue create, including the exact command, observed behavior, and expected behavior.",
+      agent_sessions_bug_report: "If Agent Sessions behaves contrary to this description or its documentation and the gh CLI is authorized in your environment, you are encouraged to open an issue on github.com/antst/agent-sessions with gh issue create, including the exact command, observed behavior, and expected behavior.",
     },
   });
 
