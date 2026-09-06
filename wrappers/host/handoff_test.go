@@ -41,7 +41,7 @@ func TestHandoffDeliveryAndQueueCommit(t *testing.T) {
 	receipt, err := h.Deliver(context.Background(), delivery("active"), func(_ context.Context, message string) (Injection, error) { injected = message; return Injected, nil })
 	must(t, err)
 	check(t, receipt.Disposition == "injected" && strings.Contains(injected, "active"), "active receipt = %#v", receipt)
-	check(t, len(h.Claim()) == 0, "claimed injection stayed pending")
+	check(t, len(h.Claim()) == 0 && h.queueSize == 0, "claimed injection stayed pending: size %d", h.queueSize)
 	started, release := make(chan struct{}), make(chan struct{})
 	delivered := make(chan sessionkit.DeliveryReceipt, 1)
 	go func() {
@@ -57,7 +57,7 @@ func TestHandoffDeliveryAndQueueCommit(t *testing.T) {
 	close(next.done)
 	_, err = h.Run(context.Background(), &sessionkit.Run{}, "", func(_ context.Context, got string) (Turn, error) { prompt = got; return next, nil })
 	must(t, err)
-	check(t, strings.Count(prompt, "racing") == 1 && strings.Index(prompt, "racing") < strings.Index(prompt, "after"), "next prompt = %q", prompt)
+	check(t, !strings.Contains(prompt, "active") && strings.Count(prompt, "racing") == 1 && strings.Index(prompt, "racing") < strings.Index(prompt, "after") && h.queueSize == 0, "next prompt/size = %q/%d", prompt, h.queueSize)
 }
 
 func TestHandoffFailedCreationKeepsFullQueue(t *testing.T) {
@@ -103,8 +103,9 @@ func TestHandoffClaimAndFinish(t *testing.T) {
 	check(t, len(h.Claim()) == 0, "pending delivery was claimed")
 	close(release)
 	check(t, (<-done).Disposition == "injected", "delivery was not injected")
+	check(t, h.queueSize > 0, "pending delivery released its charge")
 	claimed := h.Claim()
-	check(t, len(claimed) == 1 && strings.Contains(string(claimed[0]), "active") && len(h.Claim()) == 0, "claim = %#v", claimed)
+	check(t, len(claimed) == 1 && strings.Contains(string(claimed[0]), "active") && len(h.Claim()) == 0 && h.queueSize == 0, "claim/size = %#v/%d", claimed, h.queueSize)
 
 	_, _ = h.Deliver(context.Background(), delivery("unclaimed"), func(context.Context, string) (Injection, error) { return Pending, nil })
 	_, _ = h.Deliver(context.Background(), delivery("idle"), nil)
@@ -126,7 +127,7 @@ func TestHandoffClaimAndFinish(t *testing.T) {
 	close(next.done)
 	_, err := h.Run(context.Background(), &sessionkit.Run{}, "", func(_ context.Context, got string) (Turn, error) { prompt = got; return next, nil })
 	must(t, err)
-	check(t, strings.Count(prompt, "unclaimed") == 1 && strings.Count(prompt, "idle") == 1 && strings.Count(prompt, "crossed") == 1 && strings.Index(prompt, "unclaimed") < strings.Index(prompt, "idle"), "prompt = %q", prompt)
+	check(t, strings.Count(prompt, "unclaimed") == 1 && strings.Count(prompt, "idle") == 1 && strings.Count(prompt, "crossed") == 1 && strings.Index(prompt, "unclaimed") < strings.Index(prompt, "idle") && h.queueSize == 0, "prompt/size = %q/%d", prompt, h.queueSize)
 }
 
 type workerProduct struct {
