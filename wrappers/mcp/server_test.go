@@ -19,6 +19,20 @@ type fakeBackend struct {
 	calls  int
 }
 
+type preparedBackend struct {
+	prepared bool
+	caller   *sessionkit.Caller
+}
+
+func (b *preparedBackend) Call(context.Context, string, any) (json.RawMessage, error) {
+	return nil, errors.New("backend call bypassed caller")
+}
+func (b *preparedBackend) Caller() *sessionkit.Caller { return b.caller }
+func (b *preparedBackend) Prepare(context.Context) error {
+	b.prepared = true
+	return nil
+}
+
 func (b *fakeBackend) Call(_ context.Context, method string, params any) (json.RawMessage, error) {
 	encoded, _ := json.Marshal(params)
 	b.method, b.params, b.calls = method, string(encoded), b.calls+1
@@ -94,6 +108,16 @@ func TestToolArgumentsMustBeObject(t *testing.T) {
 			check(t, failed["code"] == float64(-32602) && backend.calls == 0, "response/backend = %#v/%#v", response, backend)
 		})
 	}
+}
+
+func TestServerUsesBackendCallerAfterPrepare(t *testing.T) {
+	backend := &preparedBackend{caller: sessionkit.NewCaller(func(_ context.Context, method string, _ any) (json.RawMessage, error) {
+		check(t, method == "session.list", "method = %q", method)
+		return json.RawMessage(`{"sessions":[]}`), nil
+	})}
+	response, err := serveOne(&Server{Backend: backend}, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"list"}}}`)
+	check(t, err == nil, "serve: %v", err)
+	check(t, response["error"] == nil && backend.prepared, "response = %#v, prepared = %v", response, backend.prepared)
 }
 
 func TestServerReturnsOutputFailure(t *testing.T) {
