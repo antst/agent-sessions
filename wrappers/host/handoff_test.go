@@ -89,6 +89,8 @@ func TestHandoffFailedCreationKeepsFullQueue(t *testing.T) {
 
 func TestHandoffFailedCreationRestoresPendingDelivery(t *testing.T) {
 	h := &Handoff{}
+	_, err := h.Deliver(context.Background(), delivery("older"), nil)
+	must(t, err)
 	creating, fail, injecting, release := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	runDone := make(chan error, 1)
 	go func() {
@@ -116,9 +118,9 @@ func TestHandoffFailedCreationRestoresPendingDelivery(t *testing.T) {
 	check(t, (<-delivered).Disposition == "queued_for_next_turn", "failed-start delivery was acknowledged")
 	next, prompt := newFakeTurn(), ""
 	close(next.done)
-	_, err := h.Run(context.Background(), &sessionkit.Run{}, "next", func(_ context.Context, got string) (Turn, error) { prompt = got; return next, nil })
+	_, err = h.Run(context.Background(), &sessionkit.Run{}, "next", func(_ context.Context, got string) (Turn, error) { prompt = got; return next, nil })
 	must(t, err)
-	check(t, strings.Count(prompt, "pending") == 1 && h.queueSize == 0, "prompt/size = %q/%d", prompt, h.queueSize)
+	check(t, strings.Count(prompt, "older") == 1 && strings.Count(prompt, "pending") == 1 && strings.Index(prompt, "older") < strings.Index(prompt, "pending") && h.queueSize == 0, "prompt/size = %q/%d", prompt, h.queueSize)
 }
 
 func TestHandoffClaimAndFinish(t *testing.T) {
