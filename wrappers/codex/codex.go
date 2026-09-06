@@ -128,11 +128,8 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 	command.Dir, command.Stderr = request.Open.Cwd, os.Stderr
 	command.Env = slices.DeleteFunc(os.Environ(), func(value string) bool { return strings.HasPrefix(value, mcp.LaneSocketEnv+"=") })
 	command.Env = append(command.Env, mcp.LaneSocketEnv+"="+endpoint.Path)
-	input, _ := command.StdinPipe()
-	output, _ := command.StdoutPipe()
-	child, err := host.StartChild(command, lock, endpoint)
+	child, input, output, err := host.StartChild(command, lock, endpoint)
 	if err != nil {
-		_ = input.Close()
 		return sessionkit.OpenResult{}, closeLaunch(lock, endpoint, fmt.Errorf("start Codex App Server: %w", err))
 	}
 	p.mu.Lock()

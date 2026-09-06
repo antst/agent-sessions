@@ -30,12 +30,20 @@ type appTransport interface {
 
 type streamTransport struct {
 	input   io.WriteCloser
+	output  io.ReadCloser
 	decoder *json.Decoder
 }
 
-func (s *streamTransport) Read(value any) error  { return s.decoder.Decode(value) }
+func (s *streamTransport) Read(value any) error {
+	err := s.decoder.Decode(value)
+	if err != nil {
+		_ = s.output.Close()
+	}
+	return err
+}
 func (s *streamTransport) Write(value any) error { return json.NewEncoder(s.input).Encode(value) }
 func (s *streamTransport) Close() error          { return s.input.Close() }
+func (s *streamTransport) closeRead() error      { return s.output.Close() }
 
 type appFrame struct {
 	ID     json.RawMessage `json:"id"`
@@ -55,8 +63,8 @@ type appClient struct {
 	onFailure   func(error)
 }
 
-func newAppClient(input io.WriteCloser, output io.Reader, notify func(string, json.RawMessage), failure func(error)) *appClient {
-	return newTransportClient(&streamTransport{input: input, decoder: json.NewDecoder(output)}, notify, failure)
+func newAppClient(input io.WriteCloser, output io.ReadCloser, notify func(string, json.RawMessage), failure func(error)) *appClient {
+	return newTransportClient(&streamTransport{input: input, output: output, decoder: json.NewDecoder(output)}, notify, failure)
 }
 
 func newTransportClient(transport appTransport, notify func(string, json.RawMessage), failure func(error)) *appClient {
@@ -126,6 +134,9 @@ func (c *appClient) write(value any) error {
 }
 
 func (c *appClient) read() {
+	if stream, ok := c.transport.(*streamTransport); ok {
+		defer stream.closeRead()
+	}
 	for {
 		var frame appFrame
 		if err := c.transport.Read(&frame); err != nil {
