@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -62,7 +63,32 @@ func TestPeerDeliveryUsesCanonicalEnvelope(t *testing.T) {
 	check(t, frame["from"] == "agentbus" && strings.Contains(message, "[agentbus-metadata:") && strings.Contains(message, "hello"), "frame = %#v", frame)
 }
 
-func TestPeerUsesEnvironmentThenReplacesObservedSession(t *testing.T) {
+func TestPeerDeliveryCancelStopsBlockedWrite(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+	started := make(chan struct{})
+	oldDial := dialMessaging
+	dialMessaging = func(context.Context, string, string) (net.Conn, error) {
+		return &writeSignal{Conn: client, started: started}, nil
+	}
+	defer func() { dialMessaging = oldDial }()
+	t.Setenv(messagingSocketEnv, "fixture")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := (&PeerBackend{}).deliver(ctx, delivery("blocked")); done <- err }()
+	<-started
+	cancel()
+	check(t, <-done != nil, "blocked delivery succeeded after cancellation")
+}
+
+type writeSignal struct {
+	net.Conn
+	started chan struct{}
+}
+
+func (c *writeSignal) Write(body []byte) (int, error) { close(c.started); return c.Conn.Write(body) }
+
+func TestPeerRehellosReplacesAndStopsOnObservationFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bus.sock")
 	listener, err := net.Listen("unix", path)
 	must(t, err)
@@ -72,9 +98,10 @@ func TestPeerUsesEnvironmentThenReplacesObservedSession(t *testing.T) {
 	t.Setenv(host.NameEnv, "launch-title")
 	t.Setenv(host.GroupsEnv, `["team"]`)
 	parent := os.Getppid()
-	payload := `[{"sessionId":"replacement","name":"new-title","kind":"interactive","cwd":"/new","pid":` + fmt.Sprint(parent) + `}]`
+	payload := `[{"sessionId":"initial","name":"same-title","kind":"interactive","cwd":"/same","pid":` + fmt.Sprint(parent) + `}]`
+	var observationError error
 	oldReadAgents := readAgents
-	readAgents = func(context.Context) ([]byte, error) { return []byte(payload), nil }
+	readAgents = func(context.Context) ([]byte, error) { return []byte(payload), observationError }
 	defer func() { readAgents = oldReadAgents }()
 	events := make(chan map[string]any, 4)
 	go servePeerFixture(t, listener, events)
@@ -88,9 +115,50 @@ func TestPeerUsesEnvironmentThenReplacesObservedSession(t *testing.T) {
 	result, err := backend.Call(context.Background(), "session.list", sessionkit.SessionListRequest{})
 	must(t, err)
 	check(t, string(result) == `{"sessions":[]}`, "result = %s", result)
+	rehello, call := <-events, <-events
+	params := rehello["params"].(map[string]any)
+	check(t, params["session_id"] == "initial" && params["name"] == "same-title" && reflect.DeepEqual(params["groups"], []any{"team"}) && params["info"].(map[string]any)["cwd"] == "/same", "rehello = %#v", rehello)
+	check(t, call["method"] == "session.list", "call = %#v", call)
+	payload = `[{"sessionId":"replacement","name":"new-title","kind":"interactive","cwd":"/new","pid":` + fmt.Sprint(parent) + `}]`
+	must(t, backend.Prepare(context.Background()))
+	_, err = backend.Call(context.Background(), "session.list", sessionkit.SessionListRequest{})
+	must(t, err)
 	replaced, call := <-events, <-events
 	check(t, replaced["method"] == "session.hello" && replaced["params"].(map[string]any)["session_id"] == "replacement", "replacement = %#v", replaced)
 	check(t, call["method"] == "session.list", "call = %#v", call)
+	observationError = os.ErrNotExist
+	err = backend.Prepare(context.Background())
+	check(t, err != nil && strings.Contains(err.Error(), "start Claude with claude-peer"), "observation error = %v", err)
+	select {
+	case event := <-events:
+		t.Fatalf("caller frame after observation failure: %#v", event)
+	default:
+	}
+}
+
+func TestHandStartedPeerHelloUsesEmptyGroups(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bus.sock")
+	listener, err := net.Listen("unix", path)
+	must(t, err)
+	defer listener.Close()
+	for _, name := range []string{host.SessionIDEnv, host.NameEnv, host.GroupsEnv} {
+		t.Setenv(name, "")
+	}
+	t.Setenv(host.SocketEnv, path)
+	parent := os.Getppid()
+	oldReadAgents := readAgents
+	readAgents = func(context.Context) ([]byte, error) {
+		return []byte(`[{"sessionId":"observed","name":"title","kind":"interactive","cwd":"/work","pid":` + fmt.Sprint(parent) + `}]`), nil
+	}
+	defer func() { readAgents = oldReadAgents }()
+	events := make(chan map[string]any, 1)
+	go servePeerFixture(t, listener, events)
+	backend, err := NewPeerBackend(context.Background())
+	must(t, err)
+	defer backend.Shutdown()
+	<-backend.peer.Ready()
+	groups := (<-events)["params"].(map[string]any)["groups"].([]any)
+	check(t, groups != nil && len(groups) == 0, "groups = %#v", groups)
 }
 
 func TestUnresolvedPeerNeverConnects(t *testing.T) {

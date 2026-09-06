@@ -19,6 +19,7 @@ const messagingSocketEnv = "CLAUDE_CODE_MESSAGING_SOCKET"
 var readAgents = func(ctx context.Context) ([]byte, error) {
 	return exec.CommandContext(ctx, "claude", "agents", "--json").Output()
 }
+var dialMessaging = new(net.Dialer).DialContext
 
 type PeerBackend struct {
 	mu       sync.Mutex
@@ -31,7 +32,7 @@ type PeerBackend struct {
 }
 
 func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
-	var groups []string
+	groups := []string{}
 	if raw := os.Getenv(host.GroupsEnv); raw != "" && json.Unmarshal([]byte(raw), &groups) != nil {
 		return nil, errors.New("AGENTBUS_GROUPS must be a JSON array")
 	}
@@ -71,26 +72,23 @@ func (b *PeerBackend) Call(ctx context.Context, method string, params any) (json
 
 func (b *PeerBackend) Prepare(ctx context.Context) error {
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.peer == nil {
-		err := b.failed
-		b.mu.Unlock()
+		return b.failed
+	}
+	identity, err := b.observe(ctx)
+	if err != nil {
 		return err
 	}
-	if identity, err := b.observe(ctx); err == nil && (identity.SessionID != b.identity.SessionID || identity.Name != b.identity.Name || identity.Info["cwd"] != b.identity.Info["cwd"]) {
-		old := b.identity
-		b.identity = identity
-		if identity.SessionID != old.SessionID {
-			err = b.peer.Replace(ctx, identity)
-		} else {
-			err = b.peer.Rehello(identity.Name, identity.Info)
-		}
-		if err != nil {
-			b.mu.Unlock()
-			return err
-		}
+	if identity.SessionID == b.identity.SessionID && identity.Name == b.identity.Name && identity.Info["cwd"] == b.identity.Info["cwd"] {
+		return nil
 	}
-	b.mu.Unlock()
-	return nil
+	old := b.identity
+	b.identity = identity
+	if identity.SessionID != old.SessionID {
+		return b.peer.Replace(ctx, identity)
+	}
+	return b.peer.Rehello(identity.Name, identity.Info)
 }
 
 func (b *PeerBackend) Caller() *sessionkit.Caller { return b.caller }
@@ -126,7 +124,7 @@ func activeSession(payload []byte, parent int, groups []string) (sessionkit.Peer
 		if session.PID != parent || session.Kind != "interactive" || id == "" {
 			continue
 		}
-		candidate := sessionkit.PeerIdentity{Product: "claude", SessionID: id, Name: first(strings.TrimSpace(session.Name), id), Groups: append([]string(nil), groups...), Info: map[string]any{"cwd": strings.TrimSpace(session.Cwd)}}
+		candidate := sessionkit.PeerIdentity{Product: "claude", SessionID: id, Name: first(strings.TrimSpace(session.Name), id), Groups: append([]string{}, groups...), Info: map[string]any{"cwd": strings.TrimSpace(session.Cwd)}}
 		if found.SessionID != "" && (found.SessionID != candidate.SessionID || found.Name != candidate.Name || found.Info["cwd"] != candidate.Info["cwd"]) {
 			return sessionkit.PeerIdentity{}, errors.New("Claude peer identity is ambiguous")
 		}
@@ -138,7 +136,7 @@ func activeSession(payload []byte, parent int, groups []string) (sessionkit.Peer
 	return found, nil
 }
 
-func (b *PeerBackend) deliver(_ context.Context, request sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
+func (b *PeerBackend) deliver(ctx context.Context, request sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
 	message, err := host.RenderNativeMessage(request)
 	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
@@ -147,11 +145,13 @@ func (b *PeerBackend) deliver(_ context.Context, request sessionkit.DeliveryRequ
 	if path == "" {
 		return sessionkit.DeliveryReceipt{}, errors.New("Claude messaging socket is unavailable")
 	}
-	connection, err := net.Dial("unix", path)
+	connection, err := dialMessaging(ctx, "unix", path)
 	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
 	defer connection.Close()
+	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	defer stop()
 	body := map[string]any{"msgV": 1, "msg_id": request.MessageID, "type": "user", "priority": "next", "from": "agentbus", "message": map[string]any{"role": "user", "content": message}}
 	err = json.NewEncoder(connection).Encode(body)
 	return sessionkit.DeliveryReceipt{Disposition: "injected"}, err
