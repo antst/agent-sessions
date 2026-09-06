@@ -250,11 +250,11 @@ func TestFreshLaneNativeLifecycle(t *testing.T) {
 	check(t, countFrames(frames, "initialize") == 3, "authenticated startup hold absent: %d handshakes", countFrames(frames, "initialize"))
 	open := findFrame(frames, "session/new")
 	check(t, !strings.Contains(string(open), "--session-id") && strings.Contains(string(open), `"sessionbus"`) && strings.Contains(string(open), `"SESSIONBUS_LANE_SOCKET"`) && strings.Contains(string(open), `"yoloMode":true`), "fresh open = %s", open)
-	idle, err := p.Deliver(context.Background(), delivery("idle"))
+	idle, err := p.Deliver(context.Background(), delivery("idle"), nil)
 	must(t, err)
 	check(t, idle.Disposition == "queued_for_next_turn", "idle = %#v", idle)
 	check(t, countFrames(records(t, recordPath), "_x.ai/interject") == 0, "idle delivery started native work")
-	must(t, p.Close(context.Background()))
+	must(t, p.Close(context.Background(), sessionkit.SessionCloseRequest{}))
 	check(t, !exists(filepath.Join(root, "lanes", p.key+".sock")), "lane socket remains")
 }
 
@@ -281,7 +281,7 @@ func TestInterruptAndResume(t *testing.T) {
 	check(t, strings.Contains(string(load), `"sessionId":"`+testSessionID+`"`), "resume load = %s", load)
 	check(t, !containsStart(frames, "--resume", testSessionID), "resume was selected in both argv and session/load")
 	check(t, containsStart(frames, "--permission-mode", "default", "--allow", "MCPTool(sessionbus__*)"), "default leader MCP allow absent")
-	must(t, p.Close(context.Background()))
+	must(t, p.Close(context.Background(), sessionkit.SessionCloseRequest{}))
 }
 
 func TestResumeIdentityFailureRepliesBeforeCleanup(t *testing.T) {
@@ -335,7 +335,7 @@ func TestOmittedCwdAndSocketReadiness(t *testing.T) {
 		}
 	}
 	check(t, strings.Contains(string(findFrame(records(t, recordPath), "session/new")), `"cwd":`+strconv.Quote(want)), "ACP cwd was empty")
-	must(t, p.Close(context.Background()))
+	must(t, p.Close(context.Background(), sessionkit.SessionCloseRequest{}))
 }
 
 func TestArgumentsAndHello(t *testing.T) {
@@ -355,7 +355,7 @@ func TestCloseReturnsNativeErrorAfterCleanup(t *testing.T) {
 	p.SetCall(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
 	_, err := p.Open(context.Background(), sessionkit.OpenRequest{Name: "lane@local", Open: sessionkit.OpenOptions{Cwd: root}})
 	must(t, err)
-	err = p.Close(context.Background())
+	err = p.Close(context.Background(), sessionkit.SessionCloseRequest{})
 	check(t, err != nil && strings.Contains(err.Error(), "close failed"), "close error = %v", err)
 	check(t, !exists(filepath.Join(root, "lanes", p.key+".sock")), "endpoint survived failed native close")
 }
@@ -371,7 +371,7 @@ func TestCancelledCloseJoinsNativeProcesses(t *testing.T) {
 	p.mu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_ = p.Close(ctx)
+	_ = p.Close(ctx, sessionkit.SessionCloseRequest{})
 	for _, process := range []*nativeProcess{watcher, leader} {
 		select {
 		case <-process.done:

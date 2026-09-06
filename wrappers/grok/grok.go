@@ -404,7 +404,7 @@ func (p *Wrapper) Interrupt(ctx context.Context, run *sessionkit.Run) error {
 	return p.handoff.Interrupt(ctx, run)
 }
 
-func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
+func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, _ *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
 	return p.handoff.Deliver(ctx, request, func(ctx context.Context, message string) (bool, error) {
 		return p.inject(ctx, request.MessageID, message)
 	})
@@ -429,7 +429,7 @@ func (p *Wrapper) inject(ctx context.Context, messageID, message string) (bool, 
 	return active, nil
 }
 
-func (p *Wrapper) Close(ctx context.Context) error {
+func (p *Wrapper) Close(ctx context.Context, _ sessionkit.SessionCloseRequest) error {
 	p.mu.Lock()
 	p.closing = true
 	p.mu.Unlock()
