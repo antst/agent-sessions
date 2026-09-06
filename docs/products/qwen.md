@@ -335,9 +335,16 @@ Provenance and tag legend:
 - The corrected root helper creates one resident Peer and Caller before serving MCP;
   initialize and tools/list require no action, and Prepare gates later actions on that
   same connection. Missing launcher identity still serves MCP discovery and reports the
-  identity error on tools/call. (verified: implementation; source:
+  identity error on tools/call. (verified: implementation + 0.23.0 runtime; source:
   wrappers/qwen/peer.go:32-118; cmd/qwen-peer/main.go:58-75;
-  cmd/qwen-peer/main_test.go)
+  cmd/qwen-peer/main_test.go;
+  /home/antst/agentbus-evidence/qwen-peer-rerun-20260906T173801Z/RUN-SUMMARY.md)
+- The zero-turn rerun observed the idle Qwen peer before any prompt or tools/call with
+  its minted UUID, exact title `Qwen Peer Runtime`, requested `qwen-peer-cells` group,
+  `connected:true`, `running:false`, and cwd `/home/antst`; `/exit` then reaped the TUI
+  and MCP helper, and final teardown left no owned process or socket. (verified: 0.23.0;
+  source:
+  /home/antst/agentbus-evidence/qwen-peer-rerun-20260906T173801Z/{RUN-SUMMARY.md,cells/01-peer/roster.json,cells/01-peer/processes-relevant-final.txt})
 
 ## Interrupt and close
 
