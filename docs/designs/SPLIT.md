@@ -206,9 +206,15 @@ No staging-tree rewrite begins until this phase is complete.
 6. Fetch the two Forgejo repositories into fresh verification clones. Compare
    every legacy ref to the freeze manifest and run `git fsck --full`. Record
    tags separately and verify the rewrite does not move or delete them.
-7. For every abbreviated commit used by a product facts file, run
+7. Classify every commit-qualified facts citation before validating it. A
+   citation to a path from the pre-split Sessionbus tree must resolve with
    `git rev-parse <abbrev>^{commit}` in the verified `ai/sessionbus` legacy
-   clone. Ambiguous or missing citations stop the split.
+   clone. A product-source citation is external—for example OpenCode source
+   commit `1674747`—and must instead have a manifest row containing product,
+   canonical external repository URL, cited abbreviation, full commit ID, and
+   frozen clone/archive checksum. Resolve it in that frozen external clone.
+   Never infer that an unknown object belongs to Sessionbus. Ambiguous,
+   missing, or unclassified citations stop the split.
 
 Only the owner may lift the freeze after all new repositories pass Section 8.
 
@@ -307,12 +313,16 @@ The moves are gated by these negative checks:
 
 ### 5.1 `sessionbus`
 
+Both module ecosystems use the one fixed first split prerelease:
+`v0.1.0-pre.2` for Go and `0.1.0-pre.2` for npm. Placeholders are forbidden in
+candidate manifests, module files, package files, tags, and workflows.
+
 The root module is:
 
 ```text
 module github.com/antst/sessionbus
 go 1.24
-require github.com/antst/sessionbus/bus/sdk/go v<exact-sdk-version>
+require github.com/antst/sessionbus/bus/sdk/go v0.1.0-pre.2
 ```
 
 The SDK module is:
@@ -333,7 +343,7 @@ use (
 ```
 
 Neither `go.mod` contains a local `replace`. The SDK version is tagged with the
-standard submodule tag `bus/sdk/go/v<exact-sdk-version>` on the same root
+standard submodule tag `bus/sdk/go/v0.1.0-pre.2` on the same root
 commit. The initial root commit, both branch updates, and that tag are pushed
 atomically, so the root module's exact requirement is resolvable as soon as the
 new history is visible. Development commands test once through `go.work` and
@@ -346,7 +356,7 @@ The peers root has one module:
 ```text
 module github.com/antst/sessionbus-peers
 go 1.24
-require github.com/antst/sessionbus/bus/sdk/go v<same-exact-sdk-version>
+require github.com/antst/sessionbus/bus/sdk/go v0.1.0-pre.2
 ```
 
 Every old `github.com/antst/sessionbus/wrappers/...` import changes to
@@ -358,18 +368,20 @@ release gates always run without that overlay.
 
 ### 5.3 `sessionbus-dsh`
 
-DSH remains an npm-only CommonJS package. Its `package.json` pins an already
-published exact `@sessionbus/kit` version. It has no filesystem or Git
-dependency on either sibling repository.
+DSH remains an npm-only CommonJS package. Its `package.json` pins exact
+`@sessionbus/kit` version `0.1.0-pre.2`. It has no filesystem or Git dependency
+on either sibling repository.
 
 ## 6. Facts and immutable history
 
 Every Markdown facts file under `docs/products` receives this header directly
 below its title:
 
-> Historical source note: commit-qualified citations in this file resolve in
+> Historical source note: citations to pre-split Sessionbus paths resolve in
 > the Forgejo `ai/sessionbus` repository through its `legacy-*` branches.
-> Host evidence paths are immutable external artifacts, not repository paths.
+> Citations to product source resolve in the external repository and full
+> commit recorded by the split archive manifest. Host evidence paths are
+> immutable external artifacts, not repository paths.
 
 Captured blocks and sealed evidence paths remain byte-for-byte unchanged. A
 post-split guard permits former identifiers only in the already-ruled shapes:
@@ -378,8 +390,9 @@ commit-qualified historical paths. The guard scans both repositories and is
 updated for the new module/repository paths; the peers repository owns the
 product-facts half, while the daemon repository owns the design-document half.
 
-The archive manifest records which legacy ref makes each facts-file commit
-reachable. The initial peers commit message names the manifest checksum so the
+The archive manifest records which legacy ref makes each Sessionbus citation
+reachable and which frozen external clone resolves each product-source
+citation. The initial peers commit message names the manifest checksum so the
 new root is auditable without pretending its parentless history contains the
 old citations.
 
@@ -417,6 +430,12 @@ old citations.
 - pkg.pr.new publishes only current package roots, initially `./opencode`.
   Product installers and manifests point to `antst/sessionbus-peers`; none
   points to the daemon repository as its own source repository.
+- The initial root has no release workflow for `*-peer` binaries or
+  `@sessionbus/opencode`. Its README and product install/facts documents say
+  explicitly that binaries are built from source and the OpenCode package is a
+  pkg.pr.new preview. Stable binary and npm release jobs are a separately
+  reviewed later deliverable; this split does not invent them or imply that an
+  initial release artifact exists.
 
 ### 7.3 `sessionbus-dsh`
 
@@ -426,14 +445,30 @@ old citations.
   sibling filesystem dependency in CI.
 - Add a repository URL/package-file guard so the package cannot regress to a
   monorepo path.
+- The initial root retains preview publication only. Its README says that
+  `@sessionbus/dsh` is a pkg.pr.new preview until a separately reviewed trusted
+  publishing workflow exists; the split does not claim a registry release of
+  DSH itself.
 
 ## 8. Exact execution sequence
 
 Each numbered gate completes before the next begins.
 
+0. **Amend and sign the retained design.** On the design review branch, update
+   every current-authority clause in
+   `docs/designs/UNIVERSAL-SESSION-PROTOCOL.md` that names
+   `bus/internal/protocol` or `bus/internal/rpc`. The wire/schema authority
+   becomes `bus/sdk/go/protocol`; SDK transport becomes
+   `bus/sdk/go/internal/rpc`; the module and generation clauses match Sections
+   4 and 5. Regenerate `bus/docs/PROTOCOL.md`, obtain the architect's split
+   signature, sync the signed bytes to the universal branch, and make that
+   signed commit the freeze input. Historical commit-qualified passages are
+   left historical. No tree assembly starts from a design that contradicts
+   the target paths.
 1. **Freeze and archive.** Execute Section 3 for both existing repositories.
    Verify every legacy ref and citation from fresh Forgejo clones. Save the
-   branch/tag/archive manifest and checksum outside the worktrees.
+   branch/tag/archive/external-source manifest and checksum outside the
+   worktrees.
 2. **Create clean staging clones.** Clone the canonical GitHub repositories into
    new, empty parent directories. Do not reuse a developer worktree, installed
    binary prefix, or host evidence directory. Record all stamped source-tip
@@ -460,75 +495,108 @@ Each numbered gate completes before the next begins.
    classification manifest, and `main` and `develop` candidate refs name the
    same commit.
 8. **Run isolated gates.** Run every repository's Section 7 gates in fresh
-   clones. Then install the exact SDK tag candidate into temporary external Go
-   and npm consumers with workspaces disabled. Build the peers module against
-   that tag, and test DSH against a packed kit tarball. No gate may rely on the
-   pre-split worktree.
+   clones. Before either version exists remotely, construct a read-only local
+   Go module proxy from the candidate SDK tree with exact
+   `v0.1.0-pre.2.info`, `.mod`, `.zip`, and `list` entries. With `GOWORK=off`,
+   `GOPROXY=file://<candidate-proxy>`, and `GOSUMDB=off`, download and test the
+   root and peers modules; reject any filesystem `replace`. Run `npm pack
+   ./bus`, unpack that exact `@sessionbus/kit` tarball into an isolated DSH
+   fixture's `node_modules/@sessionbus/kit`, and test DSH with registry access
+   disabled. Do the analogous packed-kit consumer test for the OpenCode
+   preview. Record SHA-256 for the proxy files and npm tarball. No gate may
+   rely on the pre-split worktree or a published candidate.
 9. **Preflight remote leases.** Re-read GitHub and Forgejo `main` and `develop`
    object IDs and compare them with the freeze manifest. Any movement aborts;
-   do not refresh the lease silently. Confirm the new GitHub and Forgejo peers
-   repositories exist and are empty or have the owner-approved expected tips.
+   do not refresh the lease silently. Prove both new peers repositories are
+   truly empty: no heads and no tags. Prove tags
+   `bus/sdk/go/v0.1.0-pre.2` and `kit-v0.1.0-pre.2` are absent from both
+   Sessionbus remotes, and prove npm has no `@sessionbus/kit@0.1.0-pre.2`.
 10. **Publish Sessionbus atomically.** Push its root commit to `main` and
     `develop` with explicit `--force-with-lease=<ref>:<frozen-oid>` and push the
-    SDK submodule tag in the same atomic transaction. Repeat to Forgejo. Verify
-    both branches, the tag, and the root tree from fresh clones before
-    continuing.
-11. **Publish peers atomically.** Push the one peers root commit to `main` and
-    `develop` on GitHub and Forgejo in atomic transactions, using an empty-ref
-    lease for a newly created repository. Verify fresh clones build with
-    `GOWORK=off` against the published SDK tag.
-12. **Publish DSH atomically.** Push its one root commit to `main` and `develop`
-    on GitHub and Forgejo with leases against the frozen heads. Verify the exact
-    published kit pin from a fresh clone.
-13. **Cross-repository acceptance.** Run the daemon protocol/CLI suite, peers
+    SDK submodule tag `bus/sdk/go/v0.1.0-pre.2` in the same atomic transaction.
+    Repeat to Forgejo. Verify both branches, the tag, the root tree, and a
+    normal-proxy `GOWORK=off` SDK consumer from fresh clones before continuing.
+11. **Publish and verify the JavaScript kit.** Only after Step 10 is green,
+    push `kit-v0.1.0-pre.2` to Forgejo first and verify the tag object, then
+    push that exact tag object to GitHub to trigger trusted publishing. The
+    existing workflow verifies tag/package equality, Node 24 and npm
+    >=11.5.1, tests the package, and publishes
+    `@sessionbus/kit@0.1.0-pre.2` with provenance. Wait until
+    `npm view @sessionbus/kit@0.1.0-pre.2` returns the expected version,
+    repository, provenance, and tarball integrity; download it and compare its
+    SHA-512/integrity and file list with the Step 8 candidate. This npm publish
+    is the first irreversible operation.
+12. **Publish peers atomically.** After the kit registry verification, create
+    `main` and `develop` at the one peers root commit on the truly empty GitHub
+    and Forgejo repositories in atomic pushes. A nonempty target is an abort,
+    not permission to force a seed away. Verify fresh clones build with
+    `GOWORK=off` against the published SDK tag and test the OpenCode preview
+    against the published kit. Do not create a binary or OpenCode release tag.
+13. **Publish DSH atomically.** After the kit registry verification, push its
+    one root commit to `main` and `develop` on GitHub and Forgejo with leases
+    against the frozen heads. From fresh clones, install the registry
+    `@sessionbus/kit@0.1.0-pre.2`, run DSH tests, and verify its pkg.pr.new
+    preview. Do not create a DSH registry release tag.
+14. **Cross-repository acceptance.** Run the daemon protocol/CLI suite, peers
     unit/race/vet/build and package tests, npm pack-file checks, DSH tests, facts
     citation checks against Forgejo, and all three former-brand/repository URL
     guards. Compare GitHub and Forgejo root-tree hashes for each repository.
-14. **Retire pre-split development heads.** From the freeze manifest, delete
+15. **Retire heads, verify, and relock.** From the freeze manifest, delete
     every old non-`main`/non-`develop` GitHub branch with an explicit
     object-ID lease. On Forgejo, delete the corresponding old unprefixed heads;
     keep every verified `legacy-*` head. Do not move or delete historical tags.
     Re-fetch all remotes and prove no old development head survives under an
     unprefixed name. A failed deletion stops the sequence but never permits
-    deleting its legacy ref.
-15. **Reset clones.** Every contributor fetches the rewritten refs into a fresh
-    clone or removes the old worktree and hard-resets only after confirming no
-    unpushed work. Existing clones change `origin` to the correct new GitHub
-    repository; add the corresponding Forgejo mirror; peers work moves to a
-    peers clone. Delete obsolete local branches only after their object IDs
-    match the archive manifest. Recreate any cross-repository development
-    workspace outside the repositories.
-16. **Owner relocks.** The owner disables force-push on `main` and `develop` in
-    all three GitHub and Forgejo repositories, restores required checks and
-    review rules, and confirms no temporary rewrite credential or bypass
-    remains. The owner then lifts the merge/publish freeze.
+    deleting its legacy ref. Immediately after remote verification, the owner
+    disables force-push on `main` and `develop` in all three GitHub and Forgejo
+    repositories, restores required checks/reviews, and confirms no temporary
+    rewrite credential or bypass remains. Clone migration is not allowed to
+    keep this rewrite window open.
+16. **Start only from fresh clones.** Contributors archive old clones as
+    read-only evidence and create fresh clones from the correct new GitHub
+    repository, adding the corresponding Forgejo mirror. They verify clean
+    tracked and untracked inventories, build/test once, and create any
+    cross-repository development workspace outside the repositories. No hard
+    reset or clean command is prescribed for an old clone: untracked obsolete
+    source can survive a reset, and unpushed work belongs to its owner. The
+    owner lifts the merge freeze only after the new-clone receipts are recorded.
 
 ## 9. Owner-only prerequisites and final actions
 
-Before Step 1, the owner must:
+Before Step 0, the owner must:
 
 - create or confirm `antst/sessionbus-peers` and Forgejo
-  `ai/sessionbus-peers`, with no unreviewed seed commit;
+  `ai/sessionbus-peers` are truly empty, with no branch, tag, or seed commit;
 - keep temporary force-push authorization enabled for the six target branch
   names per hosting service—twelve refs total: `main` and `develop` in three
-  repositories on GitHub and Forgejo—through Step 12;
-- authorize/provide the final GPL-3.0-only and MIT license texts and the first
-  Go SDK module version/tag;
+  repositories on GitHub and Forgejo—through the Step 15 retirement and
+  verification, then re-lock immediately;
+- authorize/provide the final GPL-3.0-only and MIT license texts and confirm the
+  fixed Go/npm prerelease `0.1.0-pre.2`;
 - configure repository secrets, trusted npm publishing, pkg.pr.new access,
   branch checks, and mirrors for the new repository boundaries;
 - name the canonical stamped product-tip manifest used for peers assembly.
 
-After Step 15, the owner must re-lock force-push, re-enable required reviews and
-status checks, verify mirror/default-branch settings, and explicitly close the
-rewrite window. If the owner cannot confirm those actions, the repositories
-remain frozen even when their code gates are green.
+During Step 15, the owner must re-lock force-push, re-enable required reviews
+and status checks, verify mirror/default-branch settings, and explicitly close
+the rewrite window before contributors migrate clones. If the owner cannot
+confirm those actions, the repositories remain frozen even when their code
+gates are green.
 
 ## 10. Abort and rollback rule
 
 Before a force-push, rollback is local: discard the candidate root commits and
-leave all remotes untouched. After any force-push, do not improvise a partial
-history restoration. Stop all later pushes, preserve the observed remote refs,
-and have the owner choose either to complete the exact reviewed transaction or
-restore the frozen object IDs from the verified `legacy-*` refs using the same
-explicit leases. Package publication is last and is forbidden until all three
-repositories and both mirrors have passed the post-push verification.
+leave all remotes untouched. After a force-push but before Step 11, do not
+improvise a partial history restoration: stop, preserve the observed remote
+refs, and have the owner choose either to complete the reviewed transaction or
+restore the frozen object IDs from verified `legacy-*` refs using the same
+explicit leases.
+
+Publishing `@sessionbus/kit@0.1.0-pre.2` in Step 11 is irreversible: npm may
+permit deprecation, but the version can never be reused or made unpublished by
+this plan. It is deliberately the last irreversible boundary before the peers
+and DSH roots are exposed. A failure after it freezes all repositories; the
+owner may deprecate that exact package and issue a new reviewed prerelease, but
+must not rewrite bytes under the published version or pretend rollback removed
+it. Peer binaries, `@sessionbus/opencode`, and `@sessionbus/dsh` are previews in
+the initial roots and therefore add no further release boundary here.
