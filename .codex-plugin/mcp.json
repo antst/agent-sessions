@@ -1,33 +1,18 @@
 {
   "mcpServers": {
     "agent_sessions": {
-      "command": "./scripts/native-entry",
+      "command": "codex-peer",
       "args": [
-        "connector",
-        "auto",
-        "--release-identity",
-        "@AGENT_SESSIONS_RELEASE_ID@"
+        "mcp"
       ],
-      "cwd": ".",
       "default_tools_approval_mode": "approve",
       "env_vars": [
-        "AGENT_SESSIONS_AGENT_RUNTIME_DIR",
-        "AGENT_SESSIONS_GROUPS",
-        "AGENT_SESSIONS_HOST_BINARY",
-        "AGENT_SESSIONS_PRODUCT",
-        "AGENT_SESSIONS_SESSION_ID",
-        "AGENT_SESSIONS_SESSION_NAME",
-        "CLAUDE_CONFIG_DIR",
-        "CLAUDE_PEER_CLAUDE_BIN",
-        "CLAUDE_PLUGIN_DATA",
-        "CLAUDE_PEER_CLAUDE_CONFIG_DIR",
-        "AGENT_SESSIONS_STATE_ROOT",
-        "CODEX_HOME",
-        "GROK_PEER_GROK_BIN",
-        "PLUGIN_DATA",
-        "TMPDIR",
-        "XDG_RUNTIME_DIR",
-        "XDG_STATE_HOME"
+        "AGENTBUS_SOCKET",
+        "AGENTBUS_LOCAL_KEY",
+        "AGENTBUS_SESSION_ID",
+        "AGENTBUS_SESSION_NAME",
+        "AGENTBUS_GROUPS",
+        "CODEX_HOME"
       ],
       "tool_timeout_sec": 86520
     }
