@@ -24,12 +24,20 @@ type Turn interface {
 }
 
 type StartTurn func(context.Context, string) (Turn, error)
-type Inject func(context.Context, string) (bool, error)
+type Injection uint8
+
+const (
+	NotInjected Injection = iota
+	Injected
+	Pending
+)
+
+type Inject func(context.Context, string) (Injection, error)
 type nativeTurn struct{ Turn }
 type Rendered string
 type deliverySlot struct {
-	body     Rendered
-	accepted bool
+	body    Rendered
+	pending bool
 }
 
 // Handoff owns the FIFO and its boundary with native-turn creation.
@@ -109,32 +117,38 @@ func (h *Handoff) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 	h.queueSize += added
 	h.mu.Unlock()
 
-	injected := false
+	disposition := NotInjected
 	if inject != nil {
-		injected, err = inject(ctx, rendered)
+		disposition, err = inject(ctx, rendered)
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	index := slices.Index(h.active, slot)
+	if index < 0 {
+		return sessionkit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+	}
 	if err != nil {
-		if index < 0 {
-			return sessionkit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
-		}
 		h.active = slices.Delete(h.active, index, index+1)
 		h.recount()
 		return sessionkit.DeliveryReceipt{}, err
 	}
-	if injected {
-		if index >= 0 {
-			slot.accepted = true
-		}
+	switch disposition {
+	case Injected:
+		h.active = slices.Delete(h.active, index, index+1)
+		h.recount()
 		return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
-	}
-	if index >= 0 {
+	case Pending:
+		slot.pending = true
+		return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
+	case NotInjected:
 		h.active = slices.Delete(h.active, index, index+1)
 		h.queue = append(h.queue, slot)
+		return sessionkit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+	default:
+		h.active = slices.Delete(h.active, index, index+1)
+		h.recount()
+		return sessionkit.DeliveryReceipt{}, errors.New("invalid injection outcome")
 	}
-	return sessionkit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
 }
 
 func (h *Handoff) Claim() []Rendered {
@@ -143,7 +157,7 @@ func (h *Handoff) Claim() []Rendered {
 	claimed := []Rendered{}
 	kept := h.active[:0]
 	for _, slot := range h.active {
-		if slot.accepted {
+		if slot.pending {
 			claimed = append(claimed, slot.body)
 		} else {
 			kept = append(kept, slot)
