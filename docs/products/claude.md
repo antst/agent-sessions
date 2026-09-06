@@ -1,0 +1,29 @@
+# Claude Code product facts
+
+- Claude Code 2.1.260 accepts `-p --input-format stream-json --output-format stream-json --verbose --replay-user-messages` for one resident headless session. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/native-private-mcp.processes.txt`
+- A fresh lane uses a bare UUID with `--session-id`; its native session ID is that exact UUID. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/lane-spawn.stdout`
+- Claude Code emits no `system/init` frame before the first stream-json user frame. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/init.result.json`
+- The first turn emits `system/init`, and its `session_id` is available for checking against the wrapper-minted UUID. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/claude.stdout`
+- A replayed user frame has `type:"user"` and `isReplay:true`; it is Claude's acknowledgement that the corresponding input entered the native turn. — verified: 0.4.0 — source: `internal/products/claude/lane.go:438`
+- A result is a turn terminal only after every accepted user write for that turn has a matching replay. — verified: 0.4.0 — source: `internal/products/claude/lane.go:489`
+- A successful stream-json result has subtype `success`, `is_error:false`, the exact session ID, and a string result. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/claude.stdout`
+- Native terminal reasons `interrupted` and `aborted_streaming` map to an interrupted turn. — verified: 0.4.0 — source: `internal/products/claude/lane.go:510`
+- A native interrupt is a `control_request` whose request object has subtype `interrupt`. — verified: 0.4.0 — source: `internal/products/claude/lane.go:277`
+- `control_response.response` is an object with subtype and request ID; a successful interrupt response may contain a nested response object. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/claude.stdout`
+- The lane's completed turn returns the final Claude result and native stop reason `completed`. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/lane-first-run.stdout`
+- The lane's same-name `agent_sessions` stdio MCP entry invokes `claude-peer mcp` through the private Unix socket and completes a caller action. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/native-private-mcp.processes.txt`
+- Active lane delivery is acknowledged as `injected` only after its native replay, and the delivered text affects the same turn's final result. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/native-active-inject.run.stdout`
+- Idle lane delivery is acknowledged as `queued_for_next_turn`, then prepended to the caller's next run. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/native-idle-queue.run.stdout`
+- An exact native interrupt returns `{}` on the bus after Claude accepts the control request. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/native-interrupt-fixed.stdout`
+- A healthy lane close returns `{}` and releases the row. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/native-close-healthy.stdout`
+- The inherited flock keeps a native session busy after the wrapper dies and releases it when the native child exits. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/native-abrupt-lock.busy.stdout`
+- Claude Code accepts an HTTP MCP entry shaped as `{"type":"http","url":"http://127.0.0.1:<port>/mcp"}`. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/p0-http.config.json`
+- Claude Code's HTTP MCP client first sends `server/discover`, then initialize, initialized, GET for an event stream, tools/list, and tools/call. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/p0-http.events.jsonl`
+- Claude Code's HTTP MCP client does not require or send an MCP session header when the server returns none. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/p0-http.events.jsonl`
+- The 0.4.0 interactive launcher preserves Claude argv, projects wrapper name and groups, and exports launcher identity before replacing itself with Claude. — verified: 0.4.0 — source: `internal/launcher/claude_peer.go:15`
+- Without launcher identity, the 0.4.0 connector runs `claude agents --json` and accepts exactly one `interactive` row whose PID equals the connector's parent PID. — verified: 0.4.0 — source: `cmd/agent-sessions/connector.go:449`
+- Interactive inbound delivery writes one newline-delimited msgV1 user frame with `priority:"next"` to `CLAUDE_CODE_MESSAGING_SOCKET`. — verified: 0.4.0 — source: `cmd/agent-sessions/connector.go:383`
+- Interactive title changes update the same peer row without changing groups. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/peer-title.list.stdout`
+- `/clear` replaces the native Claude session ID on the same bus connection, and later delivery targets the replacement ID. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/peer-clear.after.stdout`
+- Interactive delivery through the Claude messaging socket is reported as `injected`. — verified: 2.1.260 — source: `/home/antst/agentbus-evidence/claude-20260906T004825Z/peer-delivery.stdout`
+- `UNVERIFIED:` The exact stream-json result fields and error text emitted by Claude Code 2.1.260 for every failed terminal subtype have not been captured.

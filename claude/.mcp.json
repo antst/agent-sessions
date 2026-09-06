@@ -1,12 +1,9 @@
 {
   "mcpServers": {
     "agent_sessions": {
-      "command": "agent-sessions",
+      "command": "claude-peer",
       "args": [
-        "connector",
-        "claude",
-        "--release-identity",
-        "@AGENT_SESSIONS_RELEASE_ID@"
+        "mcp"
       ]
     }
   }
