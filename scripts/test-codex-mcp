@@ -3,7 +3,7 @@ set -euo pipefail
 
 root=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$root/codex-mcp"
-scratch=$(mktemp -d "${TMPDIR:-/tmp}/agentbus-codex-mcp.XXXXXX")
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/sessionbus-codex-mcp.XXXXXX")
 trap 'rm -rf -- "$scratch"' EXIT
 record="$scratch/record"
 state="$scratch/state"
@@ -21,10 +21,10 @@ case "$1 $2" in
     ;;
   "mcp add")
     [ "${TEST_CODEX_FAIL_ADD:-0}" = 0 ] || exit 42
-    if [ "$*" = "mcp add --env AGENTBUS_GROUPS=[] agent_sessions -- $TEST_CODEX_PEER mcp" ]; then
+    if [ "$*" = "mcp add --env SESSIONBUS_GROUPS=[] sessionbus -- $TEST_CODEX_PEER mcp" ]; then
       printf '%s\n' 'groups=[]' >"$TEST_CODEX_STATE"
-    elif [ "$*" = "mcp add --env AGENTBUS_SOCKET=/tmp/agentbus-test.sock --env AGENTBUS_GROUPS=[\"team\"] agent_sessions -- $TEST_CODEX_PEER mcp" ]; then
-      printf '%s\n' 'socket=/tmp/agentbus-test.sock groups=["team"]' >"$TEST_CODEX_STATE"
+    elif [ "$*" = "mcp add --env SESSIONBUS_SOCKET=/tmp/sessionbus-test.sock --env SESSIONBUS_GROUPS=[\"team\"] sessionbus -- $TEST_CODEX_PEER mcp" ]; then
+      printf '%s\n' 'socket=/tmp/sessionbus-test.sock groups=["team"]' >"$TEST_CODEX_STATE"
     else
       exit 91
     fi
@@ -42,23 +42,23 @@ for prior in disabled plugin-backed; do
   printf '%s\n' "$prior" >"$state"
   : >"$record"
   install_codex_mcp "$codex" "$peer"
-  grep -Fxq 'mcp remove agent_sessions' "$record"
-  grep -Fxq "mcp add --env AGENTBUS_GROUPS=[] agent_sessions -- $peer mcp" "$record"
+  grep -Fxq 'mcp remove sessionbus' "$record"
+  grep -Fxq "mcp add --env SESSIONBUS_GROUPS=[] sessionbus -- $peer mcp" "$record"
   grep -Fxq 'app-server daemon restart' "$record"
   [[ $(cat "$state") = 'groups=[]' ]]
 done
 
 : >"$record"
-export AGENTBUS_SOCKET=/tmp/agentbus-test.sock
+export SESSIONBUS_SOCKET=/tmp/sessionbus-test.sock
 install_codex_mcp "$codex" "$peer" '["team"]'
-grep -Fxq "mcp add --env AGENTBUS_SOCKET=/tmp/agentbus-test.sock --env AGENTBUS_GROUPS=[\"team\"] agent_sessions -- $peer mcp" "$record"
-[[ $(grep -Fxc 'app-server daemon restart' "$record") -eq 1 && $(cat "$state") = 'socket=/tmp/agentbus-test.sock groups=["team"]' ]]
-unset AGENTBUS_SOCKET
+grep -Fxq "mcp add --env SESSIONBUS_SOCKET=/tmp/sessionbus-test.sock --env SESSIONBUS_GROUPS=[\"team\"] sessionbus -- $peer mcp" "$record"
+[[ $(grep -Fxc 'app-server daemon restart' "$record") -eq 1 && $(cat "$state") = 'socket=/tmp/sessionbus-test.sock groups=["team"]' ]]
+unset SESSIONBUS_SOCKET
 
 rm -f -- "$state"
 : >"$record"
 remove_codex_mcp "$codex"
-grep -Fxq 'mcp remove agent_sessions' "$record"
+grep -Fxq 'mcp remove sessionbus' "$record"
 grep -Fxq 'app-server daemon restart' "$record"
 
 : >"$record"

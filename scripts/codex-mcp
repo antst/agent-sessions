@@ -3,17 +3,17 @@
 install_codex_mcp() {
   local codex_path=$1 peer_path=$2 groups=${3:-[]}
   [[ "$peer_path" == /* && -x "$peer_path" ]] || return 2
-  "$codex_path" mcp remove agent_sessions >/dev/null 2>&1 || return
-  if [[ -n ${AGENTBUS_SOCKET:-} ]]; then
-    "$codex_path" mcp add --env "AGENTBUS_SOCKET=$AGENTBUS_SOCKET" --env "AGENTBUS_GROUPS=$groups" agent_sessions -- "$peer_path" mcp || return
+  "$codex_path" mcp remove sessionbus >/dev/null 2>&1 || return
+  if [[ -n ${SESSIONBUS_SOCKET:-} ]]; then
+    "$codex_path" mcp add --env "SESSIONBUS_SOCKET=$SESSIONBUS_SOCKET" --env "SESSIONBUS_GROUPS=$groups" sessionbus -- "$peer_path" mcp || return
   else
-    "$codex_path" mcp add --env "AGENTBUS_GROUPS=$groups" agent_sessions -- "$peer_path" mcp || return
+    "$codex_path" mcp add --env "SESSIONBUS_GROUPS=$groups" sessionbus -- "$peer_path" mcp || return
   fi
   "$codex_path" app-server daemon restart
 }
 
 remove_codex_mcp() {
   local codex_path=$1
-  "$codex_path" mcp remove agent_sessions >/dev/null 2>&1 || return
+  "$codex_path" mcp remove sessionbus >/dev/null 2>&1 || return
   "$codex_path" app-server daemon restart
 }
