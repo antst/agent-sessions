@@ -6,8 +6,7 @@ description: Orchestrate named, messageable local or remote Grok Build worker la
 # Orchestrate Grok lanes
 
 Use the process-attested `sessionbus.lane` MCP tool with `product: "grok"`.
-It runs a headless Grok Build conversation as a daemon-owned durable Agent
-Sessions peer. Do not execute `grok-peer-lane` through Bash.
+It runs a headless Grok Build conversation as a daemon-owned durable Sessionbus peer. Do not execute `grok-peer-lane` through Bash.
 
 ## Remote host
 

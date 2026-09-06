@@ -38,8 +38,7 @@ Omitted resume flags restore the durable choice.
 
 Discover and message the child through the `sessionbus` skill using
 `sessionbus.list_peers` and `sessionbus.send_message`. The lane is also
-a real native Claude registry row, but native Claude messaging is not an Agent
-Sessions fallback; report a structured-tool failure instead of switching
+a real native Claude registry row, but native Claude messaging is not a Sessionbus fallback; report a structured-tool failure instead of switching
 channels. Only Sessionbus discovery and routing are group-filtered.
 
 For a remote target set `host` on the same `sessionbus.lane` call after
