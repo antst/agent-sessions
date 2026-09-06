@@ -21,6 +21,7 @@ type fakeProduct struct {
 	release, interrupted    chan struct{}
 	deliverStart            chan struct{}
 	closeStart, closeEnd    chan struct{}
+	closeContext            chan error
 	outbound, hangInterrupt bool
 	closeErr, interruptErr  error
 	calls                   [6]int32
@@ -93,8 +94,8 @@ func (p *fakeProduct) Deliver(ctx context.Context, _ DeliveryRequest) (DeliveryR
 }
 func (p *fakeProduct) Close(ctx context.Context) error {
 	atomic.AddInt32(&p.calls[5], 1)
-	if ctx.Err() == nil {
-		return errors.New("close context was not cancelled")
+	if p.closeContext != nil {
+		p.closeContext <- ctx.Err()
 	}
 	if p.closeStart != nil {
 		close(p.closeStart)
@@ -211,6 +212,7 @@ func runCase(t *testing.T, name string) [6]int32 {
 	case "eof-during-run", "run-done-write-failure":
 		if name == "eof-during-run" {
 			p.closeErr = errors.New("first failure\nsecond failure")
+			p.closeContext = make(chan error, 1)
 		}
 		h := startHarness(t, p, true, true)
 		p.started = make(chan *Run)
@@ -220,6 +222,9 @@ func runCase(t *testing.T, name string) [6]int32 {
 		<-p.worker.Closed()
 		check(t, <-run != nil, "expected error")
 		<-runToken.Done()
+		if name == "eof-during-run" {
+			check(t, <-p.closeContext != nil, "EOF left the product Close context live")
+		}
 	case "peer-lifetime":
 		h := startHarness(t, p, true, false)
 		check(t, h.Call(context.Background(), "session.superseded", struct{}{}, &struct{}{}) == nil, "superseded call failed")
@@ -255,8 +260,10 @@ func runCase(t *testing.T, name string) [6]int32 {
 		p.worker.Shutdown()
 	case "close-error":
 		p.closeErr = errors.New("first failure\nsecond failure")
+		p.closeContext = make(chan error, 1)
 		h := startHarness(t, p, true, true)
 		check(t, h.Call(context.Background(), "session.close", target, &struct{}{}) == nil, "close error reached the wire")
+		check(t, <-p.closeContext == nil, "session.close cancelled the product Close context")
 	default:
 		t.Fatalf("unknown lifecycle case %q", name)
 	}

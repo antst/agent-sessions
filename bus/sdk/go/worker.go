@@ -99,7 +99,7 @@ func (w *Worker) Call(ctx context.Context, method string, params, result any) er
 
 func (w *Worker) Shutdown() { _ = w.conn.Close() }
 
-func (w *Worker) handle(_ context.Context, request *rpc.Request) {
+func (w *Worker) handle(ctx context.Context, request *rpc.Request) {
 	switch request.Method {
 	case "session.superseded":
 		go func() { w.reply(w.conn.Result(request, struct{}{})); _ = w.conn.Close() }()
@@ -155,7 +155,7 @@ func (w *Worker) handle(_ context.Context, request *rpc.Request) {
 		w.run.interrupted.Store(true)
 		interrupt := slot != nil && slot.context.Err() == nil && slot.interrupted.CompareAndSwap(false, true)
 		w.mu.Unlock()
-		go w.close(w.context, request, slot, interrupt)
+		go w.close(ctx, request, slot, interrupt)
 	}
 }
 
