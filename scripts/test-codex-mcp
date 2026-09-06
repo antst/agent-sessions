@@ -8,6 +8,7 @@ trap 'rm -rf -- "$scratch"' EXIT
 record="$scratch/record"
 state="$scratch/state"
 codex="$scratch/codex"
+peer="$scratch/codex-peer"
 
 cat >"$codex" <<'EOF'
 #!/bin/sh
@@ -20,9 +21,9 @@ case "$1 $2" in
     ;;
   "mcp add")
     [ "${TEST_CODEX_FAIL_ADD:-0}" = 0 ] || exit 42
-    if [ "$*" = "mcp add agent_sessions -- codex-peer mcp" ]; then
+    if [ "$*" = "mcp add agent_sessions -- $TEST_CODEX_PEER mcp" ]; then
       printf '%s\n' current >"$TEST_CODEX_STATE"
-    elif [ "$1 $2 $3 $5 $6 $7 $8" = "mcp add --env agent_sessions -- codex-peer mcp" ]; then
+    elif [ "$1 $2 $3 $5 $6 $8" = "mcp add --env agent_sessions -- mcp" ] && [ "$7" = "$TEST_CODEX_PEER" ]; then
       printf 'socket=%s\n' "${4#AGENTBUS_SOCKET=}" >"$TEST_CODEX_STATE"
     else
       exit 91
@@ -33,22 +34,24 @@ case "$1 $2" in
 esac
 EOF
 chmod 0700 "$codex"
-export TEST_CODEX_RECORD="$record" TEST_CODEX_STATE="$state"
+: >"$peer"
+chmod 0700 "$peer"
+export TEST_CODEX_RECORD="$record" TEST_CODEX_STATE="$state" TEST_CODEX_PEER="$peer"
 
 for prior in disabled plugin-backed; do
   printf '%s\n' "$prior" >"$state"
   : >"$record"
-  install_codex_mcp "$codex"
+  install_codex_mcp "$codex" "$peer"
   grep -Fxq 'mcp remove agent_sessions' "$record"
-  grep -Fxq 'mcp add agent_sessions -- codex-peer mcp' "$record"
+  grep -Fxq "mcp add agent_sessions -- $peer mcp" "$record"
   grep -Fxq 'app-server daemon restart' "$record"
   [[ $(cat "$state") = current ]]
 done
 
 : >"$record"
 export AGENTBUS_SOCKET=/tmp/agentbus-test.sock
-install_codex_mcp "$codex"
-grep -Fxq 'mcp add --env AGENTBUS_SOCKET=/tmp/agentbus-test.sock agent_sessions -- codex-peer mcp' "$record"
+install_codex_mcp "$codex" "$peer"
+grep -Fxq "mcp add --env AGENTBUS_SOCKET=/tmp/agentbus-test.sock agent_sessions -- $peer mcp" "$record"
 [[ $(grep -Fxc 'app-server daemon restart' "$record") -eq 1 && $(cat "$state") = socket=/tmp/agentbus-test.sock ]]
 unset AGENTBUS_SOCKET
 
@@ -61,7 +64,7 @@ grep -Fxq 'app-server daemon restart' "$record"
 printf '%s\n' current >"$state"
 : >"$record"
 export TEST_CODEX_FAIL_ADD=1
-if install_codex_mcp "$codex"; then exit 1; else status=$?; fi
+if install_codex_mcp "$codex" "$peer"; then exit 1; else status=$?; fi
 unset TEST_CODEX_FAIL_ADD
 [[ $status -eq 42 && $(grep -Fc 'app-server daemon restart' "$record") -eq 0 && ! -e "$state" ]]
 printf '%s\n' 'Codex MCP install transaction: PASS'

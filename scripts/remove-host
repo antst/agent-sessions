@@ -138,7 +138,7 @@ install_integrations() {
     if grep -Eq '"name"[[:space:]]*:[[:space:]]*"agent-sessions"' <<<"$codex_marketplaces"; then
       "$codex_path" plugin marketplace remove agent-sessions
     fi
-    install_codex_mcp "$codex_path"
+    install_codex_mcp "$codex_path" "$prefix/bin/codex-peer"
   fi
   if [[ -n "$claude_path" ]]; then
     local claude_plugins

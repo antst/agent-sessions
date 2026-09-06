@@ -281,7 +281,7 @@ install_non_dsh_integrations() {
     if grep -Eq '"name"[[:space:]]*:[[:space:]]*"agent-sessions"' <<<"$codex_marketplaces"; then
       "$codex_path" plugin marketplace remove agent-sessions
     fi
-    install_codex_mcp "$codex_path"
+    install_codex_mcp "$codex_path" "$prefix/bin/codex-peer"
   else
     printf 'Skipping Codex integration: %s is not installed.\n' "$codex"
   fi

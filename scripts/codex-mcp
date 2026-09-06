@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 
 install_codex_mcp() {
-  local codex_path=$1
+  local codex_path=$1 peer_path=$2
+  [[ "$peer_path" == /* && -x "$peer_path" ]] || return 2
   "$codex_path" mcp remove agent_sessions >/dev/null 2>&1 || true
   if [[ -n ${AGENTBUS_SOCKET:-} ]]; then
-    "$codex_path" mcp add --env "AGENTBUS_SOCKET=$AGENTBUS_SOCKET" agent_sessions -- codex-peer mcp || return
+    "$codex_path" mcp add --env "AGENTBUS_SOCKET=$AGENTBUS_SOCKET" agent_sessions -- "$peer_path" mcp || return
   else
-    "$codex_path" mcp add agent_sessions -- codex-peer mcp || return
+    "$codex_path" mcp add agent_sessions -- "$peer_path" mcp || return
   fi
   "$codex_path" app-server daemon restart
 }
