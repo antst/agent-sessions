@@ -1217,11 +1217,14 @@ and stops retries permanently. A correlated `invalid_hello` response is also
 terminal for that identity: the kit surfaces it after `closed` and never turns
 the following EOF into a reconnect. The Go peer exposes that terminal value as
 `Err()`; a plain `Shutdown()` leaves it nil.
-The peer kit keeps one JSON-round-trip snapshot as the desired identity. After
+The peer kit keeps separate JSON-round-trip snapshots of its desired and last
+admitted identities. A delivery receives the last admitted snapshot until the
+next hello acknowledgement installs the desired one. After
 each hello response it compares what it sent with that desired value and sends
 the current value immediately until they match; a change crossed with connect
 or another re-hello therefore cannot leave the older value installed. Its
-`rehello(name, info)` call preserves the product, session ID, and groups. While
+`Rehello(ctx, name, info)` / `rehello(signal, name, info)` call preserves the
+product, session ID, and groups. An unchanged desired identity is a no-op. While
 disconnected it stores the new desired name and information and returns
 `not_connected`.
 Its `replace(ctx, identity)` call supplies a complete new identity for a
@@ -1250,7 +1253,7 @@ generated from the schema:
 `SessionSummary`, `HostProducts`, and `ProtocolError`; wrappers and products do
 not hand-maintain protocol-shaped duplicates. The worker entry is
 `serveWorker(callbacks, env)`, which returns the kit-owned `closed` signal. Peer
-mode is `connectPeer(identity, deliver)`, `rehello(name, info)`, and
+mode is `connectPeer(identity, deliver)`, `rehello(signal, name, info)`, and
 `replace(ctx, identity)`. A
 connection-bound client supplies `list`, `send`, `describe`, `spawn`, `resume`,
 `run`, `interrupt`, and `close(forget)` and is usable from every callback
