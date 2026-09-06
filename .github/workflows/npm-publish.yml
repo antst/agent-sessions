@@ -16,13 +16,25 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
       - name: Verify tag
         run: |
           version="$(node -p "require('./bus/package.json').version")"
           test "$GITHUB_REF_NAME" = "kit-v${version}" || {
             echo "tag $GITHUB_REF_NAME does not match bus/package.json version $version" >&2
+            exit 1
+          }
+          npm_version="$(npm --version)"
+          node -e '
+            const got = process.argv[1].split(".").map(Number)
+            const minimum = [11, 5, 1]
+            for (let i = 0; i < minimum.length; i++) {
+              if (got[i] > minimum[i]) process.exit(0)
+              if (got[i] < minimum[i]) process.exit(1)
+            }
+          ' "$npm_version" || {
+            echo "npm $npm_version is older than required 11.5.1" >&2
             exit 1
           }
       - name: Install
