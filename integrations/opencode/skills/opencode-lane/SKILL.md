@@ -5,14 +5,14 @@ description: Operate a daemon-owned OpenCode lane with exact receipt, permission
 
 # OpenCode lane
 
-Select product `opencode` through the structured Agent Sessions lane tool.
+Select product `opencode` through the structured sessionbus lane tool.
 
 - Run doctor before first use. The pinned native version and all documented
   server routes must be ready.
 - Use `default` to preserve native permission asks. Use
   `bypassPermissions` only when explicitly authorized; unknown modes fail.
-- OpenCode does not expose a proven mid-turn steer in this integration. Leave
-  busy input in the daemon's durable queue and never submit a duplicate.
+- OpenCode admits an active delivery with native `steer`; an idle lane delivery
+  uses its durable `queue` and runs when the caller starts the next turn.
 - Resume only the exact returned `ses_*` identity. A replacement session is
   not recovery.
 - Wait and collect the exact turn before reporting its result. Interrupt and
