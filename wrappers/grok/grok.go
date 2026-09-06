@@ -96,16 +96,16 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 	}
 	hold, holdProcess, err := p.startObserverClient(ctx, request.Open.Cwd)
 	if err != nil {
-		p.stopAux(leader)
+		stopAux(leader)
 		return sessionkit.OpenResult{}, closeLaunch(lock, endpoint, err)
 	}
 	releaseHold := func() {
 		hold.close()
-		p.stopAux(holdProcess)
+		stopAux(holdProcess)
 	}
 	fail := func(cause error) error {
 		releaseHold()
-		p.stopAux(leader)
+		stopAux(leader)
 		return closeLaunch(lock, endpoint, cause)
 	}
 	primaryArgs, err := launchArguments(request, leaderSocket(p.socket, p.key))
@@ -219,16 +219,20 @@ func (p *Wrapper) startObserverClient(ctx context.Context, cwd string) (*acpClie
 	args := []string{"--no-auto-update", "--permission-mode", "default", "--leader-socket", leaderSocket(p.socket, p.key), "agent", "--leader", "stdio"}
 	cmd := command("grok", args...)
 	cmd.Dir, cmd.Env, cmd.Stderr = cwd, nativeEnvironment(), os.Stderr
+	return startObserverClient(ctx, cmd, nil)
+}
+
+func startObserverClient(ctx context.Context, cmd *exec.Cmd, notify func(acpFrame)) (*acpClient, *nativeProcess, error) {
 	input, _ := cmd.StdinPipe()
 	output, _ := cmd.StdoutPipe()
 	process, err := startNative(cmd)
 	if err != nil {
 		return nil, nil, err
 	}
-	client := newACPClient(input, output, nil)
+	client := newACPClient(input, output, notify)
 	if err = initializeACP(ctx, client); err != nil {
 		client.close()
-		p.stopAux(process)
+		stopAux(process)
 		return nil, nil, err
 	}
 	return client, process, nil
@@ -248,7 +252,7 @@ func (p *Wrapper) startObserver(ctx context.Context, cwd, title string) error {
 	}
 	if err != nil {
 		observer.close()
-		p.stopAux(process)
+		stopAux(process)
 		return err
 	}
 	p.mu.Lock()
@@ -470,7 +474,7 @@ func (p *Wrapper) watch(child *host.Child) {
 	}
 }
 
-func (p *Wrapper) stopAux(process *nativeProcess) {
+func stopAux(process *nativeProcess) {
 	if process == nil {
 		return
 	}

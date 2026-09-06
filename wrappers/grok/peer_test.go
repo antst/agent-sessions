@@ -31,6 +31,9 @@ func TestInteractivePlan(t *testing.T) {
 	check(t, environment(plan.Env, host.NameEnv) == id, "name differs from id")
 	check(t, environment(plan.Env, host.GroupsEnv) == `["team"]`, "groups = %q", environment(plan.Env, host.GroupsEnv))
 	check(t, slices.Contains(plan.Args, "--leader") && slices.Contains(plan.Args, "--session-id"), "managed args = %#v", plan.Args)
+	for _, arguments := range [][]string{{"--always-approve"}, {"--yolo"}, {"--permission-mode", "always-approve"}, {"--permission-mode=always-approve"}} {
+		check(t, interactivePermission(arguments) == "bypassPermissions", "%#v did not select the private leader's bypass permission", arguments)
+	}
 	model := slices.Index(plan.Args, "--model")
 	check(t, model >= 0 && plan.Args[model+1] == "-g", "native option value was consumed as a group: %#v", plan.Args)
 
@@ -109,6 +112,14 @@ func TestPeerMCPUsesRosterTitleAndDefaultLeader(t *testing.T) {
 	backend.Shutdown()
 }
 
+func newPeerBackend(ctx context.Context, identity sessionkit.PeerIdentity, leaderPath, cwd string, leader *nativeProcess) (*PeerBackend, error) {
+	observer, process, changed, err := startPeerObserver(ctx, leaderPath, cwd)
+	if err != nil {
+		return nil, errors.Join(err, closeNative("leader", leader))
+	}
+	return connectPeerBackend(ctx, identity, observer, process, leader, changed)
+}
+
 func TestInteractiveLauncherOwnsPeerAndLocalAction(t *testing.T) {
 	root := shortRoot(t)
 	recordPath := filepath.Join(root, "record")
@@ -147,6 +158,15 @@ func TestInteractiveLauncherOwnsPeerAndLocalAction(t *testing.T) {
 	check(t, !processRunning(t, leaderPidfd), "private leader survived interactive shutdown")
 	check(t, !exists(path), "peer endpoint remains")
 	frames := records(t, recordPath)
+	check(t, countFrames(frames, "initialize") == 1, "resident observer was replaced: %d handshakes", countFrames(frames, "initialize"))
+	authenticated := false
+	for _, frame := range frames {
+		authenticated = authenticated || strings.Contains(string(frame), `"method":"authenticate"`)
+		if strings.Contains(string(frame), `"kind":"START"`) && strings.Contains(string(frame), `"--session-id"`) {
+			check(t, authenticated, "TUI started before the resident observer authenticated")
+			break
+		}
+	}
 	leaderPath := filepath.Join(root, "grok-"+host.LaunchTokenDigest(testSessionID)+".sock")
 	check(t, containsStart(frames, "--leader", "--session-id", testSessionID, leaderPath), "managed child did not use the private leader")
 	check(t, containsStart(frames, "agent", "leader", "--relay-on-demand", leaderPath, path), "private leader or local action endpoint absent")
@@ -217,7 +237,7 @@ func TestObserverExitStopsInteractiveOwner(t *testing.T) {
 	t.Setenv(host.SocketEnv, socket)
 	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
 	t.Setenv("GROK_TEST_INTERACTIVE_PID", pidPath)
-	t.Setenv("GROK_TEST_OBSERVER_EXIT", "1")
+	t.Setenv("GROK_TEST_OBSERVER_EXIT", pidPath)
 	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
 	must(t, err)
 	done := make(chan error, 1)

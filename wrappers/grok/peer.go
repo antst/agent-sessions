@@ -41,21 +41,11 @@ type PeerBackend struct {
 	failed   chan error
 }
 
-func newPeerBackend(ctx context.Context, identity sessionkit.PeerIdentity, leaderPath, cwd string, leader *nativeProcess) (*PeerBackend, error) {
-	id := identity.SessionID
-	if identity.Groups == nil {
-		identity.Groups = []string{}
-	}
+func startPeerObserver(ctx context.Context, leaderPath, cwd string) (*acpClient, *nativeProcess, <-chan struct{}, error) {
 	cmd := command("grok", "--no-auto-update", "--permission-mode", "default", "--leader-socket", leaderPath, "agent", "--leader", "stdio")
 	cmd.Dir, cmd.Env, cmd.Stderr, cmd.SysProcAttr = cwd, nativeEnvironment(), os.Stderr, &syscall.SysProcAttr{Setpgid: true}
-	input, _ := cmd.StdinPipe()
-	output, _ := cmd.StdoutPipe()
-	process, err := startNative(cmd)
-	if err != nil {
-		return nil, err
-	}
 	changed := make(chan struct{}, 1)
-	observer := newACPClient(input, output, func(frame acpFrame) {
+	observer, process, err := startObserverClient(ctx, cmd, func(frame acpFrame) {
 		if frame.Method == "_x.ai/sessions/changed" {
 			select {
 			case changed <- struct{}{}:
@@ -63,13 +53,22 @@ func newPeerBackend(ctx context.Context, identity sessionkit.PeerIdentity, leade
 			}
 		}
 	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return observer, process, changed, nil
+}
+
+func connectPeerBackend(ctx context.Context, identity sessionkit.PeerIdentity, observer *acpClient, process, leader *nativeProcess, changed <-chan struct{}) (*PeerBackend, error) {
+	id := identity.SessionID
+	var err error
+	if identity.Groups == nil {
+		identity.Groups = []string{}
+	}
 	stop := func(err error) (*PeerBackend, error) {
 		observer.close()
 		stopPeerProcess(process)
 		return nil, errors.Join(err, closeNative("leader", leader))
-	}
-	if err = initializeACP(ctx, observer); err != nil {
-		return stop(err)
 	}
 	b := &PeerBackend{observer: observer, process: process, leader: leader, failed: make(chan error, 1)}
 	wanted := identity.Name
@@ -151,23 +150,30 @@ func RunInteractive(ctx context.Context, plan host.ExecPlan) error {
 		_ = endpoint.Close()
 		return err
 	}
+	childCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	observer, observerProcess, changed, err := startPeerObserver(childCtx, leaderPath, cwd)
+	if err != nil {
+		_ = endpoint.Close()
+		return errors.Join(err, closeNative("leader", leader))
+	}
 	plan.Env = setEnvironment(plan.Env, mcp.LaneSocketEnv, endpoint.Path)
 	plan.Args = insertBeforeSeparator(plan.Args, "--leader-socket", leaderPath)
 	child := command(plan.Path, plan.Args...)
 	child.Env, child.Stdin, child.Stdout, child.Stderr = plan.Env, os.Stdin, os.Stdout, os.Stderr
 	if err = child.Start(); err != nil {
+		observer.close()
+		stopPeerProcess(observerProcess)
 		_ = endpoint.Close()
 		return errors.Join(err, closeNative("leader", leader))
 	}
-	childCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	childDone := make(chan error, 1)
 	go func() {
 		childDone <- child.Wait()
 		close(childDone)
 		cancel()
 	}()
-	backend, err := newPeerBackend(childCtx, identity, leaderPath, cwd, leader)
+	backend, err := connectPeerBackend(childCtx, identity, observer, observerProcess, leader, changed)
 	if err != nil {
 		select {
 		case childErr := <-childDone:
@@ -495,10 +501,11 @@ func interactiveCwd(arguments []string) (string, error) {
 }
 
 func interactivePermission(arguments []string) string {
-	if nativeOption(arguments, "--always-approve") != "" {
+	mode := nativeOption(arguments, "--permission-mode")
+	if nativeOption(arguments, "--always-approve") != "" || nativeOption(arguments, "--yolo") != "" || mode == "always-approve" {
 		return "bypassPermissions"
 	}
-	return first(nativeOption(arguments, "--permission-mode"), "default")
+	return first(mode, "default")
 }
 
 func insertBeforeSeparator(arguments []string, values ...string) []string {
@@ -518,7 +525,7 @@ func nativeOption(arguments []string, target string) string {
 		}
 		name, value, attached := strings.Cut(argument, "=")
 		if name == target {
-			if target == "--always-approve" {
+			if target == "--always-approve" || target == "--yolo" {
 				return "true"
 			}
 			if attached {

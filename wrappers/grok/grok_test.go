@@ -132,7 +132,8 @@ func fakeGrok() {
 					reply(map[string]any{"jsonrpc": "2.0", "method": "_x.ai/sessions/changed", "params": map[string]any{}})
 				}()
 			}
-			if os.Getenv("GROK_TEST_OBSERVER_EXIT") != "" && slices.Contains(arguments, "stdio") {
+			if path := os.Getenv("GROK_TEST_OBSERVER_EXIT"); path != "" && slices.Contains(arguments, "stdio") {
+				<-fileReady(path)
 				return
 			}
 		case "_x.ai/interject":
@@ -294,7 +295,7 @@ func TestResumeIdentityFailureRepliesBeforeCleanup(t *testing.T) {
 	p.mu.Unlock()
 	primary.close()
 	_ = child.Close(context.Background(), func(context.Context) error { return nil })
-	p.stopAux(leader)
+	stopAux(leader)
 	_ = listener.Close()
 }
 
