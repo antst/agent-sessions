@@ -139,7 +139,15 @@ func activeSession(payload []byte, parent int, groups []string) (sessionkit.Peer
 	return found, nil
 }
 
-func (b *PeerBackend) deliver(ctx context.Context, request sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
+func (b *PeerBackend) deliver(ctx context.Context, admitted sessionkit.PeerIdentity, request sessionkit.DeliveryRequest) (receipt sessionkit.DeliveryReceipt, err error) {
+	defer func() {
+		if ctx.Err() != nil {
+			receipt, err = sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "closing"}, nil
+		}
+	}()
+	if admitted.SessionID == "" {
+		return sessionkit.DeliveryReceipt{}, errors.New("Claude peer identity is unavailable")
+	}
 	message, err := host.RenderNativeMessage(request)
 	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
