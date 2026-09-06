@@ -20,7 +20,7 @@ type WorkerCallbacks interface {
 	Open(context.Context, OpenRequest) (OpenResult, error)
 	Run(context.Context, *Run, string) (TurnResult, error)
 	Interrupt(context.Context, *Run) error
-	Deliver(context.Context, DeliveryRequest) (DeliveryReceipt, error)
+	Deliver(context.Context, DeliveryRequest, *Run) (DeliveryReceipt, error)
 	Close(context.Context, SessionCloseRequest) error
 }
 
@@ -30,11 +30,15 @@ type Run struct {
 	cancel      context.CancelFunc
 	done        <-chan struct{}
 	finish      context.CancelFunc
+	admitted    chan struct{}
+	admit       sync.Once
 	interrupted atomic.Bool
 }
 
-func (r *Run) Interrupted() bool     { return r.interrupted.Load() }
-func (r *Run) Done() <-chan struct{} { return r.done }
+func (r *Run) Interrupted() bool             { return r.interrupted.Load() }
+func (r *Run) Done() <-chan struct{}         { return r.done }
+func (r *Run) Admitted()                     { r.admit.Do(func() { close(r.admitted) }) }
+func (r *Run) AdmittedDone() <-chan struct{} { return r.admitted }
 
 type Worker struct {
 	product      WorkerCallbacks
@@ -115,7 +119,7 @@ func (w *Worker) handle(ctx context.Context, request *rpc.Request) {
 		}
 		runCtx, cancel := context.WithCancel(w.context)
 		done, finish := context.WithCancel(context.Background())
-		slot := &Run{context: runCtx, cancel: cancel, done: done.Done(), finish: finish}
+		slot := &Run{context: runCtx, cancel: cancel, done: done.Done(), finish: finish, admitted: make(chan struct{})}
 		w.run = slot
 		w.mu.Unlock()
 		go w.runTurn(w.context, request, slot)
@@ -137,13 +141,14 @@ func (w *Worker) handle(ctx context.Context, request *rpc.Request) {
 		go w.interrupt(request, slot, call)
 	case "message.deliver":
 		w.mu.Lock()
-		closing := w.run != nil && w.run.done == nil
+		slot := w.run
+		closing := slot != nil && slot.done == nil
 		w.mu.Unlock()
 		if closing {
 			go w.answer(request, DeliveryReceipt{Disposition: "rejected", Reason: "closing"}, 0)
 			return
 		}
-		go w.deliver(w.context, request)
+		go w.deliver(w.context, request, slot)
 	case "session.close":
 		w.mu.Lock()
 		slot := w.run
@@ -201,8 +206,8 @@ func (w *Worker) interrupt(request *rpc.Request, run *Run, call bool) {
 	w.reply(w.conn.Result(request, struct{}{}))
 }
 
-func (w *Worker) deliver(ctx context.Context, request *rpc.Request) {
-	receipt, err := w.product.Deliver(ctx, *request.Params.(*DeliveryRequest))
+func (w *Worker) deliver(ctx context.Context, request *rpc.Request, run *Run) {
+	receipt, err := w.product.Deliver(ctx, *request.Params.(*DeliveryRequest), run)
 	if err != nil {
 		receipt = DeliveryReceipt{Disposition: "rejected", Reason: err.Error()}
 	}

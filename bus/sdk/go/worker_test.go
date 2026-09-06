@@ -20,6 +20,10 @@ type fakeProduct struct {
 	started                 chan *Run
 	release, interrupted    chan struct{}
 	deliverStart            chan struct{}
+	deliverRun              chan *Run
+	deliverRelease          chan struct{}
+	admit                   chan struct{}
+	nativeEvents            chan string
 	closeStart, closeEnd    chan struct{}
 	closeContext            chan error
 	closeRequest            chan SessionCloseRequest
@@ -57,6 +61,14 @@ func (p *fakeProduct) Run(ctx context.Context, run *Run, input string) (TurnResu
 		p.started <- run
 		<-ctx.Done()
 		return TurnResult{}, ctx.Err()
+	case "admit":
+		p.started <- run
+		p.nativeEvents <- "input"
+		<-p.admit
+		run.Admitted()
+		run.Admitted()
+		<-p.release
+		return TurnResult{Outcome: "completed"}, nil
 	case "fail":
 		return TurnResult{}, p
 	case "long":
@@ -80,8 +92,36 @@ func (p *fakeProduct) Interrupt(ctx context.Context, run *Run) error {
 	}
 	return p.interruptErr
 }
-func (p *fakeProduct) Deliver(ctx context.Context, _ DeliveryRequest) (DeliveryReceipt, error) {
+func (p *fakeProduct) Deliver(ctx context.Context, _ DeliveryRequest, run *Run) (DeliveryReceipt, error) {
 	atomic.AddInt32(&p.calls[4], 1)
+	if p.deliverRun != nil {
+		p.deliverRun <- run
+		if p.deliverRelease != nil {
+			<-p.deliverRelease
+		}
+		if run == nil {
+			return DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+		}
+		select {
+		case <-run.Done():
+			return DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+		default:
+		}
+		select {
+		case <-run.Done():
+			return DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+		case <-run.AdmittedDone():
+		}
+		select {
+		case <-run.Done():
+			return DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+		default:
+		}
+		if p.nativeEvents != nil {
+			p.nativeEvents <- "steer"
+		}
+		return DeliveryReceipt{Disposition: "injected"}, nil
+	}
 	if p.deliverStart != nil {
 		close(p.deliverStart)
 		<-ctx.Done()
@@ -92,6 +132,47 @@ func (p *fakeProduct) Deliver(ctx context.Context, _ DeliveryRequest) (DeliveryR
 		return DeliveryReceipt{Disposition: "injected"}, err
 	}
 	return DeliveryReceipt{Disposition: "injected"}, nil
+}
+
+func TestWorkerDeliveryKeepsAdmissionRun(t *testing.T) {
+	p := &fakeProduct{started: make(chan *Run), release: make(chan struct{}), deliverRun: make(chan *Run), deliverRelease: make(chan struct{})}
+	h := startHarness(t, p, true, true)
+	running := async(h, "turn.run", protocol.TurnRunRequest{SessionID: target.SessionID, Input: "block"}, &TurnResult{})
+	run := <-p.started
+	var receipt DeliveryReceipt
+	delivered := async(h, "message.deliver", delivery, &receipt)
+	check(t, <-p.deliverRun == run, "delivery did not receive the admitted run")
+	close(p.release)
+	check(t, <-running == nil, "run failed")
+	<-run.Done()
+	select {
+	case <-run.AdmittedDone():
+		t.Fatal("kit marked a failed native admission successful")
+	default:
+	}
+	close(p.deliverRelease)
+	check(t, <-delivered == nil && receipt.Disposition == "queued_for_next_turn", "terminal crossing receipt = %#v", receipt)
+}
+
+func TestRunAdmissionOrdersDelivery(t *testing.T) {
+	p := &fakeProduct{started: make(chan *Run), release: make(chan struct{}), admit: make(chan struct{}), nativeEvents: make(chan string, 2), deliverRun: make(chan *Run)}
+	h := startHarness(t, p, true, true)
+	running := async(h, "turn.run", protocol.TurnRunRequest{SessionID: target.SessionID, Input: "admit"}, &TurnResult{})
+	run := <-p.started
+	check(t, <-p.nativeEvents == "input", "native input was not first")
+	var receipt DeliveryReceipt
+	delivered := async(h, "message.deliver", delivery, &receipt)
+	check(t, <-p.deliverRun == run, "active delivery received the wrong run")
+	select {
+	case event := <-p.nativeEvents:
+		t.Fatalf("delivery crossed native admission: %s", event)
+	default:
+	}
+	close(p.admit)
+	check(t, <-p.nativeEvents == "steer", "native steer was not second")
+	check(t, <-delivered == nil && receipt.Disposition == "injected", "admitted delivery receipt = %#v", receipt)
+	close(p.release)
+	check(t, <-running == nil, "run failed")
 }
 func (p *fakeProduct) Close(ctx context.Context, request SessionCloseRequest) error {
 	atomic.AddInt32(&p.calls[5], 1)
