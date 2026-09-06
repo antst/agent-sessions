@@ -8,7 +8,10 @@ import (
 	"syscall"
 )
 
-type SessionLock struct{ file *os.File }
+type SessionLock struct {
+	file *os.File
+	path string
+}
 
 func AcquireSessionLock(socket, product, sessionID string) (*SessionLock, error) {
 	if invalidPart(product) || invalidPart(sessionID) {
@@ -29,11 +32,22 @@ func AcquireSessionLock(socket, product, sessionID string) (*SessionLock, error)
 		}
 		return nil, err
 	}
-	return &SessionLock{file: file}, nil
+	return &SessionLock{file: file, path: file.Name()}, nil
 }
 
 func (l *SessionLock) File() *os.File { return l.file }
 func (l *SessionLock) Close() error   { return l.file.Close() }
+func (l *SessionLock) Rename(name string) error {
+	if invalidPart(name) {
+		return errors.New("session lock path is invalid")
+	}
+	path := filepath.Join(filepath.Dir(l.path), name)
+	if err := os.Rename(l.path, path); err != nil {
+		return err
+	}
+	l.path = path
+	return nil
+}
 
 func invalidPart(value string) bool {
 	return strings.TrimSpace(value) == "" || value == "." || value == ".." || filepath.Base(value) != value
