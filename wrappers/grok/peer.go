@@ -275,7 +275,7 @@ func (b *PeerBackend) deliverOne(ctx context.Context, observer *acpClient, ident
 		name := first(row.Title, row.SessionID)
 		info := map[string]any{"cwd": row.Cwd}
 		if name != identity.Name || row.Cwd != identity.Info["cwd"] {
-			err = b.peer.Rehello(name, info)
+			err = b.peer.Rehello(ctx, name, info)
 			if err == nil {
 				identity.Name, identity.Info = name, info
 			}

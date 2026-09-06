@@ -67,7 +67,7 @@ func TestProductHelperOwnsPeerAndLazilyObserves(t *testing.T) {
 	recordPath := filepath.Join(root, "record")
 	t.Setenv("GROK_TEST_RECORD", recordPath)
 	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
-	t.Setenv("GROK_TEST_TITLES", "product title")
+	t.Setenv("GROK_TEST_TITLES", "product title,"+testSessionID)
 	blocked := filepath.Join(root, "interject-release")
 	t.Setenv("GROK_TEST_INTERJECT_BLOCK", blocked)
 	cwd, err := os.Getwd()
@@ -101,15 +101,15 @@ func TestProductHelperOwnsPeerAndLazilyObserves(t *testing.T) {
 	delivered := deliverPeer(backend, deliveryCtx, delivery("peer message"))
 	rehello := <-hellos
 	check(t, rehello.SessionID == testSessionID && rehello.Name == "product title", "title re-hello = %#v", rehello)
-	rehello.ack <- true
-	waitFrame(t, recordPath, "_x.ai/interject", 1)
 	cancel()
 	check(t, errors.Is((<-delivered).err, context.Canceled), "cancelled delivery did not return its context error")
 	publishTestFile(blocked, []byte("ready"))
 	request := delivery("again")
 	request.MessageID = "again"
-	receipt, err := backend.deliver(context.Background(), backend.identity, request)
-	check(t, err == nil && receipt.Disposition == "injected" && len(peerClientPIDs(t, records(t, recordPath))) == 1, "observer was not retained: %#v / %v", receipt, err)
+	delivered = deliverPeer(backend, context.Background(), request)
+	answer := <-delivered
+	check(t, answer.err == nil && answer.receipt.Disposition == "injected" && len(peerClientPIDs(t, records(t, recordPath))) == 1, "observer was not retained: %#v", answer)
+	rehello.ack <- true
 	backend.Shutdown()
 }
 
