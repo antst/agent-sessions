@@ -5,6 +5,7 @@ script_directory=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$script_directory/managed-tree"
 source "$script_directory/launchd-control"
 source "$script_directory/dsh-profile"
+source "$script_directory/codex-mcp"
 
 if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && "$2" != --purge ) ]]; then
   printf 'usage: %s PREFIX [--purge]\n' "${0##*/}" >&2
@@ -137,8 +138,7 @@ install_integrations() {
     if grep -Eq '"name"[[:space:]]*:[[:space:]]*"agent-sessions"' <<<"$codex_marketplaces"; then
       "$codex_path" plugin marketplace remove agent-sessions
     fi
-    "$codex_path" plugin marketplace add "$current"
-    "$codex_path" plugin add agent-sessions@agent-sessions
+    install_codex_mcp "$codex_path"
   fi
   if [[ -n "$claude_path" ]]; then
     local claude_plugins
@@ -254,6 +254,7 @@ if [[ -n "$codex_path" ]]; then
   if grep -Eq '"name"[[:space:]]*:[[:space:]]*"agent-sessions"' <<<"$marketplaces"; then
     "$codex_path" plugin marketplace remove agent-sessions
   fi
+  remove_codex_mcp "$codex_path"
 fi
 if [[ -n "$claude_path" ]]; then
   plugins=$("$claude_path" plugin list --json)

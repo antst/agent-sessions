@@ -28,6 +28,7 @@
 - The 0.4.0 close path archives the exact thread and unsubscribes so its stdio MCP child is released. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:759`
 - A turn started with unsupported model `agentbus-invalid-model` closes with status `failed`; its error object carries `message`, `codexErrorInfo`, `additionalDetails`, and `misalignment`. — verified: 0.153.4 — source: `/home/antst/agentbus-evidence/codex-failed-turn-20260906T085803Z/appserver.jsonl`
 - For an interactive TUI connected through `--remote`, command-line `mcp_servers.agent_sessions.command` and `.args` do not override an installed same-name plugin MCP entry: Codex spawned the installed `agent-sessions connector auto` and did not spawn the configured `codex-peer mcp`. — verified: 0.153.4 — source: `/home/antst/agentbus-evidence/codex-cells-20260906T094434Z/peer/C1-failure-processes.txt`
+- In remote mode the App Server daemon spawns MCP servers from the configuration it loaded; changing the installed `mcp_servers.agent_sessions` entry requires restarting that daemon before an interactive TUI can use the replacement. — verified: 0.153.4 — source: `/home/antst/agentbus-evidence/codex-cells-20260906T094434Z/peer/C1-installed-mcp-configs.txt`
 - `UNVERIFIED:` An active `thread/read` response and the one-row `thread/turns/list` response used by interactive peer delivery have not yet been captured on 0.153.x.
 
 ## Exact captured frames typed by the wrapper
@@ -120,7 +121,7 @@ Each line below is copied byte-for-byte from the `raw` field in the named eviden
 
 ## Wrapper differences from the 0.4.0 source
 
-- `CONTRADICTION:` Interactive peer mode cannot yet guarantee its one `codex-peer mcp` connection when the installed plugin contains the same `agent_sessions` server ID; Codex 0.153.4 selected the installed plugin entry over the launcher-supplied per-thread entry. — source: `/home/antst/agentbus-evidence/codex-cells-20260906T094434Z/peer/C1-installed-mcp-configs.txt`
+- `CONTRADICTION:` The failed peer probe assumed TUI `-c` values would override the remote daemon's MCP configuration. Codex 0.153.4 instead used the entry already loaded by that daemon; the installer now owns the global `agent_sessions` entry through `codex mcp` and restarts the daemon only when it rewrites the entry. — source: `/home/antst/agentbus-evidence/codex-cells-20260906T094434Z/peer/C1-installed-mcp-configs.txt`
 - `CONTRADICTION:` The current peer launcher starts the App Server daemon and injects `--remote` only for interactive TUI launches; informational and native subcommand invocations pass through unchanged. The 0.4.0 launcher used the same branch split but also carried pending-launch coordination that the universal peer removes. — source: `internal/launcher/codex_peer.go:122`
 - `CONTRADICTION:` The current lane passes its approval, sandbox, model, and private MCP config through thread requests; the 0.4.0 bridge also issued `thread/settings/update` after resume. — source: `internal/bridge/native_support.go:84`
 - `CONTRADICTION:` The current App Server client rejects every server request with `-32601`; the 0.4.0 bridge handled Agent Sessions dynamic tool calls and elicitation inside the App Server connection. The universal wrapper instead supplies tools through the private stdio MCP child. — source: `internal/bridge/dynamic_tools.go:26`

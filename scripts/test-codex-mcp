@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$root/codex-mcp"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/agentbus-codex-mcp.XXXXXX")
+trap 'rm -rf -- "$scratch"' EXIT
+record="$scratch/record"
+state="$scratch/state"
+codex="$scratch/codex"
+
+cat >"$codex" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$TEST_CODEX_RECORD"
+case "$1 $2" in
+  "mcp get")
+    [ -f "$TEST_CODEX_STATE" ] || exit 1
+    if [ "$(cat "$TEST_CODEX_STATE")" = current ]; then command=codex-peer; args='["mcp"]'; else command=old-peer; args='["old"]'; fi
+    printf '{"transport":{"type":"stdio","command":"%s","args":%s,"env":null,"env_vars":[],"cwd":null}}\n' "$command" "$args"
+    ;;
+  "mcp add")
+    [ "${TEST_CODEX_FAIL_ADD:-0}" = 0 ] || exit 42
+    [ "$*" = "mcp add agent_sessions -- codex-peer mcp" ] || exit 91
+    printf '%s\n' current >"$TEST_CODEX_STATE"
+    ;;
+  "mcp remove") rm -f -- "$TEST_CODEX_STATE" ;;
+  "app-server daemon") [ "$*" = "app-server daemon restart" ] || exit 92 ;;
+  *) exit 93 ;;
+esac
+EOF
+chmod 0700 "$codex"
+export TEST_CODEX_RECORD="$record" TEST_CODEX_STATE="$state"
+
+printf '%s\n' stale >"$state"
+install_codex_mcp "$codex"
+grep -Fxq 'mcp add agent_sessions -- codex-peer mcp' "$record"
+[[ $(grep -Fxc 'app-server daemon restart' "$record") -eq 1 ]]
+
+: >"$record"
+install_codex_mcp "$codex"
+[[ $(wc -l <"$record") -eq 1 ]]
+grep -Fxq 'mcp get agent_sessions --json' "$record"
+
+: >"$record"
+remove_codex_mcp "$codex"
+grep -Fxq 'mcp remove agent_sessions' "$record"
+[[ $(grep -Fxc 'app-server daemon restart' "$record") -eq 1 ]]
+
+: >"$record"
+remove_codex_mcp "$codex"
+[[ $(wc -l <"$record") -eq 1 ]]
+
+printf '%s\n' stale >"$state"
+: >"$record"
+export TEST_CODEX_FAIL_ADD=1
+if install_codex_mcp "$codex"; then exit 1; else status=$?; fi
+unset TEST_CODEX_FAIL_ADD
+[[ $status -eq 42 && $(grep -Fc 'app-server daemon restart' "$record") -eq 0 && $(cat "$state") = stale ]]
+printf '%s\n' 'Codex MCP install transaction: PASS'

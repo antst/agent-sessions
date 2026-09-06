@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+codex_mcp_matches() {
+  local codex_path=$1 configuration compact
+  configuration=$("$codex_path" mcp get agent_sessions --json 2>/dev/null) || return 1
+  compact=$(tr -d '[:space:]' <<<"$configuration")
+  [[ "$compact" == *'"transport":{"type":"stdio","command":"codex-peer","args":["mcp"],"env":null,"env_vars":[],"cwd":null}'* ]]
+}
+
+install_codex_mcp() {
+  local codex_path=$1
+  if codex_mcp_matches "$codex_path"; then return 0; fi
+  "$codex_path" mcp add agent_sessions -- codex-peer mcp || return
+  "$codex_path" app-server daemon restart
+}
+
+remove_codex_mcp() {
+  local codex_path=$1
+  if ! "$codex_path" mcp get agent_sessions --json >/dev/null 2>&1; then return 0; fi
+  "$codex_path" mcp remove agent_sessions || return
+  "$codex_path" app-server daemon restart
+}

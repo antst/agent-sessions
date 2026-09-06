@@ -5,6 +5,7 @@ script_directory=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$script_directory/managed-tree"
 source "$script_directory/launchd-control"
 source "$script_directory/dsh-profile"
+source "$script_directory/codex-mcp"
 
 if [[ $# -ne 5 ]]; then
   printf 'usage: %s SOURCE_ROOT HOST_BINARY PREFIX VERSION PLATFORM\n' "${0##*/}" >&2
@@ -132,7 +133,7 @@ payload=(
   .agents .claude-plugin .codex-plugin
   claude grok hooks integrations qwen skills README.md
 )
-for path in "${payload[@]}" .codex-plugin/mcp.json scripts/native-entry scripts/pack-packages scripts/release-inventory deploy/agent-sessions; do
+for path in "${payload[@]}" .codex-plugin/mcp.json scripts/codex-mcp scripts/native-entry scripts/pack-packages scripts/release-inventory deploy/agent-sessions; do
   [[ -e "$source_root/$path" && ! -L "$source_root/$path" ]] || {
     printf 'host payload is missing or indirect: %s\n' "$path" >&2
     exit 1
@@ -171,6 +172,7 @@ cp -- "$stage/.codex-plugin/mcp.json" "$stage/.mcp.json"
 rm -- "$stage/.codex-plugin/mcp.json"
 mkdir -p "$stage/scripts" "$stage/deploy"
 cp -- "$source_root/scripts/native-entry" "$stage/scripts/native-entry"
+cp -- "$source_root/scripts/codex-mcp" "$stage/scripts/codex-mcp"
 cp -- "$source_root/scripts/pack-packages" "$stage/scripts/pack-packages"
 cp -- "$source_root/scripts/release-inventory" "$stage/scripts/release-inventory"
 cp -R -- "$source_root/deploy/agent-sessions" "$stage/deploy/"
@@ -277,14 +279,9 @@ install_non_dsh_integrations() {
     fi
     codex_marketplaces=$("$codex_path" plugin marketplace list --json)
     if grep -Eq '"name"[[:space:]]*:[[:space:]]*"agent-sessions"' <<<"$codex_marketplaces"; then
-      if ! grep -Fq '"root": "'"$integration_root"'"' <<<"$codex_marketplaces"; then
-        "$codex_path" plugin marketplace remove agent-sessions
-        "$codex_path" plugin marketplace add "$integration_root"
-      fi
-    else
-      "$codex_path" plugin marketplace add "$integration_root"
+      "$codex_path" plugin marketplace remove agent-sessions
     fi
-    "$codex_path" plugin add agent-sessions@agent-sessions
+    install_codex_mcp "$codex_path"
   else
     printf 'Skipping Codex integration: %s is not installed.\n' "$codex"
   fi
@@ -325,6 +322,7 @@ remove_non_dsh_integrations() {
   if [[ -n "$codex_path" ]]; then
     "$codex_path" plugin remove agent-sessions@agent-sessions >/dev/null 2>&1 || true
     "$codex_path" plugin marketplace remove agent-sessions >/dev/null 2>&1 || true
+    remove_codex_mcp "$codex_path"
   fi
   if [[ -n "$claude_path" ]]; then
     "$claude_path" plugin uninstall --scope user agent-sessions@agent-sessions >/dev/null 2>&1 || true

@@ -27,12 +27,14 @@ bash -n \
   "$plugin_root/scripts/verify-package-versions" \
   "$plugin_root/scripts/repair-history-projection" \
   "$plugin_root/scripts/install-host" \
+  "$plugin_root/scripts/codex-mcp" \
   "$plugin_root/scripts/dsh-profile" \
   "$plugin_root/scripts/install-hub" \
   "$plugin_root/scripts/launchd-control" \
   "$plugin_root/scripts/remove-host" \
   "$plugin_root/scripts/remove-hub" \
   "$plugin_root/scripts/test-install-host-transaction" \
+  "$plugin_root/scripts/test-codex-mcp" \
   "$plugin_root/scripts/test-install-hub-transaction" \
   "$plugin_root/scripts/test-launchd-control" \
   "$plugin_root/scripts/test-removal-transaction" \
@@ -354,6 +356,7 @@ fi
 unset AGENT_SESSIONS_AGENT_RUNTIME_DIR
 "$plugin_root/scripts/test-launchd-control"
 "$plugin_root/scripts/test-install-host-transaction"
+"$plugin_root/scripts/test-codex-mcp"
 "$plugin_root/scripts/test-install-hub-transaction"
 "$plugin_root/scripts/test-removal-transaction"
 cd -- "$plugin_root"

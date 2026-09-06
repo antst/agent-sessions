@@ -33,6 +33,7 @@ package_paths=(
   .agents .claude-plugin .codex-plugin
   claude deploy docs grok hooks integrations qwen skills Makefile README.md
   scripts/cachebuster
+  scripts/codex-mcp
   scripts/dsh-profile
   scripts/federation
   scripts/install-host
@@ -57,6 +58,7 @@ package_paths=(
   scripts/repair-history-projection
   scripts/test
   scripts/test-install-host-transaction
+  scripts/test-codex-mcp
   scripts/test-install-hub-transaction
   scripts/test-launchd-control
   scripts/test-real-products
