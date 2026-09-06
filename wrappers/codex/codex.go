@@ -242,7 +242,7 @@ func (p *Wrapper) Run(ctx context.Context, run *sessionkit.Run, input string) (s
 func (p *Wrapper) Interrupt(ctx context.Context, run *sessionkit.Run) error {
 	return p.handoff.Interrupt(ctx, run)
 }
-func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
+func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, _ *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
 	return p.handoff.Deliver(ctx, request, p.inject)
 }
 
@@ -509,7 +509,7 @@ func (p *Wrapper) watch(child *host.Child, drained <-chan struct{}) {
 	}
 }
 
-func (p *Wrapper) Close(ctx context.Context) error {
+func (p *Wrapper) Close(ctx context.Context, _ sessionkit.SessionCloseRequest) error {
 	p.mu.Lock()
 	p.closing = true
 	child, app, id := p.child, p.app, p.id
