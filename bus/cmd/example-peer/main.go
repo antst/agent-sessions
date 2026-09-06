@@ -145,4 +145,4 @@ func (p *example) Deliver(_ context.Context, request sdk.DeliveryRequest) (sdk.D
 	return sdk.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
 }
 
-func (*example) Close(context.Context) error { return nil }
+func (*example) Close(context.Context, sdk.SessionCloseRequest) error { return nil }

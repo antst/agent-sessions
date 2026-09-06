@@ -104,7 +104,7 @@ func TestRunDeliveryInterruptAndCall(t *testing.T) {
 	if err != nil || result.Outcome != "interrupted" || result.Result != "during" {
 		t.Fatalf("interrupted result = %#v, %v", result, err)
 	}
-	if err = product.Close(context.Background()); err != nil {
+	if err = product.Close(context.Background(), sdk.SessionCloseRequest{}); err != nil {
 		t.Fatal(err)
 	}
 }

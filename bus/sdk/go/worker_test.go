@@ -22,6 +22,7 @@ type fakeProduct struct {
 	deliverStart            chan struct{}
 	closeStart, closeEnd    chan struct{}
 	closeContext            chan error
+	closeRequest            chan SessionCloseRequest
 	outbound, hangInterrupt bool
 	closeErr, interruptErr  error
 	calls                   [6]int32
@@ -92,10 +93,13 @@ func (p *fakeProduct) Deliver(ctx context.Context, _ DeliveryRequest) (DeliveryR
 	}
 	return DeliveryReceipt{Disposition: "injected"}, nil
 }
-func (p *fakeProduct) Close(ctx context.Context) error {
+func (p *fakeProduct) Close(ctx context.Context, request SessionCloseRequest) error {
 	atomic.AddInt32(&p.calls[5], 1)
 	if p.closeContext != nil {
 		p.closeContext <- ctx.Err()
+	}
+	if p.closeRequest != nil {
+		p.closeRequest <- request
 	}
 	if p.closeStart != nil {
 		close(p.closeStart)
@@ -270,6 +274,13 @@ func runCase(t *testing.T, name string) [6]int32 {
 		h := startHarness(t, p, true, true)
 		check(t, h.Call(context.Background(), "session.close", target, &struct{}{}) == nil, "close error reached the wire")
 		check(t, <-p.closeContext == nil, "session.close cancelled the product Close context")
+	case "close-forget":
+		p.closeContext, p.closeRequest = make(chan error, 1), make(chan SessionCloseRequest, 1)
+		h := startHarness(t, p, true, true)
+		request := SessionCloseRequest{SessionID: target.SessionID, Forget: true}
+		check(t, h.Call(context.Background(), "session.close", request, &struct{}{}) == nil, "forget close failed")
+		check(t, <-p.closeContext == nil, "forget close cancelled the product Close context")
+		check(t, <-p.closeRequest == request, "product Close request changed")
 	default:
 		t.Fatalf("unknown lifecycle case %q", name)
 	}
