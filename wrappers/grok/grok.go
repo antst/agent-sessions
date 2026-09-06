@@ -2,8 +2,6 @@ package grok
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,8 +46,7 @@ type Wrapper struct {
 }
 
 func New(socket, token string) *Wrapper {
-	digest := sha256.Sum256([]byte(token))
-	return &Wrapper{socket: socket, key: hex.EncodeToString(digest[:16])}
+	return &Wrapper{socket: socket, key: host.LaunchTokenDigest(token)}
 }
 
 func (p *Wrapper) SetShutdown(shutdown func()) { p.shutdown = shutdown }
