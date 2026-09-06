@@ -53,9 +53,9 @@ Toolchain: `go version go1.26.5 linux/amd64`; Node `v25.9.0`.
 Result: PASS, exit 0.
 
 ```text
-ok github.com/antst/sessionbus/internal/products/opencodefamily 0.020s
-ok github.com/antst/sessionbus/internal/products/opencode       0.004s
-ok github.com/antst/sessionbus/internal/products/kilocode       0.030s
+ok github.com/antst/agent-sessions/internal/products/opencodefamily 0.020s
+ok github.com/antst/agent-sessions/internal/products/opencode       0.004s
+ok github.com/antst/agent-sessions/internal/products/kilocode       0.030s
 ```
 
 ```text
@@ -65,9 +65,9 @@ ok github.com/antst/sessionbus/internal/products/kilocode       0.030s
 Result: PASS, exit 0.
 
 ```text
-ok github.com/antst/sessionbus/internal/products/opencodefamily 1.067s
-ok github.com/antst/sessionbus/internal/products/opencode       1.013s
-ok github.com/antst/sessionbus/internal/products/kilocode       1.053s
+ok github.com/antst/agent-sessions/internal/products/opencodefamily 1.067s
+ok github.com/antst/agent-sessions/internal/products/opencode       1.013s
+ok github.com/antst/agent-sessions/internal/products/kilocode       1.053s
 ```
 
 ```text
