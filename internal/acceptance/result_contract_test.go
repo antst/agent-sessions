@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/releaseevidence"
+	"github.com/antst/sessionbus/internal/releaseevidence"
 )
 
 func TestResultContractRejectsIncompleteOrMiscreditedRuns(t *testing.T) {

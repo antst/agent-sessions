@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/socketpath"
+	"github.com/antst/sessionbus/internal/socketpath"
 )
 
 // ShortSocketRoot creates a private test directory whose longest declared

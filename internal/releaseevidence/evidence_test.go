@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/releasepkg"
+	"github.com/antst/sessionbus/internal/releasepkg"
 )
 
 const (
@@ -187,7 +187,7 @@ func TestGenerateConsumesAuthoritativeInventoryAndGateArtifacts(t *testing.T) {
 		PackageDir: filepath.Join(root, "packages"), GateDir: gateDir,
 		LinuxGatePath: linuxPath, OutputPath: output, Version: "0.4.0",
 		Commit: testCommit, Tree: testTree, RunID: testRunID, RunAttempt: 1,
-		RunURL: "https://github.com/antst/agent-sessions/actions/runs/123456",
+		RunURL: "https://github.com/antst/sessionbus/actions/runs/123456",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -301,7 +301,7 @@ func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[st
 		digest := sha256.Sum256(body)
 		return map[string]any{
 			"status":            "passed",
-			"job_url":           "https://github.com/antst/agent-sessions/actions/runs/123456/job/1" + string(rune('0'+index)),
+			"job_url":           "https://github.com/antst/sessionbus/actions/runs/123456/job/1" + string(rune('0'+index)),
 			"evidence_artifact": artifact,
 			"evidence_sha256":   hex.EncodeToString(digest[:]),
 		}
@@ -322,7 +322,7 @@ func testEvidenceDocument(t *testing.T, root, archiveDir, gateDir string) map[st
 		},
 		"workflow": map[string]any{
 			"path": ".github/workflows/ci.yml", "run_id": testRunID, "run_attempt": 1,
-			"run_url": "https://github.com/antst/agent-sessions/actions/runs/123456",
+			"run_url": "https://github.com/antst/sessionbus/actions/runs/123456",
 		},
 		"toolchains":     map[string]any{"linux": toolchain},
 		"native_clients": map[string]any{"linux": clients},

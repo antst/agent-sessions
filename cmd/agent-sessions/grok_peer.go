@@ -12,9 +12,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/antst/agent-sessions/internal/bridge"
-	"github.com/antst/agent-sessions/internal/launcher"
-	grokproduct "github.com/antst/agent-sessions/internal/products/grok"
+	"github.com/antst/sessionbus/internal/bridge"
+	"github.com/antst/sessionbus/internal/launcher"
+	grokproduct "github.com/antst/sessionbus/internal/products/grok"
 )
 
 func runGrokNativePeer(ctx context.Context, launch launcher.GrokNativeLaunch) error {

@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/envutil"
+	"github.com/antst/sessionbus/internal/envutil"
 )
 
 const (

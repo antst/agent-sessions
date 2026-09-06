@@ -14,12 +14,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/bridge"
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/livepresence"
-	"github.com/antst/agent-sessions/internal/permissionmode"
-	"github.com/antst/agent-sessions/internal/productruntime"
-	codexproduct "github.com/antst/agent-sessions/internal/products/codex"
+	"github.com/antst/sessionbus/internal/bridge"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
+	"github.com/antst/sessionbus/internal/livepresence"
+	"github.com/antst/sessionbus/internal/permissionmode"
+	"github.com/antst/sessionbus/internal/productruntime"
+	codexproduct "github.com/antst/sessionbus/internal/products/codex"
 )
 
 type lockedBuffer struct {

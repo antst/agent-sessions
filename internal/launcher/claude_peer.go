@@ -3,7 +3,7 @@ package launcher
 import (
 	"os"
 
-	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/productcatalog"
 )
 
 type claudePeerPlan struct {

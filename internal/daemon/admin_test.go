@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/diagnostics"
+	"github.com/antst/sessionbus/internal/diagnostics"
 )
 
 func TestAdminReportsTruthfulCountsWithoutCatalogContent(t *testing.T) {

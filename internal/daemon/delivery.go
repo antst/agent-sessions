@@ -7,7 +7,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/sessionbus/internal/federation"
 )
 
 // DeliveryPresenter performs one synchronous product- or network-specific

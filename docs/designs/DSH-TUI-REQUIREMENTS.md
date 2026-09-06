@@ -1,7 +1,7 @@
 # Internal DSH TUI requirements
 
 This is the internal product contract for a future DeepSeek Harness terminal UI, including dashi.
-The shipped Agent Sessions DSH profile already implements lane mode as a native protocol-v1 client;
+The shipped Sessionbus DSH profile already implements lane mode as a native protocol-v1 client;
 the TUI must supply the interactive peer lifecycle without replacing DSH's session or agent core.
 
 ## Required product behavior
@@ -11,13 +11,13 @@ the TUI must supply the interactive peer lifecycle without replacing DSH's sessi
 2. **Product-owned naming and resume.** Start-time names are written through DSH's session
    controller and flushed to its store. Exact-ID resume and session listing return native ID, title,
    cwd, and update time.
-3. **Exact live-root plugin context.** The TUI exposes its current root to the Agent Sessions plugin
+3. **Exact live-root plugin context.** The TUI exposes its current root to the Sessionbus plugin
    and emits a root-changed event. Each root holds its own protocol-v1 presence connection after the
    app-ready signal and closes it in the plugin disposer.
 4. **Addressable native input.** `Agent.steer` delivers ordinary inbound messages at the next step
    boundary or starts work while idle. `Agent.followup` creates a tracked lane-style turn when that
    distinction is needed. The product's receipt and consumption events carry DSH message IDs.
-5. **Promptless finite tools.** The model can call the closed Agent Sessions operation vocabulary
+5. **Promptless finite tools.** The model can call the closed Sessionbus operation vocabulary
    without a new interactive approval prompt. Host-supplied native identity, not a model argument,
    identifies the caller.
 6. **Live product events.** Title, model, cwd, root replacement, input receipt, user consumption, and
@@ -27,7 +27,7 @@ the TUI must supply the interactive peer lifecycle without replacing DSH's sessi
 
 ## Native protocol responsibilities
 
-The TUI integration speaks [Native Agent Sessions Presence Protocol v1](../specs/NATIVE-PEER-PROTOCOL.md)
+The TUI integration speaks [Native Sessionbus Presence Protocol v1](../specs/NATIVE-PEER-PROTOCOL.md)
 directly over `presence.sock`:
 
 - `session.hello` reports DSH's native ID, stored title, launch groups, product `dsh`, and live info;

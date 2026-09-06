@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/envutil"
-	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/envutil"
+	"github.com/antst/sessionbus/internal/productcatalog"
 )
 
 const (

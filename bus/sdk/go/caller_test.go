@@ -10,8 +10,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/antst/agent-sessions/bus/internal/protocol"
-	"github.com/antst/agent-sessions/bus/internal/rpc"
+	"github.com/antst/sessionbus/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/rpc"
 )
 
 func TestCallerMapsWireMethods(t *testing.T) {
@@ -131,8 +131,8 @@ func TestCallerSugarMatchesJavaScriptShapes(t *testing.T) {
 func TestDialIsOneShotFramedClient(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", root)
-	t.Setenv("AGENTBUS_SOCKET", "")
-	path := filepath.Join(root, "agentbus", "run", "presence.sock")
+	t.Setenv("SESSIONBUS_SOCKET", "")
+	path := filepath.Join(root, "sessionbus", "run", "presence.sock")
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
 	}

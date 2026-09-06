@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/testutil/mockprovider"
+	"github.com/antst/sessionbus/internal/testutil/mockprovider"
 )
 
 func TestStreamingTextIsDeterministicAndCaptured(t *testing.T) {

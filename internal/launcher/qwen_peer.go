@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/envutil"
-	"github.com/antst/agent-sessions/internal/pathidentity"
-	"github.com/antst/agent-sessions/internal/productcatalog"
-	"github.com/antst/agent-sessions/internal/qwenprofile"
+	"github.com/antst/sessionbus/internal/envutil"
+	"github.com/antst/sessionbus/internal/pathidentity"
+	"github.com/antst/sessionbus/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/qwenprofile"
 )
 
 const (

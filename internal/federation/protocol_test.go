@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/sessionidentity"
+	"github.com/antst/sessionbus/internal/sessionidentity"
 	"time"
 )
 

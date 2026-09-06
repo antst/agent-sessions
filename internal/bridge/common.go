@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/sessionkey"
-	"github.com/antst/agent-sessions/internal/sessiontools"
+	"github.com/antst/sessionbus/internal/sessionkey"
+	"github.com/antst/sessionbus/internal/sessiontools"
 )
 
 func sessionKey(id string) string { return sessionkey.FromID(id) }

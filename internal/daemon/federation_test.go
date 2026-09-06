@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/sessionbus/internal/federation"
 )
 
 func TestDaemonFederationOwnsExactlyOneHostLoop(t *testing.T) {

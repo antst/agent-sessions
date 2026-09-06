@@ -55,7 +55,7 @@ func TestNoNewLegacyBridgeOrFederatorImports(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				if value == "github.com/antst/agent-sessions/internal/bridge" || value == "github.com/antst/agent-sessions/internal/federator" {
+				if value == "github.com/antst/sessionbus/internal/bridge" || value == "github.com/antst/sessionbus/internal/federator" {
 					relative, err := filepath.Rel(root, path)
 					if err != nil {
 						return err
