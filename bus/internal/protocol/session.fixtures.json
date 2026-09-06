@@ -1,6 +1,9 @@
 {
   "cases": [
-    {"name":"hello peer","definition":"SessionHelloRequest","valid":true,"value":{"protocol":1,"product":"native-product","session_id":"session-00000000-0000-4000-8000-000000000001","name":"caller","groups":["session:caller"],"info":{}}},
+    {"name":"hello peer","definition":"SessionHelloRequest","valid":true,"value":{"protocol":1,"product":"native-product","session_id":"session-00000000-0000-4000-8000-000000000001","name":"List agent sessions","groups":["session:caller"],"info":{}}},
+    {"name":"hello peer unicode name boundary","definition":"SessionHelloRequest","valid":true,"value":{"protocol":1,"product":"native-product","session_id":"session-id","name":"x","groups":[],"info":{}},"repeat":{"path":["name"],"text":"🙂","count":128}},
+    {"name":"hello peer unicode name too long","definition":"SessionHelloRequest","valid":false,"value":{"protocol":1,"product":"native-product","session_id":"session-id","name":"x","groups":[],"info":{}},"repeat":{"path":["name"],"text":"🙂","count":129}},
+    {"name":"hello peer control in name","definition":"SessionHelloRequest","valid":false,"raw":"{\"protocol\":1,\"product\":\"native-product\",\"session_id\":\"session-id\",\"name\":\"bad\\u0001title\",\"groups\":[],\"info\":{}}"},
     {"name":"hello worker","definition":"SessionHelloRequest","valid":true,"value":{"protocol":1,"product":"example-peer","launch_token":"secret","supported_open_fields":["cwd","model"],"extra_arguments":[{"name":"--flag","description":"native flag","takes_value":false}],"version":"1.0"}},
     {"name":"hello mathematical integer","definition":"SessionHelloRequest","valid":true,"raw":"{\"protocol\":1.0,\"product\":\"example-peer\",\"launch_token\":\"secret\",\"supported_open_fields\":[],\"extra_arguments\":[]}"},
     {"name":"hello neither branch","definition":"SessionHelloRequest","valid":false,"value":{"protocol":1,"product":"wrapped-product"}},

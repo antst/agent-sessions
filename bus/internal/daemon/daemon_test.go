@@ -334,6 +334,18 @@ func (p *peerClient) call(method string, params, result any) error {
 	return p.wire.Call(context.Background(), method, params, result)
 }
 
+func TestNameAndIDPartGrammar(t *testing.T) {
+	if !validNamePart("  List agent sessions  ") || validNamePart("bad\u0001title") {
+		t.Fatal("printable name grammar changed")
+	}
+	if validIDPart("session id") || !validIDPart("session-id") {
+		t.Fatal("session ID grammar changed")
+	}
+	if !validNamePart(strings.Repeat("🙂", 128)) || validNamePart(strings.Repeat("🙂", 129)) {
+		t.Fatal("name limit does not count Unicode code points")
+	}
+}
+
 func TestDurableTableWritesSixColumnsAndLoads(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state", "sessions")
 	table, rows, err := openTable(path)
@@ -480,12 +492,12 @@ func waitFileWithoutDeadline(t *testing.T, path string) {
 
 func TestPeerHelloRehelloReplacementAndSupersession(t *testing.T) {
 	daemon, socket := startDaemon(t)
-	first := connectPeer(t, socket, "peer-one", "first", "team")
-	first.identity.Name, first.identity.Info = "renamed", map[string]any{"revision": float64(2)}
+	first := connectPeer(t, socket, "peer-one", "First session", "team")
+	first.identity.Name, first.identity.Info = "  renamed  session  ", map[string]any{"revision": float64(2)}
 	must(t, first.call("session.hello", first.identity, &struct{}{}))
 	var listed protocol.SessionListResult
 	must(t, first.call("session.list", protocol.SessionListRequest{}, &listed))
-	if len(listed.Sessions) != 1 || listed.Sessions[0].Name != "renamed@local" {
+	if len(listed.Sessions) != 1 || listed.Sessions[0].Name != "  renamed  session  @local" {
 		t.Fatalf("same-id re-hello = %#v", listed.Sessions)
 	}
 
@@ -969,12 +981,12 @@ func TestWorkerCallsLeaveInAdmissionOrder(t *testing.T) {
 func TestMessageSendReturnsOneOrderedReceiptPerResolvedLabel(t *testing.T) {
 	_, socket := startDaemon(t)
 	sender := connectPeer(t, socket, "sender", "sender", "shared")
-	one := connectPeer(t, socket, "one", "one", "shared")
+	one := connectPeer(t, socket, "one", "one session", "shared")
 	two := connectPeer(t, socket, "two", "two", "shared")
 	_ = connectPeer(t, socket, "ambiguous-a", "same", "shared")
 	_ = connectPeer(t, socket, "ambiguous-b", "same", "shared")
 	var sent protocol.MessageSendResult
-	if code := rpcCode(sender.call("message.send", protocol.MessageSendRequest{Targets: []string{"one", "bad name"}, Message: "invalid"}, &sent)); code != protocol.InvalidFrame {
+	if code := rpcCode(sender.call("message.send", protocol.MessageSendRequest{Targets: []string{"one", "bad\u0001name"}, Message: "invalid"}, &sent)); code != protocol.InvalidFrame {
 		t.Fatalf("invalid target grammar code = %d", code)
 	}
 	select {
@@ -984,7 +996,7 @@ func TestMessageSendReturnsOneOrderedReceiptPerResolvedLabel(t *testing.T) {
 	}
 	sender = connectPeer(t, socket, "sender-two", "sender-two", "shared")
 	sent = protocol.MessageSendResult{}
-	must(t, sender.call("message.send", protocol.MessageSendRequest{Targets: []string{"one", "missing@remote", "same", "two"}, Message: "fanout"}, &sent))
+	must(t, sender.call("message.send", protocol.MessageSendRequest{Targets: []string{"one session", "missing@remote", "same", "two"}, Message: "fanout"}, &sent))
 	if len(sent.Deliveries) != 4 || sent.Deliveries[0].Disposition != "injected" || sent.Deliveries[1].Reason != "unknown_host" || sent.Deliveries[2].Reason != "ambiguous" || sent.Deliveries[3].Disposition != "injected" {
 		t.Fatalf("mixed receipts = %#v", sent.Deliveries)
 	}

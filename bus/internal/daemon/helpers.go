@@ -15,10 +15,17 @@ var hostPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
 func validHost(value string) bool { return hostPattern.MatchString(value) }
 
-func validPart(value string) bool {
+func validIDPart(value string) bool {
 	length := utf8.RuneCountInString(value)
 	return length > 0 && length <= 128 && !strings.ContainsFunc(value, func(character rune) bool {
 		return !unicode.IsPrint(character) || unicode.IsSpace(character)
+	})
+}
+
+func validNamePart(value string) bool {
+	length := utf8.RuneCountInString(value)
+	return length > 0 && length <= 128 && !strings.ContainsFunc(value, func(character rune) bool {
+		return !unicode.IsPrint(character)
 	})
 }
 
@@ -31,9 +38,12 @@ func unqualify(value string) string {
 	return value
 }
 
-func canonicalInput(value, host string) (string, int) {
+func canonicalSessionID(value, host string) (string, int) { return canonical(value, host, validIDPart) }
+func canonicalName(value, host string) (string, int)      { return canonical(value, host, validNamePart) }
+
+func canonical(value, host string, valid func(string) bool) (string, int) {
 	if index := strings.LastIndexByte(value, '@'); index >= 0 {
-		if !validPart(value[:index]) {
+		if !valid(value[:index]) {
 			return "", protocol.InvalidFrame
 		}
 		if !validHost(value[index+1:]) || value[index+1:] != host {
@@ -41,7 +51,7 @@ func canonicalInput(value, host string) (string, int) {
 		}
 		return value, 0
 	}
-	if !validPart(value) {
+	if !valid(value) {
 		return "", protocol.InvalidFrame
 	}
 	return qualify(value, host), 0
