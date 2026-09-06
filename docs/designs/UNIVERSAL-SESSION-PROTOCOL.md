@@ -1249,6 +1249,14 @@ wrapper's private lane socket use that one framed implementation.
 Go exports `NewCaller(call)` to place the same typed methods and caller
 conveniences over that no-hello client's call function; workers and peers are
 the other two uses of the same caller.
+The caller kit also owns the tool action vocabulary: exported `Actions` is
+`list`, `send`, `spawn`, `describe`, `run`, `start`, `wait`, `status`,
+`interrupt`, `close`, and `forget`, and `Caller.Action(ctx, action, args)`
+decodes the wrapper/MCP JSON argument shape and dispatches to the corresponding
+typed method or caller convenience. `forget` is `close` with `forget:true`.
+An unknown action returns an error for the MCP layer to report as Invalid
+params. This dispatcher is at most 40 production logical lines; wrappers do not
+carry another action switch.
 
 Go constructs one caller for each worker before `Serve` and binds it to the
 worker's current connection through `Worker.Call`; repeated `Worker.Caller()`

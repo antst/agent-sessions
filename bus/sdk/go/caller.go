@@ -58,7 +58,7 @@ func NewCaller(call func(context.Context, string, any) (json.RawMessage, error))
 		if err != nil {
 			return err
 		}
-		return json.Unmarshal(raw, result)
+		return protocol.UnmarshalResult(method, raw, result)
 	})
 }
 
