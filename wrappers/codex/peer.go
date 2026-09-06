@@ -122,7 +122,7 @@ func (b *PeerBackend) Prepare(ctx context.Context, meta json.RawMessage) error {
 	if old.Name == identity.Name && old.Info["cwd"] == identity.Info["cwd"] {
 		return nil
 	}
-	if err = peer.Rehello(identity.Name, identity.Info); err != nil {
+	if err = peer.Rehello(ctx, identity.Name, identity.Info); err != nil {
 		return err
 	}
 	b.mu.Lock()
