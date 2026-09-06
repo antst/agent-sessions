@@ -115,9 +115,16 @@ func TestHelloAndIdentity(t *testing.T) {
 	id, err := sessionID("")
 	must(t, err)
 	check(t, len(id) == 36 && id[14] == '4' && strings.Contains("89ab", string(id[19])), "uuid = %q", id)
-	p.expected, p.ready, p.encoder = fixtureID, make(chan error, 1), json.NewEncoder(io.Discard)
+	writes := &frameLog{wrote: make(chan []byte, 1)}
+	p.expected, p.ready, p.encoder = fixtureID, make(chan error, 1), json.NewEncoder(writes)
 	failed := make(chan error, 1)
 	go func() { _, err := p.start(context.Background(), "first turn"); failed <- err }()
+	<-writes.wrote
+	select {
+	case err := <-failed:
+		t.Fatalf("start returned before init: %v", err)
+	default:
+	}
 	p.receive(frame{Type: "system", Subtype: "init", SessionID: "wrong"})
 	check(t, strings.Contains((<-failed).Error(), `from "00000000-0000-4000-8000-000000000123" to "wrong"`), "identity mismatch changed")
 }
