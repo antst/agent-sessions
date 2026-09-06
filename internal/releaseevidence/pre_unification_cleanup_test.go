@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/releasepkg"
+	"github.com/antst/sessionbus/internal/releasepkg"
 )
 
 type cleanupPlan struct {

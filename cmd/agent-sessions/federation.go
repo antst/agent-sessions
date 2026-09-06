@@ -12,11 +12,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	federationpkg "github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/launcher"
-	"github.com/antst/agent-sessions/internal/productcatalog"
-	"github.com/antst/agent-sessions/internal/productruntime"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
+	federationpkg "github.com/antst/sessionbus/internal/federation"
+	"github.com/antst/sessionbus/internal/launcher"
+	"github.com/antst/sessionbus/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/productruntime"
 )
 
 func (c *hostCoordinator) newFederationHost(runtime *daemonpkg.Runtime) (*daemonpkg.Federation, error) {

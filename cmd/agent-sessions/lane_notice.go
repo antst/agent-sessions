@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	federationpkg "github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/productruntime"
-	"github.com/antst/agent-sessions/internal/sessionkey"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
+	federationpkg "github.com/antst/sessionbus/internal/federation"
+	"github.com/antst/sessionbus/internal/productruntime"
+	"github.com/antst/sessionbus/internal/sessionkey"
 )
 
 type laneTerminalMCPArguments struct {

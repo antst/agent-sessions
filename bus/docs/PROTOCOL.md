@@ -38,10 +38,10 @@ listener; one shared key replaces federation's SNI lookup. A keyed daemon never
 accepts plain frames. A kit without the required key reports `daemon requires
 local key`; a keyed client connecting to a plain daemon reports the TLS
 handshake failure. The key is never a wire field, argument, or log value.
-Clients read the daemon Unix-socket path from `AGENTBUS_SOCKET`, falling
+Clients read the daemon Unix-socket path from `SESSIONBUS_SOCKET`, falling
 back to the documented default path when absent. Every spawned lane receives
-that variable alongside `AGENTBUS_LAUNCH_TOKEN` and, when configured,
-`AGENTBUS_LOCAL_KEY`.
+that variable alongside `SESSIONBUS_LAUNCH_TOKEN` and, when configured,
+`SESSIONBUS_LOCAL_KEY`.
 
 A product is a binary; started with a launch token in its environment it is a
 lane worker, with no mode argument. Lane-only workers such as non-AI tools are
@@ -516,8 +516,8 @@ Callback failures map exactly once:
 | `deliver` | Rejected receipt with the callback message as `reason`. |
 | `close` | `{}` followed by ordinary kit exit; the callback message is one quoted line on worker stderr. |
 
-The worker kit reads `AGENTBUS_SOCKET`,
-`AGENTBUS_LAUNCH_TOKEN`, and the optional `AGENTBUS_LOCAL_KEY`;
+The worker kit reads `SESSIONBUS_SOCKET`,
+`SESSIONBUS_LAUNCH_TOKEN`, and the optional `SESSIONBUS_LOCAL_KEY`;
 it removes both secrets from the process environment and connects to the
 named daemon endpoint. The local key selects TLS and is retained only
 in the kit's private connection material; neither secret is logged, returned,

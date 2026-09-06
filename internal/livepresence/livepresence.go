@@ -18,11 +18,11 @@ import (
 	"time"
 	"unicode"
 
-	federationpkg "github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/productcatalog"
-	"github.com/antst/agent-sessions/internal/productruntime"
-	"github.com/antst/agent-sessions/internal/sessionidentity"
-	"github.com/antst/agent-sessions/internal/sessiontools"
+	federationpkg "github.com/antst/sessionbus/internal/federation"
+	"github.com/antst/sessionbus/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/productruntime"
+	"github.com/antst/sessionbus/internal/sessionidentity"
+	"github.com/antst/sessionbus/internal/sessiontools"
 )
 
 const (

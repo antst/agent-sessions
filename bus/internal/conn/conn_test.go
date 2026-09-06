@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/protocol"
 )
 
 func TestReaderPostsFramesAndOneClose(t *testing.T) {

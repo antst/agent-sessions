@@ -8,7 +8,7 @@ import (
 	"os/exec"
 	"syscall"
 
-	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/sessionbus/internal/productruntime"
 )
 
 func configureOwnedProcessGroup(command *exec.Cmd) {

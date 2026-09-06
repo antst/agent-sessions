@@ -1,6 +1,6 @@
 package bridge
 
-import "github.com/antst/agent-sessions/internal/procinfo"
+import "github.com/antst/sessionbus/internal/procinfo"
 
 func probeProcessIdentity(pid int) processIdentityProbe {
 	info := procinfo.Read(pid)

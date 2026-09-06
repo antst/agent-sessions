@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/envutil"
-	"github.com/antst/agent-sessions/internal/procinfo"
-	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/sessionbus/internal/envutil"
+	"github.com/antst/sessionbus/internal/procinfo"
+	"github.com/antst/sessionbus/internal/productruntime"
 )
 
 const defaultTerminationGrace = 2 * time.Second

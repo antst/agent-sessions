@@ -9,8 +9,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/antst/agent-sessions/internal/permissionmode"
-	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/sessionbus/internal/permissionmode"
+	"github.com/antst/sessionbus/internal/procinfo"
 )
 
 type EnvVar struct {

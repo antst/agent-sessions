@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/sessionbus/internal/procinfo"
 )
 
 func TestGrokAdapterAuthorizesExactTUIOrPrivateLeaderConnector(t *testing.T) {

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/permissionmode"
-	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/sessionbus/internal/permissionmode"
+	"github.com/antst/sessionbus/internal/productruntime"
 )
 
 type testRPCRequest struct {

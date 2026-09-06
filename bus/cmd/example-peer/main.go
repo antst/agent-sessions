@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	sdk "github.com/antst/agent-sessions/bus/sdk/go"
+	sdk "github.com/antst/sessionbus/bus/sdk/go"
 )
 
 type activeRun struct {
@@ -134,7 +134,7 @@ func (p *example) Interrupt(_ context.Context, run *sdk.Run) error {
 	return nil
 }
 
-func (p *example) Deliver(_ context.Context, request sdk.DeliveryRequest) (sdk.DeliveryReceipt, error) {
+func (p *example) Deliver(_ context.Context, request sdk.DeliveryRequest, _ *sdk.Run) (sdk.DeliveryReceipt, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.active != nil {
@@ -145,4 +145,4 @@ func (p *example) Deliver(_ context.Context, request sdk.DeliveryRequest) (sdk.D
 	return sdk.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
 }
 
-func (*example) Close(context.Context) error { return nil }
+func (*example) Close(context.Context, sdk.SessionCloseRequest) error { return nil }

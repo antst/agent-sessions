@@ -10,7 +10,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/sessionbus/internal/procinfo"
 )
 
 var ErrConnectorInactive = errors.New("connector is inactive")

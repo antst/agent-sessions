@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
 )
 
 func TestHookDispatcherForwardsOnlyDeclaredExactManagedEvents(t *testing.T) {

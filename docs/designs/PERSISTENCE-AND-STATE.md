@@ -1,6 +1,6 @@
 # IT IS A TRUSTED ENVIRONMENT. DOT.
 
-Agent Sessions connects the user's own agents on infrastructure they control.
+Sessionbus connects the user's own agents on infrastructure they control.
 Isolation belongs in deployment: separate VLANs or separate hubs. The host,
 local socket, peers, and product adapters have no in-code trust boundary.
 
@@ -11,7 +11,7 @@ the entire security roadmap.
 ## Product authority
 
 Products own session identity, titles, histories, cwd, models, permissions, results, and resume.
-Agent Sessions reads native events or product query surfaces and does not persist a copy. A lane
+Sessionbus reads native events or product query surfaces and does not persist a copy. A lane
 has exactly one identity: the product's native session ID.
 
 Every invocation owns its launch facts. Start and resume receive groups, cwd, model, agent, effort,
@@ -21,7 +21,7 @@ override and the product applies its own default.
 ## The one durable table
 
 Peers, messages, turns, results, names, process identity, live presence, and product metadata are
-never persisted by Agent Sessions. The sole durable record is an immutable offline-lane discovery
+never persisted by Sessionbus. The sole durable record is an immutable offline-lane discovery
 candidate:
 
 - product and native session ID;
@@ -32,7 +32,7 @@ candidate:
 It is written idempotently when a fresh native identity is established and never rewritten on
 resume or handover. Derived lane anchors are recomputed as `primary/native-id`; they are not stored.
 
-The table answers only which UUIDs Agent Sessions may ask a product about for a group-visible
+The table answers only which UUIDs Sessionbus may ask a product about for a group-visible
 caller. `list --all` and offline resume ask the product to confirm each eligible UUID and expose only
 product-confirmed rows. A stale candidate yields nothing. Historical parentage is never presented
 as current ownership.
