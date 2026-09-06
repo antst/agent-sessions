@@ -349,7 +349,7 @@
       "properties": {
         "code": {"enum": [-32600, -32602, -32603, -32001, -32002, -32003, -32004, -32005, -32007, -32008, -32009, -32010, -32011, -32012, -32013, -32014, -32015]},
         "message": {"enum": ["invalid_frame", "invalid_hello", "internal", "unknown_session", "not_connected", "busy", "not_running", "already_connected", "unknown_product", "unsupported_open_field", "spawn_failed", "timeout", "not_committed", "superseded", "name_taken", "unknown_host", "forward_lost"]},
-        "data": {"$ref": "#/$defs/SpawnFailedData"}
+        "data": {}
       },
       "allOf": [
         {"if": {"properties": {"code": {"const": -32600}}}, "then": {"properties": {"message": {"const": "invalid_frame"}}}},
@@ -367,8 +367,12 @@
         {"if": {"properties": {"code": {"const": -32012}}}, "then": {"properties": {"message": {"const": "superseded"}}}}, {"if": {"properties": {"code": {"const": -32013}}}, "then": {"properties": {"message": {"const": "name_taken"}}}}, {"if": {"properties": {"code": {"const": -32014}}}, "then": {"properties": {"message": {"const": "unknown_host"}}}}, {"if": {"properties": {"code": {"const": -32015}}}, "then": {"properties": {"message": {"const": "forward_lost"}}}}, {"if": {"properties": {"code": {"const": -32603}}}, "then": {"properties": {"message": {"const": "internal"}}}},
         {
           "if": {"properties": {"code": {"const": -32009}}, "required": ["code"]},
-          "then": {"required": ["data"]},
-          "else": {"not": {"required": ["data"]}}
+          "then": {"required": ["data"], "properties": {"data": {"$ref": "#/$defs/SpawnFailedData"}}},
+          "else": {
+            "if": {"properties": {"code": {"const": -32603}}, "required": ["code"]},
+            "then": {"required": ["data"], "properties": {"data": {"type": "string", "minLength": 1}}},
+            "else": {"not": {"required": ["data"]}}
+          }
         }
       ]
     },

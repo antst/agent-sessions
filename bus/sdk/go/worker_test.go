@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -21,6 +22,7 @@ type fakeProduct struct {
 	deliverStart            chan struct{}
 	closeStart, closeEnd    chan struct{}
 	outbound, hangInterrupt bool
+	closeErr, interruptErr  error
 	calls                   [6]int32
 }
 
@@ -74,7 +76,7 @@ func (p *fakeProduct) Interrupt(ctx context.Context, run *Run) error {
 	if p.hangInterrupt {
 		<-ctx.Done()
 	}
-	return nil
+	return p.interruptErr
 }
 func (p *fakeProduct) Deliver(ctx context.Context, _ DeliveryRequest) (DeliveryReceipt, error) {
 	atomic.AddInt32(&p.calls[4], 1)
@@ -98,7 +100,7 @@ func (p *fakeProduct) Close(ctx context.Context) error {
 		close(p.closeStart)
 		<-p.closeEnd
 	}
-	return nil
+	return p.closeErr
 }
 func (p *fakeProduct) Error() string {
 	if p.deliverStart != nil {
@@ -155,6 +157,11 @@ func open(t *testing.T, h *rpc.Conn) {
 }
 
 func TestWorkerLifecycleTable(t *testing.T) {
+	stderrReader, stderrWriter, err := os.Pipe()
+	check(t, err == nil, "stderr pipe: %v", err)
+	previousStderr := os.Stderr
+	os.Stderr = stderrWriter
+	defer func() { os.Stderr = previousStderr; _ = stderrReader.Close(); _ = stderrWriter.Close() }()
 	var table []struct {
 		Name  string   `json:"name"`
 		Calls [6]int32 `json:"calls"`
@@ -166,6 +173,12 @@ func TestWorkerLifecycleTable(t *testing.T) {
 			check(t, runCase(t, row.Name) == row.Calls, "callback calls did not match %v", row.Calls)
 		})
 	}
+	os.Stderr = previousStderr
+	check(t, stderrWriter.Close() == nil, "close stderr writer")
+	raw, err = io.ReadAll(stderrReader)
+	check(t, err == nil, "read stderr: %v", err)
+	want := "agentbus: product close: \"first failure\\nsecond failure\"\nagentbus: product interrupt: \"first failure\\nsecond failure\"\n"
+	check(t, string(raw) == want, "callback stderr = %q", raw)
 }
 
 func runCase(t *testing.T, name string) [6]int32 {
@@ -193,7 +206,7 @@ func runCase(t *testing.T, name string) [6]int32 {
 			var result TurnResult
 			check(t, h.Call(context.Background(), "turn.run", protocol.TurnRunRequest{SessionID: "product-session@local", Input: test.input}, &result) == nil && result == test.want, "%s result = %#v", test.input, result)
 		}
-	case "one-run", "one-interrupt", "full-duplex", "close-during-run", "callback-originated-method", "run-done":
+	case "one-run", "one-interrupt", "interrupt-error", "full-duplex", "close-during-run", "callback-originated-method", "run-done":
 		blockingCase(t, name, p)
 	case "eof-during-run", "run-done-write-failure":
 		h := startHarness(t, p, true, true)
@@ -237,6 +250,10 @@ func runCase(t *testing.T, name string) [6]int32 {
 	case "shutdown":
 		startHarness(t, p, true, false)
 		p.worker.Shutdown()
+	case "close-error":
+		p.closeErr = errors.New("first failure\nsecond failure")
+		h := startHarness(t, p, true, true)
+		check(t, h.Call(context.Background(), "session.close", target, &struct{}{}) == nil, "close error reached the wire")
 	default:
 		t.Fatalf("unknown lifecycle case %q", name)
 	}
@@ -256,6 +273,9 @@ func blockingCase(t *testing.T, name string, p *fakeProduct) {
 		first, second := async(h, "turn.interrupt", target, &struct{}{}), async(h, "turn.interrupt", target, &struct{}{})
 		<-p.interrupted
 		check(t, errors.Join(<-first, <-second) == nil, "interrupt response failed")
+	case "interrupt-error":
+		p.interruptErr = errors.New("first failure\nsecond failure")
+		check(t, h.Call(context.Background(), "turn.interrupt", target, &struct{}{}) == nil, "interrupt error reached the wire")
 	case "full-duplex", "callback-originated-method":
 		p.outbound = true
 		checkDelivery(t, h, "injected")
@@ -295,6 +315,7 @@ func setEnvironment(t *testing.T, token, key string) {
 		t.Setenv(name, value)
 	}
 }
+
 func wantCode(t *testing.T, err error, code int) {
 	var rpcErr *protocol.RPCError
 	check(t, errors.As(err, &rpcErr) && rpcErr.Code == code, "error = %v, want code %d", err, code)
