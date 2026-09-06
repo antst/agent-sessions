@@ -62,15 +62,18 @@ func TestPermissionAndName(t *testing.T) {
 
 func TestInteractivePlan(t *testing.T) {
 	t.Setenv("CODEX_HOME", "/codex-home")
-	plan, coordinated, err := InteractivePlan([]string{"--model", "-g", "-g", "team", "--peer-name", "chosen", "resume", "id"}, []string{"PATH=/bin"})
+	plan, coordinated, err := InteractivePlan([]string{"--model", "-g", "--peer-name", "chosen", "resume", "id"}, []string{"PATH=/bin"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !coordinated || !slices.Equal(plan.Args, []string{"--remote", "unix:///codex-home/app-server-control/app-server-control.sock", "--model", "-g", "resume", "id"}) {
 		t.Fatalf("args = %v", plan.Args)
 	}
-	if !slices.Contains(plan.Env, host.GroupsEnv+`=["team"]`) || !slices.Contains(plan.Env, host.NameEnv+"=chosen") {
+	if !slices.Contains(plan.Env, host.GroupsEnv+`=[]`) || !slices.Contains(plan.Env, host.NameEnv+"=chosen") {
 		t.Fatalf("env = %v", plan.Env)
+	}
+	if _, _, err = InteractivePlan([]string{"-g", "team"}, nil); err == nil || !strings.Contains(err.Error(), "reinstall with --codex-groups") {
+		t.Fatalf("per-launch groups = %v", err)
 	}
 }
 

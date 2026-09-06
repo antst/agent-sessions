@@ -8,6 +8,8 @@ KILO ?= kilo
 DSH ?= dsh
 PNPM ?= pnpm
 NPM ?= npm
+CODEX_GROUPS ?= []
+export CODEX_GROUPS
 # Ignore an inherited GROK environment variable: a long-lived peer may have
 # pinned its own launcher, but that must not disable discovery for a later
 # install. An explicit make command-line GROK=/absolute/path pins one candidate.
@@ -132,7 +134,7 @@ reinstall:
 install install-all dev-install dev-install-all: build
 	CODEX="$(CODEX)" CLAUDE="$(CLAUDE)" GROK="$(GROK_INSTALL_VALUE)" QWEN="$(QWEN)" OPENCODE="$(OPENCODE)" KILO="$(KILO)" DSH="$(DSH)" PNPM="$(PNPM)" NPM="$(NPM)" \
 		./scripts/install-host "$(CURDIR)" "$(abspath $(BIN_DIR))/agent-sessions" \
-		"$(abspath $(PREFIX))" "$(HOST_RELEASE_VERSION)" "$(PLATFORM)"
+		"$(abspath $(PREFIX))" "$(HOST_RELEASE_VERSION)" "$(PLATFORM)" --codex-groups "$$CODEX_GROUPS"
 
 install-hub: build
 	./scripts/install-hub "$(CURDIR)" "$(abspath $(BIN_DIR))/agent-sessions-hub" \

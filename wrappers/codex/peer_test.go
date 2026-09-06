@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -43,9 +44,16 @@ func TestPeerPrepareUsesMetadataAndRefreshesTitle(t *testing.T) {
 	}
 	defer listener.Close()
 	t.Setenv(host.SocketEnv, path)
+	t.Setenv(host.GroupsEnv, `["codex-cells"]`)
 	events := make(chan map[string]any, 4)
 	go servePeerBus(listener, events)
-	b, app := testPeer(t)
+	client, app := net.Pipe()
+	b, err := NewPeerBackend(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.app = newAppClient(client, client, nil, func(error) {})
+	t.Cleanup(func() { _ = app.Close() })
 	titles := make(chan string, 2)
 	titles <- "first title"
 	titles <- "second title"
@@ -69,7 +77,7 @@ func TestPeerPrepareUsesMetadataAndRefreshesTitle(t *testing.T) {
 		t.Fatalf("hello = %#v", hello)
 	}
 	params := hello["params"].(map[string]any)
-	if params["session_id"] != "thread-1" || params["name"] != "first title" || len(params["groups"].([]any)) != 0 {
+	if params["session_id"] != "thread-1" || params["name"] != "first title" || !slices.Equal(params["groups"].([]any), []any{"codex-cells"}) {
 		t.Fatalf("identity = %#v", params)
 	}
 	if err = b.Prepare(context.Background(), meta); err != nil {

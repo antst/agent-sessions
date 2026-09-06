@@ -84,6 +84,11 @@ func InteractivePlan(arguments, environment []string) (host.ExecPlan, bool, erro
 	if passthrough {
 		return plan, false, nil
 	}
+	if slices.ContainsFunc(plan.Env, func(value string) bool {
+		return strings.HasPrefix(value, host.GroupsEnv+"=") && value != host.GroupsEnv+"=[]"
+	}) {
+		return host.ExecPlan{}, false, errors.New("Codex peer groups are configured by the installed agent_sessions MCP entry; reinstall with --codex-groups")
+	}
 	if remote {
 		return host.ExecPlan{}, false, errors.New("caller-controlled --remote options are not supported")
 	}

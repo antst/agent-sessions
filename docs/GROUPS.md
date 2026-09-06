@@ -10,6 +10,12 @@ Peer wrappers accept repeatable `-g NAME` or `--group NAME`. Membership is defin
 the current start or resume invocation. Omitting a former group removes it; passing a new one adds
 it. Agent Sessions never carries groups forward.
 
+Codex interactive peers are the product exception: one App Server daemon starts MCP helpers for all
+TUI sessions from one installed entry, and Codex exposes no per-thread metadata carrier for groups.
+Configure that entry with `make install CODEX_GROUPS='["project"]'`; `codex-peer -g/--group` is
+refused so a per-launch group is never silently discarded. Codex lanes still take groups from their
+individual bus open requests.
+
 Each peer also receives a private anchor:
 
 ```text

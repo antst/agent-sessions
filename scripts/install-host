@@ -7,8 +7,8 @@ source "$script_directory/launchd-control"
 source "$script_directory/dsh-profile"
 source "$script_directory/codex-mcp"
 
-if [[ $# -ne 5 ]]; then
-  printf 'usage: %s SOURCE_ROOT HOST_BINARY PREFIX VERSION PLATFORM\n' "${0##*/}" >&2
+if [[ $# -ne 5 && $# -ne 7 ]]; then
+  printf 'usage: %s SOURCE_ROOT HOST_BINARY PREFIX VERSION PLATFORM [--codex-groups JSON]\n' "${0##*/}" >&2
   exit 2
 fi
 
@@ -17,6 +17,14 @@ host_binary=$2
 prefix=$3
 version=$4
 platform=$5
+codex_groups='[]'
+if [[ $# -eq 7 ]]; then
+  [[ $6 == --codex-groups && -n $7 ]] || {
+    printf 'usage: %s SOURCE_ROOT HOST_BINARY PREFIX VERSION PLATFORM [--codex-groups JSON]\n' "${0##*/}" >&2
+    exit 2
+  }
+  codex_groups=$7
+fi
 if [[ "$version" == 0.4.0 && "$platform" == darwin-* ]]; then
   printf 'macOS is not validated in 0.4.0; compatibility is restored in 0.4.1.\n' >&2
 fi
@@ -281,7 +289,7 @@ install_non_dsh_integrations() {
     if grep -Eq '"name"[[:space:]]*:[[:space:]]*"agent-sessions"' <<<"$codex_marketplaces"; then
       "$codex_path" plugin marketplace remove agent-sessions
     fi
-    install_codex_mcp "$codex_path" "$prefix/bin/codex-peer"
+    install_codex_mcp "$codex_path" "$prefix/bin/codex-peer" "$codex_groups"
   else
     printf 'Skipping Codex integration: %s is not installed.\n' "$codex"
   fi

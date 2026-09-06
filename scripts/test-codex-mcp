@@ -21,10 +21,10 @@ case "$1 $2" in
     ;;
   "mcp add")
     [ "${TEST_CODEX_FAIL_ADD:-0}" = 0 ] || exit 42
-    if [ "$*" = "mcp add agent_sessions -- $TEST_CODEX_PEER mcp" ]; then
-      printf '%s\n' current >"$TEST_CODEX_STATE"
-    elif [ "$1 $2 $3 $5 $6 $8" = "mcp add --env agent_sessions -- mcp" ] && [ "$7" = "$TEST_CODEX_PEER" ]; then
-      printf 'socket=%s\n' "${4#AGENTBUS_SOCKET=}" >"$TEST_CODEX_STATE"
+    if [ "$*" = "mcp add --env AGENTBUS_GROUPS=[] agent_sessions -- $TEST_CODEX_PEER mcp" ]; then
+      printf '%s\n' 'groups=[]' >"$TEST_CODEX_STATE"
+    elif [ "$*" = "mcp add --env AGENTBUS_SOCKET=/tmp/agentbus-test.sock --env AGENTBUS_GROUPS=[\"team\"] agent_sessions -- $TEST_CODEX_PEER mcp" ]; then
+      printf '%s\n' 'socket=/tmp/agentbus-test.sock groups=["team"]' >"$TEST_CODEX_STATE"
     else
       exit 91
     fi
@@ -43,16 +43,16 @@ for prior in disabled plugin-backed; do
   : >"$record"
   install_codex_mcp "$codex" "$peer"
   grep -Fxq 'mcp remove agent_sessions' "$record"
-  grep -Fxq "mcp add agent_sessions -- $peer mcp" "$record"
+  grep -Fxq "mcp add --env AGENTBUS_GROUPS=[] agent_sessions -- $peer mcp" "$record"
   grep -Fxq 'app-server daemon restart' "$record"
-  [[ $(cat "$state") = current ]]
+  [[ $(cat "$state") = 'groups=[]' ]]
 done
 
 : >"$record"
 export AGENTBUS_SOCKET=/tmp/agentbus-test.sock
-install_codex_mcp "$codex" "$peer"
-grep -Fxq "mcp add --env AGENTBUS_SOCKET=/tmp/agentbus-test.sock agent_sessions -- $peer mcp" "$record"
-[[ $(grep -Fxc 'app-server daemon restart' "$record") -eq 1 && $(cat "$state") = socket=/tmp/agentbus-test.sock ]]
+install_codex_mcp "$codex" "$peer" '["team"]'
+grep -Fxq "mcp add --env AGENTBUS_SOCKET=/tmp/agentbus-test.sock --env AGENTBUS_GROUPS=[\"team\"] agent_sessions -- $peer mcp" "$record"
+[[ $(grep -Fxc 'app-server daemon restart' "$record") -eq 1 && $(cat "$state") = 'socket=/tmp/agentbus-test.sock groups=["team"]' ]]
 unset AGENTBUS_SOCKET
 
 rm -f -- "$state"

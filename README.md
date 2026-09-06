@@ -92,6 +92,8 @@ wrapper translations.
 Groups are the visibility and routing boundary. Two sessions can discover and
 message one another when their effective group sets intersect. `--group` is
 repeatable, and membership is defined entirely by the current invocation.
+Codex interactive peers instead use the group array configured in their one
+installed MCP entry; see [Groups](docs/GROUPS.md).
 
 Each peer also receives a private group derived from its native identity:
 

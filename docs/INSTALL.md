@@ -31,6 +31,16 @@ An unavailable product is skipped without blocking the other integrations. A nat
 owns login and first-run setup; complete those through the product itself before starting its first
 managed peer or lane.
 
+Codex's App Server daemon starts its MCP helper from one installed configuration shared by every
+interactive session. Set those peers' groups when installing the host:
+
+```sh
+make install CODEX_GROUPS='["project","review"]'
+```
+
+The default is `[]`. Codex cannot carry a different group set from each TUI launch to that helper,
+so `codex-peer -g/--group` reports the install setting instead of discarding the requested group.
+
 ## Verify the installation
 
 ```sh
