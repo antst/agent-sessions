@@ -126,7 +126,7 @@ func TestInstalledReferenceWorker(t *testing.T) {
 	}
 	defer service.Close()
 	t.Setenv("AGENTBUS_SOCKET", socket)
-	peer, err := sdk.ConnectPeer(sdk.PeerIdentity{Product: "fixture", SessionID: "caller", Name: "caller", Groups: []string{"shared"}, Info: map[string]any{}}, func(context.Context, sdk.DeliveryRequest) (sdk.DeliveryReceipt, error) {
+	peer, err := sdk.ConnectPeer(sdk.PeerIdentity{Product: "fixture", SessionID: "caller", Name: "caller", Groups: []string{"shared"}, Info: map[string]any{}}, func(context.Context, sdk.PeerIdentity, sdk.DeliveryRequest) (sdk.DeliveryReceipt, error) {
 		return sdk.DeliveryReceipt{Disposition: "injected"}, nil
 	})
 	if err != nil {
