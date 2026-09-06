@@ -130,10 +130,12 @@ Provenance and tag legend:
 - ACP `session/new` rejects a non-conforming `_meta` id with invalidParams
   `_meta["qwen-code/sessionId"] must be an RFC UUID v1-v5`. (verified: 0.23.0;
   source: bundle:lib/chunks/acpAgent-2GTFCIEP.js:17575-17580)
-- Current lane: daemon-provided LaneID passes via `_meta["qwen-code/sessionId"]` on fresh
-  and as `sessionId` on resume; the returned `sessionId` must equal it exactly
-  (fresh: LaneID == returned; resume: returned == ResumeNativeID). (verified: pin;
-  source: internal/products/qwen/lane.go:134-160)
+- Current wrapper passes its minted ID via `_meta["qwen-code/sessionId"]` on fresh and
+  the requested exact UUID as `sessionId` on resume. Qwen 0.23.0 echoes `sessionId` on
+  fresh open but omits it from a successful `session/resume` result; resume therefore
+  keeps the requested ID when the field is absent and rejects a different ID when one
+  is present. (verified: 0.23.0; source:
+  /home/antst/agentbus-evidence/qwen-20260906T164729Z/cells/01b-open-effort-busy-resume/resume-load-frames.raw)
 - Picture: wrapper mints one v4 UUID at fresh open, passes it via
   `_meta["qwen-code/sessionId"]`, verifies equality, and returns it as the lane's
   session id (no separate native id); resume = capability-checked `session/resume` with

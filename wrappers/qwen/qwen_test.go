@@ -58,7 +58,11 @@ func fakeChild() {
 		case "initialize":
 			result = map[string]any{"protocolVersion": 1, "agentInfo": map[string]string{"name": "qwen-code"}, "agentCapabilities": map[string]bool{"loadSession": true}}
 		case "session/resume":
-			result = map[string]any{"sessionId": request.Params.SessionID, "modes": map[string]string{"currentModeId": "yolo"}}
+			if frame := os.Getenv("QWEN_TEST_RESUME_FRAME"); frame != "" {
+				_, _ = io.WriteString(os.Stdout, frame)
+				continue
+			}
+			result = map[string]any{"sessionId": os.Getenv("QWEN_TEST_RESUME_ID"), "modes": map[string]string{"currentModeId": "yolo"}}
 		case "session/new":
 			if request.Params.Cwd == "" || len(request.Params.MCP) != 1 {
 				return
@@ -126,6 +130,7 @@ func TestOpenResumeUsesCapturedACPShapesAndScrubsBusEnv(t *testing.T) {
 	defer listener.Close()
 	t.Setenv("QWEN_TEST_CHILD", "1")
 	t.Setenv("QWEN_TEST_RECORD", record)
+	t.Setenv("QWEN_TEST_RESUME_FRAME", string(mustRead(t, "testdata/qwen-0.23.0-resume-result.jsonl")))
 	for _, name := range []string{host.SocketEnv, host.LocalKeyEnv, host.TokenEnv, host.SessionIDEnv, host.NameEnv, host.GroupsEnv} {
 		t.Setenv(name, "secret")
 	}
@@ -145,6 +150,12 @@ func TestOpenResumeUsesCapturedACPShapesAndScrubsBusEnv(t *testing.T) {
 		check(t, child[name] == "", "%s reached child: %#v", name, child)
 	}
 	must(t, p.Close(context.Background()))
+	t.Setenv("QWEN_TEST_RESUME_FRAME", "")
+	t.Setenv("QWEN_TEST_RESUME_ID", "22222222-3333-4444-8555-666666666666")
+	p = New(socket)
+	p.SetCall(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
+	_, err = p.Open(context.Background(), sessionkit.OpenRequest{Name: "leaf@local", ResumeSessionID: fixtureID, Open: sessionkit.OpenOptions{Cwd: directory}})
+	check(t, err != nil && err.Error() == `Qwen ACP changed native session from "11111111-2222-4333-8444-555555555555" to "22222222-3333-4444-8555-666666666666"`, "mismatch error = %v", err)
 }
 
 func TestRunDrainsPendingAndRestoresUndrained(t *testing.T) {

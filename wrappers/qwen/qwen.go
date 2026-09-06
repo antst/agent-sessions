@@ -146,7 +146,7 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 	if err = client.call(ctx, method, params, &opened); err != nil {
 		return cleanup(err)
 	}
-	if opened.SessionID != id {
+	if opened.SessionID != id && (request.ResumeSessionID == "" || opened.SessionID != "") {
 		return cleanup(fmt.Errorf("Qwen ACP changed native session from %q to %q", id, opened.SessionID))
 	}
 	if request.Open.PermissionMode == "bypassPermissions" && opened.Modes.CurrentModeID != "yolo" {
