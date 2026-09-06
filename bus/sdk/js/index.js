@@ -114,9 +114,9 @@ class Peer {
     this.caller = new Caller(this, options.caller);
   }
   call(method, params, signal) { if (!this.connection) return Promise.reject(new Error("not connected")); return this.connection.call(method, params, signal); }
-  rehello(identity) { return this._change(identity, false); }
+  rehello(signal, name, info) { return this._change({ name, info }, false, signal); }
   replace(identity) { return this._change(identity, true); }
-  async _change(update, replacement) {
+  async _change(update, replacement, signal) {
     if (this.terminal) throw new Error("superseded");
     const object = update && typeof update === "object" && !Array.isArray(update), desired = replacement ? update : { ...this.identity, name: update?.name, info: update?.info };
     if (!object || !replacement && (Object.keys(update).length !== 2 || !Object.hasOwn(update, "name") || !Object.hasOwn(update, "info")) || !validate("SessionHelloRequest", { protocol: 1, ...desired }) || replacement && update.session_id === this.identity.session_id) throw new Error(`invalid ${replacement ? "replace" : "rehello"} identity`);
@@ -125,8 +125,13 @@ class Peer {
     const identity = this.identity;
     if (replacement) { this.identityController?.abort(new Error("not connected")); this.identityController = null; this.admitted = null; this.connection = null; this.caller.disconnected(); }
     if (!connection || connection.signal.aborted) throw new Error("not connected");
-    try { const result = await this._hello(connection, identity); if (replacement && (this.wire !== connection || connection.signal.aborted)) throw new Error("not connected"); return result; }
-    catch (error) { if (this._failHello(error, connection)) throw error; if (connection.signal.aborted) throw new Error("not connected"); if (replacement) connection.close(); throw error; }
+    let acknowledged = false;
+    const changed = (async () => {
+      try { const result = await this._hello(connection, identity, () => { acknowledged = true; }); if (replacement && (this.wire !== connection || connection.signal.aborted)) throw new Error("not connected"); return result; }
+      catch (error) { if (this._failHello(error, connection)) throw error; if (connection.signal.aborted) throw new Error("not connected"); if (replacement) connection.close(); throw error; }
+    })();
+    if (!signal) return changed;
+    return callerContext(changed, signal, () => acknowledged);
   }
   shutdown() { this.terminal = true; this.connection = null; this.identityController?.abort(new Error("not connected")); this.caller.disconnected(); this.wire?.close(); this.finish(); }
   async _open() {
@@ -134,10 +139,10 @@ class Peer {
     try { await this._hello(connection); } catch (error) { if (this._failHello(error, connection)) return never; connection.close(); }
     if (!connection.signal.aborted) void connection.done.then(() => this._lost(connection)); else this._lost(connection);
   }
-  async _hello(connection, identity = this.identity) { for (;;) { let installed = false; const result = await connection.call("session.hello", { protocol: 1, ...identity }, undefined, () => {
+  async _hello(connection, identity = this.identity, acknowledged) { for (;;) { let installed = false; const result = await connection.call("session.hello", { protocol: 1, ...identity }, undefined, () => {
     if (this.wire !== connection || this.terminal) throw new Error("not connected");
     if (identity === this.identity) { if (this.admitted?.session_id !== identity.session_id || !this.identityController || this.identityController.signal.aborted) this.identityController = new AbortController(); this.admitted = identity; this.connection = connection; installed = true; }
-  }); if (installed) return result; identity = this.identity; } }
+  }); if (installed) { acknowledged?.(); return result; } identity = this.identity; } }
   _lost(connection) { if (this.wire !== connection || this.terminal) return; this.wire = null; this.connection = null; this.admitted = null; this.identityController?.abort(connection.signal.reason); this.identityController = null; this.caller.disconnected(); this.schedule(() => { this.ready = this._open(); }, 2000); }
   _failHello(error, connection) { if (!(error instanceof ProtocolError) || error.code !== -32602) return false; this.terminal = true; this.error = error; this.wire = null; this.connection = null; this.identityController?.abort(error); this.identityController = null; this.admitted = null; this.caller.disconnected(); connection.close(); this.finish(); return true; }
   _handle(request, connection) {
@@ -148,6 +153,16 @@ class Peer {
 
 function connectPeer(identity, deliver, env = process.env, options = {}) { return new Peer(identity, deliver, env, options); }
 function serveWorker(callbacks, env = process.env, options = {}) { const worker = new Worker(callbacks, env, options); worker.serving = worker.serve().catch((error) => error); return worker; }
+function callerContext(promise, signal, acknowledged) {
+  if (signal.aborted && !acknowledged()) { promise.catch(() => {}); return Promise.reject(signal.reason || new Error("aborted")); }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (call, value) => { if (!settled) { settled = true; signal.removeEventListener("abort", abort); call(value); } };
+    const abort = () => { if (!acknowledged()) finish(reject, signal.reason || new Error("aborted")); };
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then((value) => finish(resolve, value), (error) => finish(reject, error));
+  });
+}
 function snapshot(identity) { return { ...identity, groups: [...identity.groups], info: structuredClone(identity.info) }; }
 function environment(env, worker) { const values = Object.fromEntries(ENV.map((name) => [name, env[name]])); for (const name of ENV) delete env[name]; if (!values.SESSIONBUS_SOCKET) throw new Error("sessionbus socket is required"); if (values.SESSIONBUS_LOCAL_KEY) throw new Error("local key transport not implemented in this build"); if (worker && !values.SESSIONBUS_LAUNCH_TOKEN) throw new Error("launch token is required"); return { socket: values.SESSIONBUS_SOCKET, token: values.SESSIONBUS_LAUNCH_TOKEN }; }
 function terminal(result = {}) { if (!result || typeof result !== "object") return result; if (!Object.hasOwn(result, "result")) result = { ...result, result: "" }; if (typeof result.result !== "string") return result; const characters = [...result.result]; return { ...result, result: characters.slice(0, 262144).join(""), ...(characters.length > 262144 ? { truncated: true } : {}) }; }

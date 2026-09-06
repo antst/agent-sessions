@@ -128,8 +128,8 @@ test("crossed rehello preserves the fixture's newest identity", async (t) => {
   assert.deepEqual([initial.params.name, initial.params.info.nested.value], ["initial", "initial"]);
   await daemon.result(initial, {}); await peer.ready;
 
-  const first = peer.rehello(row.first); const firstRequest = await next(); row.first.info.nested.value = "mutated";
-  const second = peer.rehello(row.second); const secondRequest = await next(); row.second.info.nested.value = "mutated";
+  const first = peer.rehello(undefined, row.first.name, row.first.info); const firstRequest = await next(); row.first.info.nested.value = "mutated";
+  const second = peer.rehello(undefined, row.second.name, row.second.info); const secondRequest = await next(); row.second.info.nested.value = "mutated";
   await daemon.result(secondRequest, {}); await second;
   await daemon.result(firstRequest, {});
   const corrective = await next();

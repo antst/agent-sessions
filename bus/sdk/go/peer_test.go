@@ -37,7 +37,7 @@ func TestPeerDesiredIdentityAndDeepSnapshots(t *testing.T) {
 	firstHello := <-requests
 	assertPeerHello(t, firstHello, "initial", "initial")
 	first := fixtures.Sequences.CrossedRehello.First
-	if err = peer.Rehello(first.Name, first.Info); !isCode(err, protocol.NotConnected) {
+	if err = peer.Rehello(context.Background(), first.Name, first.Info); !isCode(err, protocol.NotConnected) {
 		t.Fatalf("rehello before ready = %v", err)
 	}
 	first.Info["nested"].(map[string]any)["value"] = "mutated"
@@ -50,11 +50,11 @@ func TestPeerDesiredIdentityAndDeepSnapshots(t *testing.T) {
 	fixtures = loadCallerFixtures(t)
 	first, second := fixtures.Sequences.CrossedRehello.First, fixtures.Sequences.CrossedRehello.Second
 	firstDone := make(chan error, 1)
-	go func() { firstDone <- peer.Rehello(first.Name, first.Info) }()
+	go func() { firstDone <- peer.Rehello(context.Background(), first.Name, first.Info) }()
 	firstRequest := <-requests
 	first.Info["nested"].(map[string]any)["value"] = "mutated"
 	secondDone := make(chan error, 1)
-	go func() { secondDone <- peer.Rehello(second.Name, second.Info) }()
+	go func() { secondDone <- peer.Rehello(context.Background(), second.Name, second.Info) }()
 	secondRequest := <-requests
 	second.Info["nested"].(map[string]any)["value"] = "mutated"
 	mustRPC(t, server.Result(secondRequest, struct{}{}))
@@ -69,6 +69,40 @@ func TestPeerDesiredIdentityAndDeepSnapshots(t *testing.T) {
 	if peer.Err() != nil {
 		t.Fatalf("shutdown terminal error = %v", peer.Err())
 	}
+}
+
+func TestPeerRehelloCancellationKeepsLateAckOwned(t *testing.T) {
+	requests, server, client := peerPipe(t)
+	connections := make(chan net.Conn, 1)
+	connections <- client
+	usePeerDialer(t, func(string, string) (net.Conn, error) { return <-connections, nil })
+	admitted := make(chan PeerIdentity, 1)
+	peer, err := ConnectPeer(PeerIdentity{Product: "fixture-client", SessionID: "peer", Name: "initial", Groups: []string{}, Info: map[string]any{}}, func(_ context.Context, identity PeerIdentity, _ DeliveryRequest) (DeliveryReceipt, error) {
+		admitted <- identity
+		return DeliveryReceipt{Disposition: "injected"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRPC(t, server.Result(<-requests, struct{}{}))
+	await(t, peer.Ready(), "peer ready")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	renamed := make(chan error, 1)
+	go func() { renamed <- peer.Rehello(ctx, "renamed", map[string]any{"revision": 2}) }()
+	hello := <-requests
+	cancel()
+	if err = <-renamed; !errors.Is(err, context.Canceled) {
+		t.Fatalf("rehello cancellation = %v", err)
+	}
+	mustRPC(t, server.Result(hello, struct{}{}))
+	var receipt DeliveryReceipt
+	mustRPC(t, server.Call(context.Background(), "message.deliver", DeliveryRequest{MessageID: "message", From: DeliverySource{SessionID: "sender@local", Name: "sender@local", Product: "fixture", Groups: []string{}}, Body: "body"}, &receipt))
+	if identity := <-admitted; identity.Name != "renamed" || identity.Info["revision"] != float64(2) {
+		t.Fatalf("late ack identity = %#v", identity)
+	}
+	peer.Shutdown()
+	await(t, peer.Closed(), "peer closed")
 }
 
 func TestPeerReconnectsButSupersededStops(t *testing.T) {
@@ -207,7 +241,7 @@ func TestPeerReplaceSettlesOldRunAndReconnectsAsNewIdentity(t *testing.T) {
 	if _, err = peer.Call(context.Background(), "session.list", SessionListRequest{}); !isCode(err, protocol.NotConnected) {
 		t.Fatalf("call during replacement = %v", err)
 	}
-	if err = peer.Rehello("retitled", map[string]any{"revision": 2}); !isCode(err, protocol.NotConnected) {
+	if err = peer.Rehello(context.Background(), "retitled", map[string]any{"revision": 2}); !isCode(err, protocol.NotConnected) {
 		t.Fatalf("crossed rehello = %v", err)
 	}
 	mustRPC(t, server1.Error(run, protocol.NotConnected, nil))
@@ -433,7 +467,7 @@ func TestPeerDaemonRehelloRules(t *testing.T) {
 	socket := filepath.Join(directory, "sessionbus.sock")
 	startDaemon(t, socket)
 	peer := startPeer(t, socket, "peer")
-	if err := peer.Rehello("renamed", map[string]any{"revision": 2}); err != nil {
+	if err := peer.Rehello(context.Background(), "renamed", map[string]any{"revision": 2}); err != nil {
 		t.Fatal(err)
 	}
 	listed, err := peer.Caller.List(context.Background(), SessionListRequest{})
