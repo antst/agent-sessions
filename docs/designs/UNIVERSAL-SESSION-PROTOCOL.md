@@ -63,14 +63,19 @@ every federated host. The product owns the ID part because it owns the session
 primitive that can address it; the daemon mints no session IDs. A caller may
 use a bare ID or bare name as shorthand for its own daemon's host.
 Resolution splits a qualified name on its last `@`. Name parts are 1–128
-printable characters with no whitespace or control character; `/` and `@` are
-allowed. The last `@` is always the canonical host boundary. Host parts match
+printable Unicode characters, including spaces, with control characters excluded;
+`/` and `@` are allowed. Name values are preserved exactly: no trimming,
+whitespace collapse, tokenization on whitespace, or Unicode normalization. The
+128-character limit counts Unicode code points. ID parts remain 1–128 printable
+characters with no whitespace or control character. The last `@` is always the
+canonical host boundary. Host parts match
 `^[a-z0-9][a-z0-9-]{0,31}$`. For identity input, no `@` means a bare local part:
 the daemon appends the caller's host, then tries exact ID before exact name. An
 input containing `@` is always split at the last one, and an unknown right part
-is `unknown_host` rather than a bare name. These grammars
-are daemon checks because the shared schema deliberately has no `pattern`
-keyword.
+is `unknown_host` rather than a bare name. The schema carries the printable-name
+pattern and code-point bounds; the daemon separately checks name, ID, product,
+and host grammar so changing one does not loosen another. Overlong or
+control-bearing product titles are rejected visibly and are never rewritten.
 The wire has no generic tool frame: after hello, a peer or committed worker
 originates the ordinary client-to-daemon methods in this section. Product-facing
 start/wait/status/interrupt/list/send tools are caller-kit sugar over them.
@@ -1208,7 +1213,10 @@ ordinary daemon EOF detaches the dead connection and retries the same asserted
 peer identity every fixed `peerReconnectInterval = 2s`, with no backoff,
 jitter, or attempt cap. A call made while disconnected fails `not_connected`
 and is never replayed. `session.superseded` tombstones that identity instance
-and stops retries permanently.
+and stops retries permanently. A correlated `invalid_hello` response is also
+terminal for that identity: the kit surfaces it after `closed` and never turns
+the following EOF into a reconnect. The Go peer exposes that terminal value as
+`Err()`; a plain `Shutdown()` leaves it nil.
 The peer kit keeps one JSON-round-trip snapshot as the desired identity. After
 each hello response it compares what it sent with that desired value and sends
 the current value immediately until they match; a change crossed with connect

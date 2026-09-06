@@ -3,6 +3,7 @@ package sessionkit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"sync"
 	"time"
@@ -31,6 +32,7 @@ type Peer struct {
 	identityCtx   context.Context
 	identityStop  context.CancelFunc
 	ready, closed chan struct{}
+	terminal      error
 }
 
 func ConnectPeer(identity PeerIdentity, deliver DeliverFunc) (*Peer, error) {
@@ -51,6 +53,11 @@ func ConnectPeer(identity PeerIdentity, deliver DeliverFunc) (*Peer, error) {
 
 func (p *Peer) Ready() <-chan struct{}  { return p.ready }
 func (p *Peer) Closed() <-chan struct{} { return p.closed }
+func (p *Peer) Err() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.terminal
+}
 
 func (p *Peer) Rehello(name string, info map[string]any) error {
 	next, wire, generation, err := p.desire(Identity{Name: name, Info: info}, false)
@@ -61,6 +68,9 @@ func (p *Peer) Rehello(name string, info map[string]any) error {
 		return errNotConnected
 	}
 	err = p.hello(p.ctx, wire, next, generation)
+	if p.failHello(err) {
+		return err
+	}
 	if err != nil && wire.Context().Err() != nil {
 		return errNotConnected
 	}
@@ -76,6 +86,7 @@ func (p *Peer) Replace(ctx context.Context, identity Identity) error {
 		return errNotConnected
 	}
 	if err = p.hello(ctx, wire, identity, generation); err != nil {
+		p.failHello(err)
 		_ = wire.Close()
 	}
 	return err
@@ -147,7 +158,8 @@ func (p *Peer) connect() {
 			p.mu.Lock()
 			identity, generation := p.identity, p.generation
 			p.mu.Unlock()
-			if p.hello(p.ctx, wire, identity, generation) == nil {
+			helloErr := p.hello(p.ctx, wire, identity, generation)
+			if helloErr == nil {
 				if ready != nil {
 					close(ready)
 					ready = nil
@@ -170,6 +182,9 @@ func (p *Peer) connect() {
 				p.mu.Unlock()
 			}
 			_ = wire.Close()
+			if p.failHello(helloErr) {
+				return
+			}
 		}
 		if p.ctx.Err() != nil {
 			return
@@ -180,6 +195,18 @@ func (p *Peer) connect() {
 			return
 		}
 	}
+}
+
+func (p *Peer) failHello(err error) bool {
+	var failure *ProtocolError
+	if !errors.As(err, &failure) || failure.Code != protocol.InvalidHello {
+		return false
+	}
+	p.mu.Lock()
+	p.terminal = failure
+	p.mu.Unlock()
+	p.cancel()
+	return true
 }
 
 func (p *Peer) hello(ctx context.Context, wire *rpc.Conn, identity PeerIdentity, generation uint64) error {
@@ -216,6 +243,7 @@ func (p *Peer) handle(wire *rpc.Conn, request *rpc.Request) {
 		p.mu.Lock()
 		if p.wire == wire {
 			p.wire = nil
+			p.terminal = &ProtocolError{Code: protocol.Superseded, Message: "superseded"}
 			if p.identityStop != nil {
 				p.identityStop()
 			}
