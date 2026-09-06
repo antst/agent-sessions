@@ -46,7 +46,7 @@ func TestWrapperFreshOpenAndClose(t *testing.T) {
 	if result.SessionID != "thread-1" {
 		t.Fatalf("session = %q", result.SessionID)
 	}
-	if err = p.Close(context.Background()); err != nil {
+	if err = p.Close(context.Background(), sessionkit.SessionCloseRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	var observed struct {

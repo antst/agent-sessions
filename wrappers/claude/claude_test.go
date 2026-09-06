@@ -321,7 +321,7 @@ func TestLargeResultDrainsAfterChildExit(t *testing.T) {
 	result, err := p.Run(context.Background(), &sessionkit.Run{}, "large")
 	must(t, err)
 	check(t, result.Outcome == "completed" && len(result.Result) == 300004 && strings.HasSuffix(result.Result, "tail"), "terminal = outcome %q, bytes %d", result.Outcome, len(result.Result))
-	must(t, p.Close(context.Background()))
+	must(t, p.Close(context.Background(), sessionkit.SessionCloseRequest{}))
 }
 
 func environmentValue(environment []string, name string) string {

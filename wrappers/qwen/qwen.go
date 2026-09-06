@@ -189,7 +189,7 @@ func (p *Wrapper) Interrupt(ctx context.Context, run *sessionkit.Run) error {
 	return p.handoff.Interrupt(ctx, run)
 }
 
-func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
+func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, _ *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.handoff.Deliver(ctx, request, func(context.Context, string) (host.Injection, error) {
@@ -200,7 +200,7 @@ func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 	})
 }
 
-func (p *Wrapper) Close(ctx context.Context) error {
+func (p *Wrapper) Close(ctx context.Context, _ sessionkit.SessionCloseRequest) error {
 	p.mu.Lock()
 	p.closing = true
 	child, client := p.child, p.client
