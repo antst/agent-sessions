@@ -1,6 +1,7 @@
 "use strict";
 
 const net = require("node:net");
+const { isDeepStrictEqual } = require("node:util");
 const { ACTIONS, Caller } = require("./caller.js");
 const { Connection, ProtocolError } = require("./connection.js");
 const { schema, validate } = require("./schema.js");
@@ -120,8 +121,10 @@ class Peer {
     if (this.terminal) throw new Error("superseded");
     const object = update && typeof update === "object" && !Array.isArray(update), desired = replacement ? update : { ...this.identity, name: update?.name, info: update?.info };
     if (!object || !replacement && (Object.keys(update).length !== 2 || !Object.hasOwn(update, "name") || !Object.hasOwn(update, "info")) || !validate("SessionHelloRequest", { protocol: 1, ...desired }) || replacement && update.session_id === this.identity.session_id) throw new Error(`invalid ${replacement ? "replace" : "rehello"} identity`);
+    const next = snapshot(desired);
+    if (!replacement && isDeepStrictEqual(next, this.identity)) return;
     const connection = this.connection;
-    this.identity = snapshot(desired);
+    this.identity = next;
     const identity = this.identity;
     if (replacement) { this.identityController?.abort(new Error("not connected")); this.identityController = null; this.admitted = null; this.connection = null; this.caller.disconnected(); }
     if (!connection || connection.signal.aborted) throw new Error("not connected");
