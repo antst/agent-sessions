@@ -83,7 +83,12 @@ func fakeGrok() {
 			if loaded, ok := params["sessionId"].(string); ok {
 				session = loaded
 			}
-			reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"sessionId": session, "models": map[string]any{}}})
+			if method == "session/load" {
+				session = first(os.Getenv("GROK_TEST_LOAD_ID"), session)
+				reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"models": map[string]any{}, "_meta": map[string]any{"sessionId": session, "x.ai/sessionDetail": map[string]string{"sessionId": session}}}})
+			} else {
+				reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"sessionId": session, "models": map[string]any{}}})
+			}
 		case "_x.ai/session/rename":
 			title, _ = params["title"].(string)
 			reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"success": true}})
@@ -222,6 +227,39 @@ func TestInterruptAndResume(t *testing.T) {
 	check(t, !containsStart(frames, "--resume", testSessionID), "resume was selected in both argv and session/load")
 	check(t, containsStart(frames, "--permission-mode", "default", "--allow", "MCPTool(agent_sessions__*)"), "default leader MCP allow absent")
 	must(t, p.Close(context.Background()))
+}
+
+func TestResumeIdentityFailureRepliesBeforeCleanup(t *testing.T) {
+	root := shortRoot(t)
+	t.Setenv("GROK_TEST_RECORD", filepath.Join(root, "record"))
+	t.Setenv("GROK_TEST_LOAD_ID", "different-product-id")
+	socket := filepath.Join(root, "agentbus.sock")
+	listener, err := net.Listen("unix", socket)
+	must(t, err)
+	t.Setenv(host.SocketEnv, socket)
+	t.Setenv(host.TokenEnv, "resume-error-token")
+	p := New(socket, "resume-error-token")
+	p.SetCall(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
+	worker := sessionkit.NewWorker(p)
+	go func() { _ = worker.Serve(context.Background()) }()
+	connection, err := listener.Accept()
+	must(t, err)
+	reader := &workerReader{reader: bufio.NewReader(connection), pending: map[int]workerResponse{}}
+	readLine(t, reader.reader)
+	_, err = connection.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}` + "\n"))
+	must(t, err)
+	writeWorkerRequest(t, connection, 1, "session.open", map[string]any{"name": "lane@local", "groups": []string{"group"}, "resume_session_id": testSessionID, "open": map[string]any{"cwd": root}})
+	response := readWorkerResponse(t, reader, 1)
+	check(t, strings.Contains(string(response.Error), `"message":"spawn_failed"`) && strings.Contains(string(response.Error), `Grok returned session identity`), "open error = %s", response.Error)
+	_ = connection.Close()
+	<-worker.Closed()
+	p.mu.Lock()
+	primary, child, leader := p.primary, p.child, p.leader
+	p.mu.Unlock()
+	primary.close()
+	_ = child.Close(context.Background(), func(context.Context) error { return nil })
+	p.stopAux(leader)
+	_ = listener.Close()
 }
 
 func TestOmittedCwdAndSocketReadiness(t *testing.T) {

@@ -133,7 +133,7 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 	}
 	releaseHold()
 	if err != nil {
-		return sessionkit.OpenResult{}, errors.Join(err, p.abortLaunch(ctx))
+		return sessionkit.OpenResult{}, err
 	}
 	go p.watch(child)
 	return sessionkit.OpenResult{SessionID: p.sessionID}, nil
@@ -147,20 +147,35 @@ func (p *Wrapper) openSession(ctx context.Context, primary *acpClient, request s
 	}
 	var opened struct {
 		SessionID string `json:"sessionId"`
+		Meta      struct {
+			SessionID string `json:"sessionId"`
+			Detail    struct {
+				SessionID string `json:"sessionId"`
+			} `json:"x.ai/sessionDetail"`
+		} `json:"_meta"`
 	}
 	if err := primary.request(ctx, method, params, &opened); err != nil {
 		return fmt.Errorf("open Grok session: %w", err)
 	}
-	if opened.SessionID == "" || request.ResumeSessionID != "" && opened.SessionID != request.ResumeSessionID {
-		return errors.New("Grok returned a different session identity")
+	identity := opened.SessionID
+	if request.ResumeSessionID != "" {
+		for _, returned := range []string{identity, opened.Meta.SessionID, opened.Meta.Detail.SessionID} {
+			if returned != "" && returned != request.ResumeSessionID {
+				return fmt.Errorf("Grok returned session identity %q instead of %q", returned, request.ResumeSessionID)
+			}
+		}
+		identity = request.ResumeSessionID
+	}
+	if identity == "" {
+		return errors.New("Grok returned no session identity")
 	}
 	if request.ResumeSessionID == "" {
-		if err := lock.Rename(opened.SessionID); err != nil {
+		if err := lock.Rename(identity); err != nil {
 			return err
 		}
 	}
 	p.mu.Lock()
-	p.sessionID = opened.SessionID
+	p.sessionID = identity
 	p.mu.Unlock()
 	return nil
 }
@@ -451,13 +466,6 @@ func (p *Wrapper) watch(child *host.Child) {
 		}
 		shutdown()
 	}
-}
-
-func (p *Wrapper) abortLaunch(ctx context.Context) error {
-	p.mu.Lock()
-	p.closing = true
-	p.mu.Unlock()
-	return p.closeProcesses(ctx)
 }
 
 func (p *Wrapper) stopAux(process *nativeProcess) {
