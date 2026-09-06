@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antst/agent-sessions/wrappers/host"
+	"github.com/antst/sessionbus/wrappers/host"
 )
 
 func TestProcessArguments(t *testing.T) {
@@ -20,8 +20,8 @@ func TestProcessArguments(t *testing.T) {
 	}{
 		{"ordered", []string{"--enable", "alpha", "-c", "feature=true", "--search", "--disable=beta"}, []string{"--enable", "alpha", "-c", "feature=true", "--search", "--disable=beta"}, ""},
 		{"model conflict", []string{"--config", `model="gpt"`}, nil, "typed field model"},
-		{"nested MCP conflict", []string{"-c=mcp_servers.agent_sessions.command=other"}, nil, "typed field mcp"},
-		{"quoted MCP conflict", []string{"-c", `mcp_servers . "agent_sessions" . command=other`}, nil, "typed field mcp"},
+		{"nested MCP conflict", []string{"-c=mcp_servers.sessionbus.command=other"}, nil, "typed field mcp"},
+		{"quoted MCP conflict", []string{"-c", `mcp_servers . "sessionbus" . command=other`}, nil, "typed field mcp"},
 		{"permission conflict", []string{"-c", "sandbox_mode=workspace-write"}, nil, "typed field permission_mode"},
 		{"position", []string{"prompt"}, nil, "unsupported argument prompt"},
 		{"subcommand", []string{"exec"}, nil, "unsupported argument exec"},

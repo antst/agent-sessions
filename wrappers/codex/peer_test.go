@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
 )
 
 func TestPeerNativeAppDialsOnlyAfterIdentity(t *testing.T) {
@@ -229,13 +229,13 @@ func TestPeerDeliveryActiveAndIdle(t *testing.T) {
 					}
 					writeApp(t, app, map[string]any{"id": request.ID, "result": map[string]any{"data": []any{map[string]string{"id": "turn-1", "status": "inProgress"}}}})
 					_ = decoder.Decode(&request)
-					if request.Method != "turn/steer" || !strings.Contains(string(request.Params), "[agentbus-metadata:") {
+					if request.Method != "turn/steer" || !strings.Contains(string(request.Params), "[sessionbus-metadata:") {
 						t.Errorf("steer = %#v", request)
 						return
 					}
 					writeApp(t, app, map[string]any{"id": request.ID, "result": map[string]string{"turnId": "turn-1"}})
 				} else {
-					if request.Method != "turn/start" || !strings.Contains(string(request.Params), "[agentbus-metadata:") {
+					if request.Method != "turn/start" || !strings.Contains(string(request.Params), "[sessionbus-metadata:") {
 						t.Errorf("start = %#v", request)
 						return
 					}

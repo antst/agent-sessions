@@ -11,9 +11,9 @@ import (
 	"strings"
 	"sync"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
-	"github.com/antst/agent-sessions/wrappers/mcp"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
+	"github.com/antst/sessionbus/wrappers/mcp"
 )
 
 type PeerBackend struct {
@@ -35,7 +35,7 @@ var _ mcp.Backend = (*PeerBackend)(nil)
 func NewPeerBackend(_ context.Context) (*PeerBackend, error) {
 	groups := []string{}
 	if raw := os.Getenv(host.GroupsEnv); raw != "" && json.Unmarshal([]byte(raw), &groups) != nil {
-		return nil, errors.New("AGENTBUS_GROUPS must be a JSON array")
+		return nil, errors.New("SESSIONBUS_GROUPS must be a JSON array")
 	}
 	b := &PeerBackend{groups: groups, fixedID: strings.TrimSpace(os.Getenv(host.SessionIDEnv)), requestedName: strings.TrimSpace(os.Getenv(host.NameEnv))}
 	b.caller = sessionkit.NewCaller(b.Call)
@@ -59,7 +59,7 @@ func (b *PeerBackend) start(ctx context.Context) error {
 	b.mu.Lock()
 	b.app = app
 	b.mu.Unlock()
-	if err = app.initialize(ctx, "Agentbus Codex Peer"); err != nil {
+	if err = app.initialize(ctx, "Sessionbus Codex Peer"); err != nil {
 		_ = app.close()
 		b.mu.Lock()
 		if b.app == app {
