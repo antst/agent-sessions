@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -117,7 +118,7 @@ func TestInteractiveLauncherOwnsPeerAndLocalAction(t *testing.T) {
 	t.Setenv("GROK_TEST_INTERACTIVE_STARTED", started)
 	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
 	must(t, err)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- RunInteractive(ctx, plan) }()
 	hello := <-hellos
@@ -131,12 +132,92 @@ func TestInteractiveLauncherOwnsPeerAndLocalAction(t *testing.T) {
 	must(t, err)
 	check(t, string(result) == `{}`, "local action = %s", result)
 	<-fileReady(started)
-	cancel()
-	check(t, <-done != nil, "signalled Grok child exited successfully")
+	cancel(testSignal{syscall.SIGINT})
+	var exited *exec.ExitError
+	err = <-done
+	check(t, errors.As(err, &exited) && exited.ProcessState.Sys().(syscall.WaitStatus).Signal() == syscall.SIGINT, "signalled Grok child = %v", err)
 	check(t, !exists(path), "peer endpoint remains")
 	frames := records(t, recordPath)
 	check(t, containsStart(frames, "--leader", testSessionID), "managed child absent")
 	check(t, containsStart(frames, path), "child did not inherit local endpoint")
+}
+
+func TestRejectedHelloStopsInteractiveOwner(t *testing.T) {
+	root := shortRoot(t)
+	socket := filepath.Join(root, "agentbus.sock")
+	server, hellos := fakeDaemon(t, socket)
+	defer server.Close()
+	pidPath := filepath.Join(root, "interactive.pid")
+	t.Setenv(host.SocketEnv, socket)
+	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
+	t.Setenv("GROK_TEST_INTERACTIVE_PID", pidPath)
+	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
+	must(t, err)
+	done := make(chan error, 1)
+	go func() { done <- RunInteractive(context.Background(), plan) }()
+	hello := <-hellos
+	pidfd := interactivePidfd(t, pidPath)
+	hello.ack <- false
+	err = <-done
+	check(t, strings.Contains(err.Error(), "invalid_hello"), "launcher error = %v", err)
+	check(t, !processRunning(t, pidfd), "TUI survived rejected hello")
+	check(t, !exists(filepath.Join(root, "lanes", host.LaunchTokenDigest(testSessionID)+".sock")), "peer endpoint remains")
+	unix.Close(pidfd)
+}
+
+func TestTerminalPeerStopsInteractiveOwner(t *testing.T) {
+	root := shortRoot(t)
+	socket := filepath.Join(root, "agentbus.sock")
+	terminal := make(chan struct{})
+	server, hellos := fakeDaemonTerminal(t, socket, terminal)
+	defer server.Close()
+	pidPath := filepath.Join(root, "interactive.pid")
+	t.Setenv(host.SocketEnv, socket)
+	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
+	t.Setenv("GROK_TEST_INTERACTIVE_PID", pidPath)
+	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
+	must(t, err)
+	done := make(chan error, 1)
+	go func() { done <- RunInteractive(context.Background(), plan) }()
+	hello := <-hellos
+	hello.ack <- true
+	pidfd := interactivePidfd(t, pidPath)
+	path := filepath.Join(root, "lanes", host.LaunchTokenDigest(testSessionID)+".sock")
+	t.Setenv(mcp.LaneSocketEnv, path)
+	client, err := mcp.NewLaneBackend()
+	must(t, err)
+	_, err = client.Action(context.Background(), "interrupt", json.RawMessage(`{"session_id":"lane@local"}`))
+	must(t, err)
+	close(terminal)
+	err = <-done
+	check(t, strings.Contains(err.Error(), "superseded"), "launcher error = %v", err)
+	check(t, !processRunning(t, pidfd), "TUI survived terminal peer")
+	check(t, !exists(path), "peer endpoint remains")
+	unix.Close(pidfd)
+}
+
+func TestObserverExitStopsInteractiveOwner(t *testing.T) {
+	root := shortRoot(t)
+	socket := filepath.Join(root, "agentbus.sock")
+	server, hellos := fakeDaemon(t, socket)
+	defer server.Close()
+	pidPath := filepath.Join(root, "interactive.pid")
+	t.Setenv(host.SocketEnv, socket)
+	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
+	t.Setenv("GROK_TEST_INTERACTIVE_PID", pidPath)
+	t.Setenv("GROK_TEST_OBSERVER_EXIT", "1")
+	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
+	must(t, err)
+	done := make(chan error, 1)
+	go func() { done <- RunInteractive(context.Background(), plan) }()
+	hello := <-hellos
+	hello.ack <- true
+	pidfd := interactivePidfd(t, pidPath)
+	err = <-done
+	check(t, strings.Contains(err.Error(), "Grok observer closed"), "launcher error = %v", err)
+	check(t, !processRunning(t, pidfd), "TUI survived observer exit")
+	check(t, !exists(filepath.Join(root, "lanes", host.LaunchTokenDigest(testSessionID)+".sock")), "peer endpoint remains")
+	unix.Close(pidfd)
 }
 
 func TestInteractiveLauncherReturnsProductExit(t *testing.T) {
@@ -272,7 +353,16 @@ type hello struct {
 	ack       chan bool
 }
 
+type testSignal struct{ os.Signal }
+
+func (s testSignal) Error() string           { return s.String() }
+func (s testSignal) CaughtSignal() os.Signal { return s.Signal }
+
 func fakeDaemon(t *testing.T, path string) (net.Listener, <-chan hello) {
+	return fakeDaemonTerminal(t, path, nil)
+}
+
+func fakeDaemonTerminal(t *testing.T, path string, terminal <-chan struct{}) (net.Listener, <-chan hello) {
 	t.Helper()
 	listener, err := net.Listen("unix", path)
 	must(t, err)
@@ -308,7 +398,16 @@ func fakeDaemon(t *testing.T, path string) (net.Listener, <-chan hello) {
 						_ = json.NewEncoder(connection).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{}})
 					}
 					write.Unlock()
+					if accepted && terminal != nil {
+						<-terminal
+						write.Lock()
+						_ = json.NewEncoder(connection).Encode(map[string]any{"jsonrpc": "2.0", "id": 99, "method": "session.superseded", "params": map[string]any{}})
+						write.Unlock()
+					}
 				}(frame.ID, value)
+				continue
+			}
+			if frame.Method == "" {
 				continue
 			}
 			write.Lock()
@@ -317,6 +416,19 @@ func fakeDaemon(t *testing.T, path string) (net.Listener, <-chan hello) {
 		}
 	}()
 	return listener, hellos
+}
+
+func interactivePidfd(t *testing.T, path string) int {
+	t.Helper()
+	<-fileReady(path)
+	var pid int
+	body, err := os.ReadFile(path)
+	must(t, err)
+	_, err = fmt.Sscan(string(body), &pid)
+	must(t, err)
+	pidfd, err := unix.PidfdOpen(pid, 0)
+	must(t, err)
+	return pidfd
 }
 
 func environment(values []string, name string) string {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"sync"
 
 	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
 )
@@ -17,10 +18,6 @@ type LaneBackend struct{ path string }
 func (*LaneBackend) Prepare(context.Context, json.RawMessage) error { return nil }
 
 type laneFrame struct {
-	JSONRPC   string          `json:"jsonrpc,omitempty"`
-	ID        int64           `json:"id,omitempty"`
-	Method    string          `json:"method,omitempty"`
-	Params    json.RawMessage `json:"params,omitempty"`
 	Action    string          `json:"action,omitempty"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 	Result    json.RawMessage `json:"result,omitempty"`
@@ -57,13 +54,22 @@ func (b *LaneBackend) Action(ctx context.Context, action string, arguments json.
 }
 
 func ServeLane(ctx context.Context, listener net.Listener, backend Backend) error {
-	caller := sessionkit.NewCaller(backend.Call)
+	caller := backendCaller(backend)
+	if caller == nil {
+		return errors.New("lane backend has no caller")
+	}
+	var calls sync.WaitGroup
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
+			calls.Wait()
 			return err
 		}
-		go serveLaneCall(ctx, connection, caller, backend)
+		calls.Add(1)
+		go func() {
+			defer calls.Done()
+			serveLaneCall(ctx, connection, caller, backend)
+		}()
 	}
 }
 
@@ -73,22 +79,16 @@ func serveLaneCall(ctx context.Context, connection net.Conn, caller *sessionkit.
 	response := laneFrame{}
 	if err := json.NewDecoder(connection).Decode(&request); err != nil {
 		response.Error = &failure{Code: -32600, Message: "invalid_frame"}
-	} else if request.Action != "" && request.Method == "" {
+	} else if request.Action == "" {
+		response.Error = &failure{Code: -32600, Message: "invalid_frame"}
+	} else if err := backend.Prepare(ctx, nil); err != nil {
+		response.Error = wireFailure(err)
+	} else {
 		if result, err := caller.Action(ctx, request.Action, request.Arguments); err != nil {
 			response.Error = wireFailure(err)
 		} else {
 			response.Result = result
 		}
-	} else if request.JSONRPC == "2.0" && request.ID > 0 && request.Method != "" && request.Action == "" {
-		response.JSONRPC, response.ID = "2.0", request.ID
-		if result, err := backend.Call(ctx, request.Method, request.Params); err != nil {
-			response.Error = wireFailure(err)
-		} else {
-			response.Result = result
-		}
-	} else {
-		response.JSONRPC, response.ID = request.JSONRPC, request.ID
-		response.Error = &failure{Code: -32600, Message: "invalid_frame"}
 	}
 	_ = json.NewEncoder(connection).Encode(response)
 }

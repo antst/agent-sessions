@@ -17,10 +17,19 @@ import (
 )
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer func() { signal.Stop(signals); cancel(nil) }()
+	go func() {
+		select {
+		case caught := <-signals:
+			cancel(signalCause{caught})
+		case <-ctx.Done():
+		}
+	}()
 	if err := run(ctx, os.Args[1:]); err != nil {
-		cancel()
+		cancel(nil)
 		var exited *exec.ExitError
 		if errors.As(err, &exited) {
 			if status, ok := exited.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
@@ -33,6 +42,11 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+type signalCause struct{ signal os.Signal }
+
+func (s signalCause) Error() string           { return s.signal.String() }
+func (s signalCause) CaughtSignal() os.Signal { return s.signal }
 
 func run(ctx context.Context, arguments []string) error {
 	if !host.LaneMode() {

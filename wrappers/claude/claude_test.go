@@ -17,6 +17,7 @@ import (
 
 	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
 	"github.com/antst/agent-sessions/wrappers/host"
+	"github.com/antst/agent-sessions/wrappers/mcp"
 )
 
 const fixtureID = "00000000-0000-4000-8000-000000000123"
@@ -273,12 +274,12 @@ func TestOpenCommitsBeforeInitAndChildDeathWritesTerminalBeforeEOF(t *testing.T)
 	opened := readJSON(t, reader)
 	check(t, opened["error"] == nil, "open = %#v", opened)
 	laneSocket := filepath.Join(filepath.Dir(socket), "lanes", fixtureID+".sock")
-	lane, err := sessionkit.Dial(laneSocket)
+	t.Setenv(mcp.LaneSocketEnv, laneSocket)
+	lane, err := mcp.NewLaneBackend()
 	must(t, err)
-	laneResult, err := lane.Call(context.Background(), "session.list", sessionkit.SessionListRequest{})
+	laneResult, err := lane.Action(context.Background(), "list", json.RawMessage(`{}`))
 	must(t, err)
 	check(t, string(laneResult) == `{"sessions":[]}`, "lane result = %s", laneResult)
-	must(t, lane.Close())
 	writeJSON(t, connection, map[string]any{"jsonrpc": "2.0", "id": 3, "method": "turn.run", "params": map[string]any{"session_id": fixtureID + "@local", "input": "die"}})
 	terminal := readJSON(t, reader)
 	result := terminal["result"].(map[string]any)

@@ -103,6 +103,12 @@ func newPeerBackend(ctx context.Context, identity sessionkit.PeerIdentity) (*Pee
 	b.peer = peer
 	select {
 	case <-peer.Ready():
+	case <-peer.Closed():
+		err = peer.Err()
+		if err == nil {
+			err = errors.New("Agentbus peer closed before ready")
+		}
+		return stop(err)
 	case <-ctx.Done():
 		peer.Shutdown()
 		return stop(ctx.Err())
@@ -135,34 +141,69 @@ func RunInteractive(ctx context.Context, plan host.ExecPlan) error {
 	}
 	childCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	var childErr error
-	childDone := make(chan struct{})
-	go func() { childErr = child.Wait(); close(childDone); cancel() }()
+	childDone := make(chan error, 1)
+	go func() {
+		childDone <- child.Wait()
+		close(childDone)
+		cancel()
+	}()
 	backend, err := newPeerBackend(childCtx, identity)
 	if err != nil {
 		select {
-		case <-childDone:
+		case childErr := <-childDone:
 			_ = endpoint.Close()
 			return childErr
 		default:
 		}
-		_ = child.Process.Kill()
-		<-childDone
 		_ = endpoint.Close()
+		if ctx.Err() != nil {
+			return finishInteractiveChild(child, childDone, interactiveSignal(ctx))
+		}
+		_ = finishInteractiveChild(child, childDone, syscall.SIGTERM)
 		return err
 	}
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- mcp.ServeLane(childCtx, endpoint, backend) }()
+	peer, observer := backend.peer, backend.observer
+	var childErr, dependencyErr error
+	var stop os.Signal
 	select {
-	case <-childDone:
+	case childErr = <-childDone:
 	case <-ctx.Done():
-		_ = child.Process.Signal(syscall.SIGTERM)
-		<-childDone
+		stop = interactiveSignal(ctx)
+	case <-peer.Closed():
+		dependencyErr, stop = peer.Err(), syscall.SIGTERM
+		if dependencyErr == nil {
+			dependencyErr = errors.New("Agentbus peer closed")
+		}
+	case <-observer.done:
+		dependencyErr, stop = fmt.Errorf("Grok observer closed: %w", observer.err), syscall.SIGTERM
+	}
+	if stop != nil {
+		childErr = finishInteractiveChild(child, childDone, stop)
 	}
 	backend.Shutdown()
 	_ = endpoint.Close()
 	<-serveDone
+	if dependencyErr != nil {
+		return dependencyErr
+	}
 	return childErr
+}
+
+func finishInteractiveChild(child *exec.Cmd, done <-chan error, stop os.Signal) error {
+	if stop != nil {
+		_ = child.Process.Signal(stop)
+	}
+	return <-done
+}
+
+func interactiveSignal(ctx context.Context) os.Signal {
+	var caught interface{ CaughtSignal() os.Signal }
+	if errors.As(context.Cause(ctx), &caught) {
+		return caught.CaughtSignal()
+	}
+	return syscall.SIGTERM
 }
 
 func peerIdentity(environment []string) (sessionkit.PeerIdentity, string, error) {
@@ -196,9 +237,6 @@ func setEnvironment(environment []string, name, value string) []string {
 }
 
 func (b *PeerBackend) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	if err := b.Prepare(ctx, nil); err != nil {
-		return nil, err
-	}
 	b.mu.Lock()
 	peer := b.peer
 	b.mu.Unlock()
@@ -206,6 +244,15 @@ func (b *PeerBackend) Call(ctx context.Context, method string, params any) (json
 		return nil, errors.New("not connected")
 	}
 	return peer.Call(ctx, method, params)
+}
+
+func (b *PeerBackend) Caller() *sessionkit.Caller {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.peer == nil {
+		return nil
+	}
+	return b.peer.Caller
 }
 
 func (b *PeerBackend) Prepare(ctx context.Context, _ json.RawMessage) error {

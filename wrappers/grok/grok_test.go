@@ -59,6 +59,9 @@ func fakeGrok() {
 		time.Sleep(24 * time.Hour)
 	}
 	if slices.Contains(arguments, "--leader") && !slices.Contains(arguments, "stdio") {
+		if path := os.Getenv("GROK_TEST_INTERACTIVE_PID"); path != "" {
+			_ = os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o600)
+		}
 		if code, _ := strconv.Atoi(os.Getenv("GROK_TEST_INTERACTIVE_EXIT")); code != 0 {
 			os.Exit(code)
 		}
@@ -117,6 +120,9 @@ func fakeGrok() {
 			}
 			session := first(os.Getenv("GROK_TEST_SESSION_ID"), testSessionID)
 			reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"result": map[string]any{"sessions": []map[string]any{{"sessionId": session, "title": title, "cwd": os.TempDir(), "activity": "working", "resident": true, "yolo": true}}}}})
+			if os.Getenv("GROK_TEST_OBSERVER_EXIT") != "" && slices.Contains(arguments, "stdio") {
+				return
+			}
 		case "_x.ai/interject":
 			if path := os.Getenv("GROK_TEST_INTERJECT_BLOCK"); path != "" {
 				<-fileReady(path)

@@ -62,10 +62,8 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 		defer stop()
 	}
 	var caller *sessionkit.Caller
-	if source, owned := s.Backend.(interface{ Caller() *sessionkit.Caller }); owned {
-		caller = source.Caller()
-	} else if backend, ok := s.Backend.(Backend); ok {
-		caller = sessionkit.NewCaller(backend.Call)
+	if backend, ok := s.Backend.(Backend); ok {
+		caller = backendCaller(backend)
 	}
 	if caller == nil {
 		if _, ok := s.Backend.(ActionBackend); !ok {
@@ -100,6 +98,13 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.writeErr
+}
+
+func backendCaller(backend Backend) *sessionkit.Caller {
+	if source, owned := backend.(interface{ Caller() *sessionkit.Caller }); owned {
+		return source.Caller()
+	}
+	return sessionkit.NewCaller(backend.Call)
 }
 
 func (s *Server) handle(ctx context.Context, caller *sessionkit.Caller, body []byte, output io.Writer) {
