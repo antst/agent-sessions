@@ -120,6 +120,9 @@ func fakeGrok() {
 			reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"success": true}})
 		case "_x.ai/sessions/list":
 			rosterCalls++
+			if path := os.Getenv("GROK_TEST_ROSTER_BLOCK"); path != "" {
+				<-fileReady(path)
+			}
 			if os.Getenv("GROK_TEST_ROSTER_DELAY") != "" && rosterCalls == 1 {
 				reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"result": map[string]any{"sessions": []any{}}}})
 				reply(map[string]any{"jsonrpc": "2.0", "method": "_x.ai/sessions/changed", "params": map[string]any{}})

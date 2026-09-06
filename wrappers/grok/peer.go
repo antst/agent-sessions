@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"syscall"
 
 	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
@@ -34,13 +33,24 @@ const grokSessionIDEnv = "GROK_SESSION_ID"
 const grokLeaderSocketEnv = "GROK_LEADER_SOCKET"
 
 type PeerBackend struct {
-	mu       sync.Mutex
-	peer     *sessionkit.Peer
-	observer *acpClient
-	process  *nativeProcess
+	peer       *sessionkit.Peer
+	identity   sessionkit.PeerIdentity
+	leader     string
+	cwd        string
+	deliveries chan peerDelivery
+	cancel     context.CancelFunc
+	done       chan struct{}
+}
+
+type peerDelivery struct {
 	identity sessionkit.PeerIdentity
-	leader   string
-	cwd      string
+	request  sessionkit.DeliveryRequest
+	reply    chan peerDeliveryResult
+}
+
+type peerDeliveryResult struct {
+	receipt sessionkit.DeliveryReceipt
+	err     error
 }
 
 func startPeerClient(ctx context.Context, leaderPath, cwd string, notify func(acpFrame)) (*acpClient, *nativeProcess, error) {
@@ -63,25 +73,23 @@ func NewPeerBackend(ctx context.Context, environment []string) (*PeerBackend, er
 	if err != nil {
 		return nil, err
 	}
-	b := &PeerBackend{identity: sessionkit.PeerIdentity{Product: "grok", SessionID: id, Name: id, Groups: groups, Info: map[string]any{"cwd": cwd}}, leader: leader, cwd: cwd}
+	deliveryCtx, cancel := context.WithCancel(ctx)
+	b := &PeerBackend{
+		identity:   sessionkit.PeerIdentity{Product: "grok", SessionID: id, Name: id, Groups: groups, Info: map[string]any{"cwd": cwd}},
+		leader:     leader,
+		cwd:        cwd,
+		deliveries: make(chan peerDelivery),
+		cancel:     cancel,
+		done:       make(chan struct{}),
+	}
 	peer, err := sessionkit.ConnectPeer(b.identity, b.deliver)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	b.peer = peer
-	select {
-	case <-peer.Ready():
-		return b, nil
-	case <-peer.Closed():
-		err = peer.Err()
-		if err == nil {
-			err = errors.New("Sessionbus peer closed before ready")
-		}
-	case <-ctx.Done():
-		err = ctx.Err()
-	}
-	b.Shutdown()
-	return nil, err
+	go b.serveDeliveries(deliveryCtx)
+	return b, nil
 }
 
 func RunInteractive(ctx context.Context, plan host.ExecPlan) error {
@@ -198,60 +206,88 @@ func setEnvironment(environment []string, name, value string) []string {
 }
 
 func (b *PeerBackend) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	b.mu.Lock()
-	peer := b.peer
-	b.mu.Unlock()
-	if peer == nil {
-		return nil, errors.New("not connected")
-	}
-	return peer.Call(ctx, method, params)
+	return b.peer.Call(ctx, method, params)
 }
 
-func (b *PeerBackend) Caller() *sessionkit.Caller {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.peer == nil {
-		return nil
-	}
-	return b.peer.Caller
-}
+func (b *PeerBackend) Caller() *sessionkit.Caller { return b.peer.Caller }
 
 func (*PeerBackend) Prepare(context.Context, json.RawMessage) error { return nil }
 
 func (b *PeerBackend) deliver(ctx context.Context, identity sessionkit.PeerIdentity, request sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
-	b.mu.Lock()
-	if b.observer == nil {
-		observer, process, err := startPeerClient(ctx, b.leader, b.cwd, nil)
-		if err != nil {
-			b.mu.Unlock()
-			return sessionkit.DeliveryReceipt{}, fmt.Errorf("start Grok observer: %w", err)
-		}
-		b.observer, b.process = observer, process
+	delivery := peerDelivery{identity: identity, request: request, reply: make(chan peerDeliveryResult, 1)}
+	select {
+	case b.deliveries <- delivery:
+	case <-ctx.Done():
+		return sessionkit.DeliveryReceipt{}, ctx.Err()
+	case <-b.done:
+		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "shutting down"}, nil
 	}
-	observer, peer := b.observer, b.peer
-	row, err := roster(ctx, observer, identity.SessionID)
-	if err == nil {
-		name := first(row.Title, row.SessionID)
-		info := map[string]any{"cwd": row.Cwd}
-		if name != b.identity.Name || row.Cwd != b.identity.Info["cwd"] {
-			err = peer.Rehello(name, info)
-			if err == nil {
-				b.identity.Name, b.identity.Info = name, info
+	select {
+	case result := <-delivery.reply:
+		return result.receipt, result.err
+	case <-ctx.Done():
+		return sessionkit.DeliveryReceipt{}, ctx.Err()
+	case <-b.done:
+		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "shutting down"}, nil
+	}
+}
+
+func (b *PeerBackend) serveDeliveries(ctx context.Context) {
+	defer close(b.done)
+	var observer *acpClient
+	var process *nativeProcess
+	identity := b.identity
+	defer func() { stopPeerClient(observer, process) }()
+	for {
+		select {
+		case delivery := <-b.deliveries:
+			if observer == nil {
+				var err error
+				observer, process, err = startPeerClient(ctx, b.leader, b.cwd, nil)
+				if err != nil {
+					delivery.reply <- peerDeliveryResult{err: fmt.Errorf("start Grok observer: %w", err)}
+					observer, process = nil, nil
+					continue
+				}
+			}
+			receipt, err := b.deliverOne(ctx, observer, &identity, delivery)
+			delivery.reply <- peerDeliveryResult{receipt: receipt, err: err}
+		case <-ctx.Done():
+			for {
+				select {
+				case delivery := <-b.deliveries:
+					delivery.reply <- peerDeliveryResult{receipt: sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "shutting down"}}
+				default:
+					return
+				}
 			}
 		}
 	}
-	b.mu.Unlock()
-	if err != nil {
-		if errors.Is(err, errNoLeader) {
-			return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "no_leader"}, nil
+}
+
+func (b *PeerBackend) deliverOne(ctx context.Context, observer *acpClient, identity *sessionkit.PeerIdentity, delivery peerDelivery) (sessionkit.DeliveryReceipt, error) {
+	row, err := roster(ctx, observer, delivery.identity.SessionID)
+	if err == nil {
+		name := first(row.Title, row.SessionID)
+		info := map[string]any{"cwd": row.Cwd}
+		if name != identity.Name || row.Cwd != identity.Info["cwd"] {
+			err = b.peer.Rehello(name, info)
+			if err == nil {
+				identity.Name, identity.Info = name, info
+			}
 		}
-		return sessionkit.DeliveryReceipt{}, err
 	}
-	message, err := host.RenderNativeMessage(request)
+	if errors.Is(err, errNoLeader) {
+		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "no_leader"}, nil
+	}
 	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
-	if err = observer.interject(ctx, identity.SessionID, request.MessageID, message); err != nil {
+	message, err := host.RenderNativeMessage(delivery.request)
+	if err != nil {
+		return sessionkit.DeliveryReceipt{}, err
+	}
+	if err = observer.interject(ctx, delivery.identity.SessionID, delivery.request.MessageID, message); err != nil {
 		return sessionkit.DeliveryReceipt{}, fmt.Errorf("Grok interject: %w", err)
 	}
 	return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
@@ -311,17 +347,9 @@ func exactRoster(sessions []peerSession, id string) (peerSession, error) {
 }
 
 func (b *PeerBackend) Shutdown() {
-	b.mu.Lock()
-	peer := b.peer
-	b.mu.Unlock()
-	if peer != nil {
-		peer.Shutdown()
-	}
-	b.mu.Lock()
-	observer, process := b.observer, b.process
-	b.peer, b.observer, b.process = nil, nil, nil
-	b.mu.Unlock()
-	stopPeerClient(observer, process)
+	b.cancel()
+	<-b.done
+	b.peer.Shutdown()
 }
 
 func stopPeerClient(client *acpClient, process *nativeProcess) {
