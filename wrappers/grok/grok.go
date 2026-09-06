@@ -185,6 +185,9 @@ func (p *Wrapper) startLeader(cwd, permission string) (*nativeProcess, error) {
 
 func startLeader(socket, key, cwd, permission string, environment []string) (*nativeProcess, error) {
 	path := leaderSocket(socket, key)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
 	_ = os.Remove(path)
 	arguments := []string{"--permission-mode", first(permission, "default")}
 	if permission == "" || permission == "default" {
@@ -412,8 +415,12 @@ func (p *Wrapper) Interrupt(ctx context.Context, run *sessionkit.Run) error {
 }
 
 func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, _ *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
-	return p.handoff.Deliver(ctx, request, func(ctx context.Context, message string) (bool, error) {
-		return p.inject(ctx, request.MessageID, message)
+	return p.handoff.Deliver(ctx, request, func(ctx context.Context, message string) (host.Injection, error) {
+		injected, err := p.inject(ctx, request.MessageID, message)
+		if injected {
+			return host.Injected, err
+		}
+		return host.NotInjected, err
 	})
 }
 

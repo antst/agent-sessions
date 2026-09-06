@@ -334,6 +334,18 @@ func TestInteractiveLauncherReturnsProductExit(t *testing.T) {
 	unix.Close(holdPidfd)
 }
 
+func TestLeaderCreatesDefaultStateRoot(t *testing.T) {
+	root := filepath.Join(shortRoot(t), "state")
+	t.Setenv(host.SocketEnv, "")
+	t.Setenv("XDG_STATE_HOME", root)
+	socket := sessionkit.Socket()
+	check(t, !exists(filepath.Dir(socket)), "default run directory already exists")
+	leader, err := startLeader(socket, host.LaunchTokenDigest(testSessionID), t.TempDir(), "default", os.Environ())
+	must(t, err)
+	check(t, grokSocketReady(leaderSocket(socket, host.LaunchTokenDigest(testSessionID))), "leader socket was not created")
+	must(t, closeNative("leader", leader))
+}
+
 func TestExactRosterAuthority(t *testing.T) {
 	yolo, resident := true, true
 	live := peerSession{SessionID: testSessionID, Resident: &resident, Activity: "idle", Yolo: &yolo}
