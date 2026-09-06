@@ -55,7 +55,7 @@ func TestPeerDeliveryUsesCanonicalEnvelope(t *testing.T) {
 		_ = json.NewDecoder(connection).Decode(&frame)
 		received <- frame
 	}()
-	receipt, err := (&PeerBackend{}).deliver(context.Background(), delivery("hello"))
+	receipt, err := (&PeerBackend{}).deliver(context.Background(), sessionkit.PeerIdentity{SessionID: "current"}, delivery("hello"))
 	must(t, err)
 	check(t, receipt.Disposition == "injected", "receipt = %#v", receipt)
 	frame := <-received
@@ -75,10 +75,25 @@ func TestPeerDeliveryCancelStopsBlockedWrite(t *testing.T) {
 	t.Setenv(messagingSocketEnv, "fixture")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { _, err := (&PeerBackend{}).deliver(ctx, delivery("blocked")); done <- err }()
+	go func() {
+		receipt, err := (&PeerBackend{}).deliver(ctx, sessionkit.PeerIdentity{SessionID: "old"}, delivery("blocked"))
+		if err == nil && receipt.Disposition == "rejected" && receipt.Reason == "closing" {
+			done <- nil
+			return
+		}
+		done <- fmt.Errorf("receipt = %#v, error = %v", receipt, err)
+	}()
 	<-started
 	cancel()
-	check(t, <-done != nil, "blocked delivery succeeded after cancellation")
+	must(t, <-done)
+}
+
+func TestPeerDeliveryRejectsPreCanceledIdentity(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	receipt, err := (&PeerBackend{}).deliver(ctx, sessionkit.PeerIdentity{SessionID: "old"}, delivery("stale"))
+	must(t, err)
+	check(t, receipt.Disposition == "rejected" && receipt.Reason == "closing", "receipt = %#v", receipt)
 }
 
 type writeSignal struct {
@@ -111,7 +126,7 @@ func TestPeerRehellosReplacesAndStopsOnObservationFailure(t *testing.T) {
 	<-backend.peer.Ready()
 	initial := <-events
 	check(t, initial["method"] == "session.hello" && initial["params"].(map[string]any)["session_id"] == "initial", "initial = %#v", initial)
-	must(t, backend.Prepare(context.Background()))
+	must(t, backend.Prepare(context.Background(), nil))
 	result, err := backend.Call(context.Background(), "session.list", sessionkit.SessionListRequest{})
 	must(t, err)
 	check(t, string(result) == `{"sessions":[]}`, "result = %s", result)
@@ -120,14 +135,14 @@ func TestPeerRehellosReplacesAndStopsOnObservationFailure(t *testing.T) {
 	check(t, params["session_id"] == "initial" && params["name"] == "same-title" && reflect.DeepEqual(params["groups"], []any{"team"}) && params["info"].(map[string]any)["cwd"] == "/same", "rehello = %#v", rehello)
 	check(t, call["method"] == "session.list", "call = %#v", call)
 	payload = `[{"sessionId":"replacement","name":"new-title","kind":"interactive","cwd":"/new","pid":` + fmt.Sprint(parent) + `}]`
-	must(t, backend.Prepare(context.Background()))
+	must(t, backend.Prepare(context.Background(), nil))
 	_, err = backend.Call(context.Background(), "session.list", sessionkit.SessionListRequest{})
 	must(t, err)
 	replaced, call := <-events, <-events
 	check(t, replaced["method"] == "session.hello" && replaced["params"].(map[string]any)["session_id"] == "replacement", "replacement = %#v", replaced)
 	check(t, call["method"] == "session.list", "call = %#v", call)
 	observationError = os.ErrNotExist
-	err = backend.Prepare(context.Background())
+	err = backend.Prepare(context.Background(), nil)
 	check(t, err != nil && strings.Contains(err.Error(), "start Claude with claude-peer"), "observation error = %v", err)
 	select {
 	case event := <-events:
@@ -169,7 +184,7 @@ func TestUnresolvedPeerNeverConnects(t *testing.T) {
 	backend, err := NewPeerBackend(context.Background())
 	must(t, err)
 	defer backend.Shutdown()
-	err = backend.Prepare(context.Background())
+	err = backend.Prepare(context.Background(), nil)
 	check(t, backend.peer == nil && err != nil && strings.Contains(err.Error(), "start Claude with claude-peer"), "backend = %#v / %v", backend, err)
 }
 

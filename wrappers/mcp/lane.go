@@ -14,6 +14,8 @@ const LaneSocketEnv = "AGENTBUS_LANE_SOCKET"
 
 type LaneBackend struct{ path string }
 
+func (*LaneBackend) Prepare(context.Context, json.RawMessage) error { return nil }
+
 type laneFrame struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      int64           `json:"id"`
