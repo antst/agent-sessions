@@ -221,10 +221,10 @@ func (p *Wrapper) startObserverClient(ctx context.Context, cwd string) (*acpClie
 	args := []string{"--no-auto-update", "--permission-mode", "default", "--leader-socket", leaderSocket(p.socket, p.key), "agent", "--leader", "stdio"}
 	cmd := command("grok", args...)
 	cmd.Dir, cmd.Env, cmd.Stderr = cwd, nativeEnvironment(), os.Stderr
-	return startObserverClient(ctx, cmd, nil)
+	return startObserverClient(ctx, ctx, cmd, nil)
 }
 
-func startObserverClient(ctx context.Context, cmd *exec.Cmd, notify func(acpFrame)) (*acpClient, *nativeProcess, error) {
+func startObserverClient(lifetimeCtx, requestCtx context.Context, cmd *exec.Cmd, notify func(acpFrame)) (*acpClient, *nativeProcess, error) {
 	input, _ := cmd.StdinPipe()
 	output, _ := cmd.StdoutPipe()
 	process, err := startNative(cmd)
@@ -232,7 +232,14 @@ func startObserverClient(ctx context.Context, cmd *exec.Cmd, notify func(acpFram
 		return nil, nil, err
 	}
 	client := newACPClient(input, output, notify)
-	if err = initializeACP(ctx, client); err != nil {
+	go func() {
+		select {
+		case <-lifetimeCtx.Done():
+			client.close()
+		case <-client.done:
+		}
+	}()
+	if err = initializeACP(requestCtx, client); err != nil {
 		client.close()
 		stopAux(process)
 		return nil, nil, err
