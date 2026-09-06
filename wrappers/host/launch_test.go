@@ -45,6 +45,15 @@ func TestInteractivePlanErrors(t *testing.T) {
 	}
 }
 
+func TestClassifiedInteractivePlanDefersProjectionErrors(t *testing.T) {
+	for _, args := range [][]string{{"exec", "-g"}, {"--help", "--peer-name="}} {
+		environment := []string{"PATH=/bin"}
+		plan, passthrough, err := ClassifiedInteractivePlan("product", args, environment, PeerIdentity{}, nil, func(argument string) bool { return argument == "exec" || argument == "--help" })
+		must(t, err)
+		check(t, passthrough && reflect.DeepEqual(plan.Args, args) && reflect.DeepEqual(plan.Env, environment), "passthrough = %#v, %v", plan, passthrough)
+	}
+}
+
 func TestBuildArgumentsTable(t *testing.T) {
 	rules := []ArgumentRule{
 		{Name: "--agent", TakesValue: true},
