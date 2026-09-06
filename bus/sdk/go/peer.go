@@ -152,7 +152,12 @@ func (p *Peer) connect() {
 					close(ready)
 					ready = nil
 				}
-				<-wire.Done()
+				select {
+				case <-wire.Done():
+				case <-p.ctx.Done():
+					_ = wire.Close()
+					<-wire.Done()
+				}
 				p.mu.Lock()
 				if p.wire == wire {
 					p.wire = nil
@@ -179,41 +184,54 @@ func (p *Peer) connect() {
 
 func (p *Peer) hello(ctx context.Context, wire *rpc.Conn, identity PeerIdentity, generation uint64) error {
 	for {
-		if err := wire.Call(ctx, "session.hello", identity, &struct{}{}); err != nil {
+		installed := false
+		err := wire.CallObserved(ctx, "session.hello", identity, &struct{}{}, func() error {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if p.ctx.Err() != nil {
+				return rpc.ErrClosed
+			}
+			if generation == p.generation {
+				if p.wire != wire {
+					p.identityCtx, p.identityStop = context.WithCancel(wire.Context())
+				}
+				p.wire, installed = wire, true
+			} else {
+				identity, generation = p.identity, p.generation
+			}
+			return nil
+		})
+		if err != nil {
 			return err
 		}
-		p.mu.Lock()
-		if p.ctx.Err() != nil {
-			p.mu.Unlock()
-			return rpc.ErrClosed
-		}
-		if generation == p.generation {
-			if p.wire != wire {
-				p.identityCtx, p.identityStop = context.WithCancel(wire.Context())
-			}
-			p.wire = wire
-			p.mu.Unlock()
+		if installed {
 			return nil
 		}
-		identity, generation = p.identity, p.generation
-		p.mu.Unlock()
 	}
 }
 
 func (p *Peer) handle(wire *rpc.Conn, request *rpc.Request) {
 	switch request.Method {
 	case "session.superseded":
-		p.cancel()
-		go func() { _ = wire.Result(request, struct{}{}); _ = wire.Close() }()
+		p.mu.Lock()
+		if p.wire == wire {
+			p.wire = nil
+			if p.identityStop != nil {
+				p.identityStop()
+			}
+		}
+		p.mu.Unlock()
+		p.Caller.disconnected()
+		go func() { _ = wire.Result(request, struct{}{}); p.cancel(); _ = wire.Close() }()
 	case "message.deliver":
 		p.mu.Lock()
-		identity, identityCtx := p.identity, p.identityCtx
+		identity, err := snapshotIdentity(p.identity)
+		identityCtx := p.identityCtx
 		current := p.wire == wire && identityCtx != nil
 		p.mu.Unlock()
 		go func() {
 			receipt := DeliveryReceipt{Disposition: "rejected", Reason: "closing"}
-			var err error
-			if current {
+			if current && err == nil {
 				receipt, err = p.deliver(identityCtx, identity, *request.Params.(*DeliveryRequest))
 			}
 			if err != nil {
