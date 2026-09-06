@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { parse } from "jsonc-parser";
 import { configure } from "./install.mjs";
@@ -9,9 +11,9 @@ import { configure } from "./install.mjs";
 function fixture() {
   const root = mkdtempSync(path.join(os.tmpdir(), "sessionbus-opencode-install-"));
   const directory = path.join(root, "opencode");
-  const plugin = path.join(root, "plugin");
+  const plugin = path.join(root, "@sessionbus", "opencode");
   mkdirSync(directory);
-  mkdirSync(plugin);
+  mkdirSync(plugin, { recursive: true });
   writeFileSync(path.join(plugin, "package.json"), '{"name":"@sessionbus/opencode"}\n');
   return { directory, specifier: `file:${plugin}` };
 }
@@ -59,6 +61,17 @@ test("local and remote archives are replaced without duplicate entries", () => {
   assert.deepEqual(value(selected), { plugin: ["other-plugin", specifier] });
 });
 
+test("HTTP npm archives are replaced and removed as one owned package", () => {
+  const { directory, specifier } = fixture();
+  const selected = path.join(directory, "opencode.jsonc");
+  const archive = "http://127.0.0.1:34567/sessionbus-opencode-0.1.0-pre.0.tgz";
+  writeFileSync(selected, `${JSON.stringify({ plugin: [archive, "other-plugin"] })}\n`);
+  assert.equal(configure({ directory, specifier }), true);
+  assert.deepEqual(value(selected), { plugin: ["other-plugin", specifier] });
+  assert.equal(configure({ directory, remove: true }), true);
+  assert.deepEqual(value(selected), { plugin: ["other-plugin"] });
+});
+
 test("an invalid merged file or failed transaction leaves every file byte-exact", () => {
   const { directory, specifier } = fixture();
   const selected = path.join(directory, "opencode.jsonc");
@@ -75,4 +88,43 @@ test("an invalid merged file or failed transaction leaves every file byte-exact"
   assert.throws(() => configure({ directory, specifier, commit() { throw new Error("disk full"); } }), /disk full/u);
   assert.equal(readFileSync(selected, "utf8"), beforeSelected);
   assert.equal(readFileSync(alternate, "utf8"), validAlternate);
+});
+
+test("partial multi-file commit failure restores every byte and removes transaction files", () => {
+  const { directory, specifier } = fixture();
+  const selected = path.join(directory, "opencode.jsonc");
+  const alternate = path.join(directory, "opencode.json");
+  writeFileSync(selected, '{// selected\n"plugin":["@sessionbus/opencode@old","one"]}\n');
+  writeFileSync(alternate, '{"plugin":["@sessionbus/opencode@older","two"]}\n');
+  const before = [readFileSync(selected, "utf8"), readFileSync(alternate, "utf8")];
+  let installed = 0;
+  assert.throws(() => configure({ directory, specifier, rename(from, to) {
+    renameSync(from, to);
+    if (from.endsWith(".new") && ++installed === 1) throw new Error("disk disappeared after first install");
+  } }), /disk disappeared/u);
+  assert.deepEqual([readFileSync(selected, "utf8"), readFileSync(alternate, "utf8")], before);
+  assert.deepEqual(readdirSync(directory).filter((name) => /\.(?:new|old)$/u.test(name)), []);
+});
+
+test("the packed plugin's real node_modules bin performs installation", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sessionbus-opencode-pack-"));
+  const packageRoot = path.dirname(fileURLToPath(import.meta.url));
+  const importHome = path.join(root, "import-only");
+  const imported = spawnSync(process.execPath, ["--input-type=module", "--eval", `import(${JSON.stringify(new URL("./install.mjs", import.meta.url).href)})`], { encoding: "utf8", env: { ...process.env, XDG_CONFIG_HOME: importHome } });
+  assert.equal(imported.status, 0, imported.stderr);
+  assert.deepEqual(readdirSync(root), []);
+  const packed = spawnSync("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", root], { cwd: packageRoot, encoding: "utf8" });
+  assert.equal(packed.status, 0, packed.stderr);
+  const archive = path.join(root, JSON.parse(packed.stdout)[0].filename);
+  writeFileSync(path.join(root, "package.json"), '{"private":true}\n');
+  const installed = spawnSync("npm", ["install", "--ignore-scripts", "--omit=peer", "--no-package-lock", "--no-save", archive], { cwd: root, encoding: "utf8" });
+  assert.equal(installed.status, 0, installed.stderr);
+  const configHome = path.join(root, "config");
+  const plugin = path.join(root, "@sessionbus", "opencode");
+  mkdirSync(plugin, { recursive: true });
+  writeFileSync(path.join(plugin, "package.json"), '{"name":"@sessionbus/opencode"}\n');
+  const command = path.join(root, "node_modules", ".bin", "sessionbus-opencode-install");
+  const invoked = spawnSync(command, ["--specifier", `file:${plugin}`], { encoding: "utf8", env: { ...process.env, XDG_CONFIG_HOME: configHome } });
+  assert.equal(invoked.status, 0, invoked.stderr);
+  assert.deepEqual(value(path.join(configHome, "opencode", "opencode.jsonc")), { plugin: [`file:${plugin}`] });
 });

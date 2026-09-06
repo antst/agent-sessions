@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,24 +21,8 @@ function text(value) {
   return typeof value === "string" && value.length > 0 && !/[\0\r\n]/u.test(value);
 }
 
-function filePackageName(specifier) {
-  if (!specifier.startsWith("file:")) return "";
-  try {
-    const target = fileURLToPath(specifier);
-    return lstatSync(target).isDirectory() ? JSON.parse(readFileSync(path.join(target, "package.json"), "utf8")).name : "";
-  } catch {
-    return "";
-  }
-}
-
 function ownedSpecifier(specifier) {
-  if (typeof specifier !== "string") return false;
-  if (specifier === "@sessionbus/opencode" || specifier.startsWith("@sessionbus/opencode@")) return true;
-  if (filePackageName(specifier) === "@sessionbus/opencode") return true;
-  if (specifier.startsWith("file:")) {
-    try { if (/^sessionbus-opencode-[^/]+\.tgz$/u.test(path.basename(fileURLToPath(specifier)))) return true; } catch {}
-  }
-  return /^https?:\/\/[^\s]*(?:%40|@)sessionbus(?:%2F|\/)opencode(?:@|%40)/u.test(specifier);
+  return typeof specifier === "string" && /@sessionbus\/opencode|sessionbus-opencode[^/?#]*\.tgz(?:[?#]|$)/u.test(specifier);
 }
 
 function entrySpecifier(entry) {
@@ -88,7 +72,7 @@ function edit(document, specifier, remove) {
   return body;
 }
 
-function atomicCommit(changes) {
+function atomicCommit(changes, rename = renameSync) {
   const staged = [];
   try {
     for (const change of changes) {
@@ -100,8 +84,8 @@ function atomicCommit(changes) {
       staged.push(item);
     }
     for (const item of staged) {
-      if (item.existed) { renameSync(item.file, item.backup); item.backedUp = true; }
-      renameSync(item.temporary, item.file);
+      if (item.existed) { rename(item.file, item.backup); item.backedUp = true; }
+      rename(item.temporary, item.file);
       item.installed = true;
     }
   } catch (error) {
@@ -134,7 +118,7 @@ export function configure(options = {}) {
   if (remove && owned.length === 0) return false;
   if (!remove && owned.length === 1 && owned[0].document.selected && owned[0].entry === specifier) return false;
   const changes = documents.map((document) => ({ file: document.file, body: edit(document, specifier, remove), mode: document.mode })).filter((change, index) => change.body !== documents[index].body);
-  (options.commit || atomicCommit)(changes);
+  (options.commit || ((pending) => atomicCommit(pending, options.rename)))(changes);
   return changes.length > 0;
 }
 
@@ -145,6 +129,6 @@ function argumentsFrom(argv) {
   throw new Error("usage: sessionbus-opencode-install [--specifier <exact-package-specifier> | --remove]");
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { configure(argumentsFrom(process.argv.slice(2))); } catch (error) { process.stderr.write(`${error.message}\n`); process.exitCode = 1; }
+export function main(argv = process.argv.slice(2)) {
+  return configure(argumentsFrom(argv));
 }

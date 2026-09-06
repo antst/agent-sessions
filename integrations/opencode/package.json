@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./sessionbus.mjs",
   "bin": {
-    "sessionbus-opencode-install": "install.mjs"
+    "sessionbus-opencode-install": "bin.mjs"
   },
   "scripts": {
     "test": "node --test sessionbus.test.mjs install.test.mjs"
@@ -15,6 +15,7 @@
   },
   "files": [
     "README.md",
+    "bin.mjs",
     "install.mjs",
     "sessionbus.mjs",
     "commands",

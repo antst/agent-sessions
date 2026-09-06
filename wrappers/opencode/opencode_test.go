@@ -10,9 +10,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
 	"github.com/antst/sessionbus/wrappers/host"
@@ -105,6 +107,10 @@ func TestNativeRepliesMustIdentifyCommittedState(t *testing.T) {
 			return err
 		}},
 		{"resume id", `{"id":"ses_other","title":"title","directory":"/work"}`, "different session", func(client *nativeClient) error { _, err := client.get(context.Background(), "ses_exact"); return err }},
+		{"resume settings", `{"id":"ses_exact","title":"other","directory":"/work"}`, "confirm resumed session settings", func(client *nativeClient) error {
+			_, err := client.update(context.Background(), "ses_exact", "title", "ask")
+			return err
+		}},
 		{"prompt echo", `{"data":{"admittedSeq":0,"id":"msg_wrong","sessionID":"ses_exact","prompt":{"text":"go"},"delivery":"steer"}}`, "invalid input admission", func(client *nativeClient) error {
 			_, err := client.prompt(context.Background(), "ses_exact", "msg_exact", "go", "steer", true)
 			return err
@@ -173,6 +179,31 @@ func TestCreateUsesExactPermissionRule(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestResumeReadsThenAppliesAndVerifiesExactSettings(t *testing.T) {
+	methods := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		methods = append(methods, request.Method)
+		if request.URL.Path != "/session/ses_exact" || request.URL.Query().Get("directory") != "/work" {
+			t.Fatalf("request = %s", request.URL)
+		}
+		if request.Method == http.MethodPatch {
+			var body struct {
+				Title      string              `json:"title"`
+				Permission []map[string]string `json:"permission"`
+			}
+			if json.NewDecoder(request.Body).Decode(&body) != nil || body.Title != "Resumed title" || len(body.Permission) != 1 || body.Permission[0]["permission"] != "*" || body.Permission[0]["pattern"] != "*" || body.Permission[0]["action"] != "allow" {
+				t.Fatalf("patch body = %#v", body)
+			}
+		}
+		_ = json.NewEncoder(response).Encode(nativeSession{ID: "ses_exact", Title: "Resumed title", Directory: "/work"})
+	}))
+	defer server.Close()
+	session, err := testClient(server).resume(context.Background(), "ses_exact", "Resumed title", "allow")
+	if err != nil || session.ID != "ses_exact" || session.Title != "Resumed title" || !slices.Equal(methods, []string{http.MethodGet, http.MethodPatch}) {
+		t.Fatalf("resume = %#v/%v, methods = %#v", session, err, methods)
 	}
 }
 
@@ -295,7 +326,9 @@ func TestOpenCodeProcess(t *testing.T) {
 		names = append(names, name)
 	}
 	record := os.Getenv("OPENCODE_TEST_RECORD")
+	mode := os.Getenv("OPENCODE_TEST_MODE")
 	var mu sync.Mutex
+	promptID := ""
 	write := func(value any) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -336,6 +369,30 @@ func TestOpenCodeProcess(t *testing.T) {
 			_ = json.NewEncoder(response).Encode(nativeSession{ID: "ses_exact", Title: "Lane title", Directory: request.URL.Query().Get("directory")})
 		case request.Method == http.MethodPost && (strings.HasSuffix(request.URL.Path, "/model") || strings.HasSuffix(request.URL.Path, "/agent")):
 			response.WriteHeader(http.StatusNoContent)
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/prompt"):
+			input := body.(map[string]any)
+			mu.Lock()
+			promptID, _ = input["id"].(string)
+			mu.Unlock()
+			_ = json.NewEncoder(response).Encode(map[string]any{"data": map[string]any{"admittedSeq": 0, "id": input["id"], "sessionID": "ses_exact", "prompt": input["prompt"], "delivery": input["delivery"]}})
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/wait"):
+			response.WriteHeader(http.StatusNoContent)
+			response.(http.Flusher).Flush()
+			if mode == "no-terminal-exit" {
+				os.Exit(0)
+			}
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/message") && mode == "terminal-exit":
+			mu.Lock()
+			messageID := promptID
+			mu.Unlock()
+			encoded, _ := json.Marshal(map[string]any{"data": []any{
+				map[string]any{"id": messageID, "type": "user", "text": "large", "time": map[string]any{"created": 1}},
+				map[string]any{"id": "msg_answer", "type": "assistant", "time": map[string]any{"created": 2, "completed": 3}, "content": []any{map[string]any{"type": "text", "text": strings.Repeat("x", 300004)}}, "finish": "stop"},
+			}, "cursor": map[string]string{}})
+			response.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
+			_, _ = response.Write(encoded)
+			response.(http.Flusher).Flush()
+			os.Exit(0)
 		case request.Method == http.MethodDelete && request.URL.Path == "/session/ses_exact":
 			_ = json.NewEncoder(response).Encode(true)
 		default:
@@ -576,6 +633,67 @@ func TestResultProjectsEveryCompletedAssistantAfterInput(t *testing.T) {
 	result, stop, err := testClient(server).result(context.Background(), "ses_exact", "msg_input")
 	if err != nil || result != "one\ntwo" || stop != "stop" {
 		t.Fatalf("result = %q/%q/%v", result, stop, err)
+	}
+}
+
+func TestResultRejectsIdleWithoutCompletedAssistant(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		_, _ = response.Write([]byte(`{"data":[{"id":"msg_input","type":"user","text":"go","time":{"created":1}}],"cursor":{}}`))
+	}))
+	defer server.Close()
+	if _, _, err := testClient(server).result(context.Background(), "ses_exact", "msg_input"); err == nil || err.Error() != "OpenCode idle history omitted a completed assistant" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestWrapperDrainsOwnedTerminalBeforeChildExitShutdown(t *testing.T) {
+	testWrapperChildExit(t, "terminal-exit", true)
+}
+
+func TestWrapperFailsThenJoinsRunBeforeChildExitShutdown(t *testing.T) {
+	testWrapperChildExit(t, "no-terminal-exit", false)
+}
+
+func testWrapperChildExit(t *testing.T, mode string, wantTerminal bool) {
+	directory, record := t.TempDir(), filepath.Join(t.TempDir(), "requests.jsonl")
+	t.Setenv("OPENCODE_TEST_CHILD", "1")
+	t.Setenv("OPENCODE_TEST_MODE", mode)
+	t.Setenv("OPENCODE_TEST_RECORD", record)
+	oldCommand := laneCommand
+	laneCommand = func(_ string, arguments ...string) *exec.Cmd {
+		return exec.Command(os.Args[0], append([]string{"-test.run=TestOpenCodeProcess", "--"}, arguments...)...)
+	}
+	t.Cleanup(func() { laneCommand = oldCommand })
+	p := New(filepath.Join(directory, "sessionbus.sock"), "provisional")
+	p.SetCall(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
+	shutdown := make(chan struct{})
+	var shutdownOnce sync.Once
+	p.SetShutdown(func() { shutdownOnce.Do(func() { close(shutdown) }) })
+	if _, err := p.Open(context.Background(), sessionkit.OpenRequest{Name: "Lane title@local", Open: sessionkit.OpenOptions{Cwd: directory}}); err != nil {
+		t.Fatal(err)
+	}
+	run := newFakeRun()
+	result, err := p.run(context.Background(), run, "large")
+	if wantTerminal {
+		if err != nil || result.Outcome != "completed" || len(result.Result) != 300004 || result.NativeStopReason != "stop" {
+			t.Fatalf("terminal = %#v/%v", result, err)
+		}
+	} else if err == nil {
+		t.Fatalf("missing terminal completed: %#v", result)
+	}
+	select {
+	case <-shutdown:
+		t.Fatal("worker shutdown preceded Run.Done")
+	default:
+	}
+	close(run.done)
+	select {
+	case <-shutdown:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker shutdown did not join Run.Done")
+	}
+	if err := p.Close(context.Background(), sessionkit.SessionCloseRequest{}); err != nil {
+		t.Fatal(err)
 	}
 }
 

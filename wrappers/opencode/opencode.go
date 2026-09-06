@@ -55,6 +55,7 @@ type Wrapper struct {
 	client              *nativeClient
 	id                  string
 	eventCancel         context.CancelFunc
+	runDone             <-chan struct{}
 	opened, closing     bool
 	shutdown            func()
 }
@@ -177,7 +178,7 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 	} else if !validNativeID(request.ResumeSessionID) {
 		err = errors.New("OpenCode resume session id is invalid")
 	} else {
-		session, err = client.get(ctx, request.ResumeSessionID)
+		session, err = client.resume(ctx, request.ResumeSessionID, name, permission)
 	}
 	if err != nil {
 		return cleanup(err)
@@ -221,7 +222,7 @@ func (p *Wrapper) run(ctx context.Context, run runToken, input string) (sessionk
 	if err != nil {
 		return sessionkit.TurnResult{}, err
 	}
-	client, id, err := p.live()
+	client, id, err := p.beginRun(run.Done())
 	if err != nil {
 		return sessionkit.TurnResult{}, err
 	}
@@ -244,6 +245,16 @@ func (p *Wrapper) run(ctx context.Context, run runToken, input string) (sessionk
 		}
 	}
 	return sessionkit.TurnResult{Outcome: outcome, Result: result, NativeStopReason: stop}, nil
+}
+
+func (p *Wrapper) beginRun(done <-chan struct{}) (*nativeClient, string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.opened || p.closing || p.client == nil || p.id == "" {
+		return nil, "", errors.New("OpenCode session is not available")
+	}
+	p.runDone = done
+	return p.client, p.id, nil
 }
 
 func (p *Wrapper) Interrupt(ctx context.Context, run *sessionkit.Run) error {
@@ -359,22 +370,29 @@ func (p *Wrapper) live() (*nativeClient, string, error) {
 func (p *Wrapper) watch(child *host.Child, drained <-chan struct{}) {
 	_ = child.Wait()
 	<-drained
-	p.mu.Lock()
-	opened, closing, shutdown := p.opened, p.closing, p.shutdown
-	p.mu.Unlock()
-	if opened && !closing && shutdown != nil {
-		shutdown()
-	}
+	p.failAfterRun()
 }
 
 func (p *Wrapper) watchEvents(events <-chan error) {
 	err := <-events
-	p.mu.Lock()
-	opened, closing, shutdown := p.opened, p.closing, p.shutdown
-	p.mu.Unlock()
-	if err != nil && opened && !closing && shutdown != nil {
-		shutdown()
+	if err != nil {
+		p.failAfterRun()
 	}
+}
+
+func (p *Wrapper) failAfterRun() {
+	p.mu.Lock()
+	if !p.opened || p.closing || p.shutdown == nil {
+		p.mu.Unlock()
+		return
+	}
+	p.closing = true
+	done, shutdown := p.runDone, p.shutdown
+	p.mu.Unlock()
+	if done != nil {
+		<-done
+	}
+	shutdown()
 }
 
 func credentials() (string, string, error) {

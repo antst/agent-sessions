@@ -135,8 +135,7 @@ func (c *nativeClient) ready(ctx context.Context) (bool, error) {
 }
 
 func (c *nativeClient) create(ctx context.Context, title, permission string) (nativeSession, error) {
-	body := map[string]any{"title": title, "permission": []map[string]string{{"permission": "*", "pattern": "*", "action": permission}}}
-	result, err := c.request(ctx, http.MethodPost, c.scoped("/session"), body, http.StatusOK)
+	result, err := c.request(ctx, http.MethodPost, c.scoped("/session"), sessionUpdate(title, permission), http.StatusOK)
 	if err != nil {
 		return nativeSession{}, err
 	}
@@ -145,6 +144,22 @@ func (c *nativeClient) create(ctx context.Context, title, permission string) (na
 		return nativeSession{}, errors.New("OpenCode created an ambiguous session")
 	}
 	return session, nil
+}
+
+func (c *nativeClient) update(ctx context.Context, id, title, permission string) (nativeSession, error) {
+	result, err := c.request(ctx, http.MethodPatch, c.scoped("/session/"+url.PathEscape(id)), sessionUpdate(title, permission), http.StatusOK)
+	if err != nil {
+		return nativeSession{}, err
+	}
+	var session nativeSession
+	if json.Unmarshal(result, &session) != nil || session.ID != id || session.Title != title || session.Directory != c.directory {
+		return nativeSession{}, errors.New("OpenCode did not confirm resumed session settings")
+	}
+	return session, nil
+}
+
+func sessionUpdate(title, permission string) map[string]any {
+	return map[string]any{"title": title, "permission": []map[string]string{{"permission": "*", "pattern": "*", "action": permission}}}
 }
 
 func (c *nativeClient) get(ctx context.Context, id string) (nativeSession, error) {
@@ -157,6 +172,13 @@ func (c *nativeClient) get(ctx context.Context, id string) (nativeSession, error
 		return nativeSession{}, errors.New("OpenCode returned a different session")
 	}
 	return session, nil
+}
+
+func (c *nativeClient) resume(ctx context.Context, id, title, permission string) (nativeSession, error) {
+	if _, err := c.get(ctx, id); err != nil {
+		return nativeSession{}, err
+	}
+	return c.update(ctx, id, title, permission)
 }
 
 func (c *nativeClient) configure(ctx context.Context, id string, model *modelRef, agent string) error {
@@ -227,7 +249,7 @@ func (c *nativeClient) rejectPermission(ctx context.Context, sessionID, permissi
 func (c *nativeClient) result(ctx context.Context, sessionID, messageID string) (string, string, error) {
 	base := "/api/session/" + url.PathEscape(sessionID) + "/message"
 	path := base + "?order=asc&limit=100"
-	found, count := false, 0
+	found, answered, count := false, false, 0
 	seen := map[string]bool{}
 	var output strings.Builder
 	var stop string
@@ -259,6 +281,7 @@ func (c *nativeClient) result(ctx context.Context, sessionID, messageID string) 
 			if message.Type != "assistant" || message.Time.Completed == nil {
 				continue
 			}
+			answered = true
 			trimmed := bytes.TrimSpace(message.Error)
 			if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
 				return output.String(), message.Finish, fmt.Errorf("OpenCode assistant failed: %s", trimmed)
@@ -296,6 +319,9 @@ func (c *nativeClient) result(ctx context.Context, sessionID, messageID string) 
 	}
 	if !found {
 		return "", "", errors.New("OpenCode idle history omitted the admitted input")
+	}
+	if !answered {
+		return "", "", errors.New("OpenCode idle history omitted a completed assistant")
 	}
 	return output.String(), stop, nil
 }
