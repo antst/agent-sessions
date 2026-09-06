@@ -27,6 +27,7 @@ class Worker {
     this.controller = new AbortController();
     this.run = null;
     this.opened = false;
+    this.closeRequest = {};
     this.closed = new Promise((resolve) => { this.finish = resolve; });
     this.caller = new Caller(this, options.caller);
   }
@@ -60,6 +61,7 @@ class Worker {
     if (request.method === "session.close") {
       const run = this.run;
       if (run && !run.Done) return this.shutdown();
+      this.closeRequest = request.params;
       this.run = {};
       const call = run && !run.interrupted;
       if (run) run.interrupted = true;
@@ -88,7 +90,7 @@ class Worker {
     await this._closeProduct(this.connection.signal);
     try { await this.connection.result(request, {}); } catch { this.shutdown(); } finally { this.shutdown(); }
   }
-  async _closeProduct(signal = this.controller.signal) { if (!this.opened) return; if (!this.productClose) this.productClose = Promise.resolve().then(() => this.callbacks.close(signal)).catch((error) => callbackError("close", error)); await this.productClose; }
+  async _closeProduct(signal = this.controller.signal) { if (!this.opened) return; if (!this.productClose) this.productClose = Promise.resolve().then(() => this.callbacks.close(signal, this.closeRequest)).catch((error) => callbackError("close", error)); await this.productClose; }
   async _replyError(request, code, data) { try { await this.connection.error(request, code, data); } catch { this.shutdown(); } }
 }
 

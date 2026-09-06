@@ -36,7 +36,7 @@ class FakeProduct {
     this.calls[4]++; if (this.deliverStart) { this.deliverStart.resolve(); await aborted(cancel); throw cancel.reason; }
     if (this.outbound) await this.worker.caller.list({}); return { disposition: "injected" };
   }
-  async close(cancel) { this.calls[5]++; this.closeSignal = cancel; this.closeAborted = cancel.aborted; this.closeStart?.resolve(); if (this.closeEnd) await this.closeEnd.promise; if (this.closeError) throw this.closeError; }
+  async close(cancel, request) { this.calls[5]++; this.closeSignal = cancel; this.closeRequest = request; this.closeAborted = cancel.aborted; this.closeStart?.resolve(); if (this.closeEnd) await this.closeEnd.promise; if (this.closeError) throw this.closeError; }
 }
 
 test("connection write failure rejects once", async (t) => {
@@ -64,9 +64,9 @@ test("worker closed resolves when product close rejects", async (t) => {
 });
 
 test("worker waits for orderly product close across EOF", async (t) => {
-  const product = new FakeProduct(); product.closeStart = deferred(); product.closeEnd = deferred(); const { worker, daemon, serving } = await harness(t, product); let closed = false; worker.closed.then(() => { closed = true; });
-  const closing = daemon.call("session.close", target).catch((error) => error); await product.closeStart.promise; assert.equal(product.closeSignal.aborted, false); daemon.close(); await aborted(product.closeSignal); assert.equal(closed, false);
-  product.closeEnd.resolve(); await worker.closed; await serving; await closing; assert.equal(product.closeSignal.aborted, true); assert.equal(product.calls[5], 1);
+  const product = new FakeProduct(); product.started = deferred(); product.release = deferred(); product.interrupted = deferred(); product.closeStart = deferred(); product.closeEnd = deferred(); const { worker, daemon, serving } = await harness(t, product); let closed = false; worker.closed.then(() => { closed = true; });
+  const running = daemon.call("turn.run", { ...target, input: "block" }).catch((error) => error); await product.started.promise; const request = { ...target, forget: true }, closing = daemon.call("session.close", request).catch((error) => error); await product.interrupted.promise; daemon.close(); await product.closeStart.promise;
+  assert.equal(product.closeSignal.aborted, true); assert.deepEqual(product.closeRequest, request); assert.equal(closed, false); product.release.resolve(); product.closeEnd.resolve(); await worker.closed; await serving; await Promise.all([running, closing]); assert.deepEqual(product.closeRequest, request); assert.equal(product.calls[5], 1);
 });
 
 test("one chunk is admitted before its first callback", async (t) => {
@@ -197,7 +197,7 @@ for (const row of rows) test(`lifecycle: ${row.name}`, async (t) => {
       product.release.resolve(); result = await running; await run.Done; if (row.name === "one-interrupt") assert.equal(run.Native, null); break;
     }
     case "eof-during-run": {
-      product.closeError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); product.started = deferred(); const { daemon, worker, serving } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "eof" }); const run = await product.started.promise; daemon.close(); await serving; await assert.rejects(running); await run.Done; assert.equal(worker.controller.signal.aborted, true); assert.equal(product.closeAborted, true); assert.equal(stderr(), 'agentbus: product close: "first failure\\nsecond failure"\n'); break;
+      product.closeError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); product.started = deferred(); const { daemon, worker, serving } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "eof" }); const run = await product.started.promise; daemon.close(); await serving; await assert.rejects(running); await run.Done; assert.equal(worker.controller.signal.aborted, true); assert.equal(product.closeAborted, true); assert.deepEqual(product.closeRequest, {}); assert.equal(stderr(), 'agentbus: product close: "first failure\\nsecond failure"\n'); break;
     }
     case "peer-lifetime": { await peerLifetime(); const { daemon, serving } = await harness(t, product, { open: false }); await daemon.call("session.superseded", {}); await serving; break; }
     case "wrong-direction-request": { const { daemon, serving } = await harness(t, product, { open: false }); await errorCode(daemon.call("session.hello", { protocol: 1, product: "example-peer", launch_token: "again", supported_open_fields: [], extra_arguments: [] }), -32602); await serving; break; }
@@ -217,8 +217,9 @@ for (const row of rows) test(`lifecycle: ${row.name}`, async (t) => {
       product.started = deferred(); product.release = deferred(); const { daemon, workerSocket, serving } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "block" }); const run = await product.started.promise; workerSocket.failNext = true; product.release.resolve(); await serving; await assert.rejects(running); await run.Done; break;
     }
     case "close-error": {
-      product.closeError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); const { daemon } = await harness(t, product); assert.deepEqual(await daemon.call("session.close", target), {}); assert.equal(product.closeAborted, false); assert.equal(stderr(), 'agentbus: product close: "first failure\\nsecond failure"\n'); break;
+      product.closeError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); const { daemon } = await harness(t, product); assert.deepEqual(await daemon.call("session.close", target), {}); assert.equal(product.closeAborted, false); assert.deepEqual(product.closeRequest, target); assert.equal(stderr(), 'agentbus: product close: "first failure\\nsecond failure"\n'); break;
     }
+    case "close-forget": { const { daemon } = await harness(t, product); const request = { ...target, forget: true }; assert.deepEqual(await daemon.call("session.close", request), {}); assert.deepEqual(product.closeRequest, request); break; }
     default: assert.fail(`unknown row ${row.name}`);
   }
   assert.deepEqual(product.calls, row.calls);
