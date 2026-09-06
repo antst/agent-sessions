@@ -336,7 +336,7 @@ func InteractivePlan(arguments, environment []string) (host.ExecPlan, error) {
 		return host.ExecPlan{Path: "grok", Args: slices.Clone(arguments), Env: slices.Clone(environment)}, nil
 	}
 	if argument := grokHeadless(arguments); argument != "" {
-		return host.ExecPlan{}, fmt.Errorf("%s is headless; use an Sessionbus Grok lane", argument)
+		return host.ExecPlan{}, fmt.Errorf("%s is headless; use a Sessionbus Grok lane", argument)
 	}
 	id, err := interactiveIdentity(arguments)
 	if err != nil {
