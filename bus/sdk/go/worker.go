@@ -21,7 +21,7 @@ type WorkerCallbacks interface {
 	Run(context.Context, *Run, string) (TurnResult, error)
 	Interrupt(context.Context, *Run) error
 	Deliver(context.Context, DeliveryRequest) (DeliveryReceipt, error)
-	Close(context.Context) error
+	Close(context.Context, SessionCloseRequest) error
 }
 
 type Run struct {
@@ -89,7 +89,7 @@ func (w *Worker) Serve(ctx context.Context) error {
 		w.run.finish()
 	}
 	w.mu.Unlock()
-	w.closeProduct(w.conn.Context())
+	w.closeProduct(w.conn.Context(), SessionCloseRequest{})
 	return err
 }
 
@@ -217,7 +217,7 @@ func (w *Worker) close(ctx context.Context, request *rpc.Request, slot *Run, int
 		<-slot.done
 	}
 	w.cancel()
-	w.closeProduct(ctx)
+	w.closeProduct(ctx, *request.Params.(*SessionCloseRequest))
 	w.reply(w.conn.Result(request, struct{}{}))
 	_ = w.conn.Close()
 }
@@ -237,10 +237,10 @@ func (w *Worker) answer(request *rpc.Request, value any, code int) {
 	}
 }
 
-func (w *Worker) closeProduct(ctx context.Context) {
+func (w *Worker) closeProduct(ctx context.Context, request SessionCloseRequest) {
 	w.once.Do(func() {
 		if w.opened.Load() {
-			callbackError("close", w.product.Close(ctx))
+			callbackError("close", w.product.Close(ctx, request))
 		}
 	})
 }

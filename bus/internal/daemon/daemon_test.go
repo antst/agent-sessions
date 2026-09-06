@@ -273,7 +273,7 @@ func (*fixtureProduct) Deliver(_ context.Context, request sessionkit.DeliveryReq
 	}
 	return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
 }
-func (p *fixtureProduct) Close(context.Context) error {
+func (p *fixtureProduct) Close(context.Context, sessionkit.SessionCloseRequest) error {
 	if strings.HasPrefix(p.product, "close-error-worker") {
 		return errors.New("native cleanup failed")
 	}

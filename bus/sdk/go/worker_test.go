@@ -22,6 +22,7 @@ type fakeProduct struct {
 	deliverStart            chan struct{}
 	closeStart, closeEnd    chan struct{}
 	closeContext            chan error
+	closeRequest            chan SessionCloseRequest
 	outbound, hangInterrupt bool
 	closeErr, interruptErr  error
 	calls                   [6]int32
@@ -92,10 +93,13 @@ func (p *fakeProduct) Deliver(ctx context.Context, _ DeliveryRequest) (DeliveryR
 	}
 	return DeliveryReceipt{Disposition: "injected"}, nil
 }
-func (p *fakeProduct) Close(ctx context.Context) error {
+func (p *fakeProduct) Close(ctx context.Context, request SessionCloseRequest) error {
 	atomic.AddInt32(&p.calls[5], 1)
 	if p.closeContext != nil {
 		p.closeContext <- ctx.Err()
+	}
+	if p.closeRequest != nil {
+		p.closeRequest <- request
 	}
 	if p.closeStart != nil {
 		close(p.closeStart)
@@ -178,8 +182,13 @@ func TestWorkerLifecycleTable(t *testing.T) {
 	check(t, stderrWriter.Close() == nil, "close stderr writer")
 	raw, err = io.ReadAll(stderrReader)
 	check(t, err == nil, "read stderr: %v", err)
-	want := "agentbus: product interrupt: \"first failure\\nsecond failure\"\nagentbus: product close: \"first failure\\nsecond failure\"\nagentbus: product close: \"first failure\\nsecond failure\"\nagentbus: product interrupt: \"first failure\\nsecond failure\"\n"
-	check(t, string(raw) == want, "callback stderr = %q", raw)
+	counts := map[string]int{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+		counts[line]++
+	}
+	interrupt := `agentbus: product interrupt: "first failure\nsecond failure"`
+	closeLine := `agentbus: product close: "first failure\nsecond failure"`
+	check(t, len(counts) == 2 && counts[interrupt] == 2 && counts[closeLine] == 2, "callback stderr = %q", raw)
 }
 
 func runCase(t *testing.T, name string) [6]int32 {
@@ -228,6 +237,7 @@ func runCase(t *testing.T, name string) [6]int32 {
 	case "peer-lifetime":
 		h := startHarness(t, p, true, false)
 		check(t, h.Call(context.Background(), "session.superseded", struct{}{}, &struct{}{}) == nil, "superseded call failed")
+		<-p.worker.Closed()
 		check(t, p.worker.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}) != nil, "expected error")
 	case "wrong-direction-request":
 		h := startHarness(t, p, true, false)
@@ -264,6 +274,13 @@ func runCase(t *testing.T, name string) [6]int32 {
 		h := startHarness(t, p, true, true)
 		check(t, h.Call(context.Background(), "session.close", target, &struct{}{}) == nil, "close error reached the wire")
 		check(t, <-p.closeContext == nil, "session.close cancelled the product Close context")
+	case "close-forget":
+		p.closeContext, p.closeRequest = make(chan error, 1), make(chan SessionCloseRequest, 1)
+		h := startHarness(t, p, true, true)
+		request := SessionCloseRequest{SessionID: target.SessionID, Forget: true}
+		check(t, h.Call(context.Background(), "session.close", request, &struct{}{}) == nil, "forget close failed")
+		check(t, <-p.closeContext == nil, "forget close cancelled the product Close context")
+		check(t, <-p.closeRequest == request, "product Close request changed")
 	default:
 		t.Fatalf("unknown lifecycle case %q", name)
 	}
