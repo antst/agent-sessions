@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antst/agent-sessions/wrappers/host"
-	"github.com/antst/agent-sessions/wrappers/qwen"
+	"github.com/antst/sessionbus/wrappers/host"
+	"github.com/antst/sessionbus/wrappers/qwen"
 )
 
 func TestLaneModeRejectsArguments(t *testing.T) {
@@ -57,7 +57,7 @@ func TestMCPStartsOneResidentPeerBeforeFirstToolCall(t *testing.T) {
 	if hello["method"] != "session.hello" || params["session_id"] != "c4b4334f-f2b7-4ad8-9b1c-f3ef6f46c644" || params["name"] != "Qwen Peer Runtime" || fmt.Sprint(params["groups"]) != "[qwen-peer-cells]" {
 		t.Fatalf("hello after initialize/list = %#v", hello)
 	}
-	_, _ = fmt.Fprintln(writeInput, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"list","arguments":{}}}}`)
+	_, _ = fmt.Fprintln(writeInput, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sessionbus","arguments":{"action":"list","arguments":{}}}}`)
 	action := <-requests
 	if action["method"] != "session.list" || action["id"] == hello["id"] {
 		t.Fatalf("action did not use resident connection: %#v", action)

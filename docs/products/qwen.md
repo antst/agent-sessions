@@ -1,6 +1,6 @@
 # Qwen Code — verified product facts
 
-Flat fact list for Qwen Code as an Agent Sessions bus product. No prose beyond facts.
+Flat fact list for Qwen Code as a Sessionbus product. No prose beyond facts.
 
 Provenance and tag legend:
 
@@ -16,7 +16,7 @@ Provenance and tag legend:
   `/home/antst/.local/lib/qwen-code`), non-TTY, unedited.
 - Fixture frames were captured by the repo against qwen-code 0.21.15 and are tagged
   `verified: 0.21.15 (fixture)`.
-- `verified: pin` = fact about Agent Sessions code, which holds against the catalog pin
+- `verified: pin` = fact about Sessionbus code, which holds against the catalog pin
   "minimum 0.22.0; validated on 0.22.3 and 0.23.0" (docs/PRODUCTS.md:12).
 - `verified: n/a (design)` = design decision; not a product behavior.
 - Catalog pin: minimum 0.22.0; validated on 0.22.3 and 0.23.0. (verified: pin;
@@ -26,10 +26,10 @@ Provenance and tag legend:
 
 - ff81565/2e0e498 have no `integrations/qwen/`; qwen code lives in
   `internal/products/qwen/`, `internal/launcher/qwen_peer*.go`,
-  `cmd/agent-sessions/{qwen_peer.go,connector.go}`, `internal/bridge/qwen*.go`,
+  `ff81565:cmd/agent-sessions/qwen_peer.go`, `ff81565:cmd/agent-sessions/connector.go`, `internal/bridge/qwen*.go`,
   `internal/qwenprofile/`, `internal/daemon/adapter_qwen.go`, and `qwen/`. (verified: pin;
   source: path inventory — `git ls-tree -r --name-only ff81565 | grep -i qwen`, code and
-  plugin paths: cmd/agent-sessions/qwen_peer.go, cmd/agent-sessions/qwen_peer_test.go,
+  plugin paths: `ff81565:cmd/agent-sessions/qwen_peer.go`, `ff81565:cmd/agent-sessions/qwen_peer_test.go`,
   internal/bridge/qwen.go, internal/bridge/qwen_test.go, internal/bridge/qwen_title.go,
   internal/bridge/qwen_title_test.go, internal/bridge/testdata/qwen/{acp.jsonl,
   dual-output.jsonl,serve.json,version.json}, internal/daemon/adapter_qwen.go,
@@ -48,13 +48,13 @@ Provenance and tag legend:
 ## Process contract and mode select
 
 - One process contract: daemon execs the product binary with empty argv;
-  `AGENTBUS_LAUNCH_TOKEN` present → resident lane wrapper, absent → interactive launcher.
+  `SESSIONBUS_LAUNCH_TOKEN` present → resident lane wrapper, absent → interactive launcher.
   (verified: n/a (design); source: picture docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:613-618)
 - 0.4.0 catalog aliases: peer `qwen-peer`, lane `qwen-peer-lane`. (verified: pin;
   source: docs/PRODUCTS.md:12)
 - Lane wrapper (`qwen-peer` + token) owns one `qwen --acp` child and one ACP client;
   without a token `qwen-peer` mints a Qwen-compatible v4 UUID, passes it as both
-  `--session-id` and `AGENTBUS_SESSION_ID`, then execs interactive Qwen; the spawned
+  `--session-id` and `SESSIONBUS_SESSION_ID`, then execs interactive Qwen; the spawned
   stdio MCP server owns the peer connection. (verified: n/a (design); source: picture
   docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1566)
 
@@ -85,7 +85,7 @@ Provenance and tag legend:
 
 - Managed args inserted for every peer launch: `--chat-recording=true`,
   `--input-file <tmp>/input.jsonl`, `--json-file <tmp>/events.jsonl` in a fresh
-  `agent-sessions-qwen-` temp dir; fresh launches add `--session-id <uuid>`.
+  `sessionbus-qwen-` temp dir; fresh launches add `--session-id <uuid>`.
   (verified: pin; source: internal/launcher/qwen_peer.go:141-146,159-165)
 - Managed-arg inspection rejects `--fork-session` ("not owner-attested"), `--session-id`,
   and `--continue`; `--resume` forwards to the native flag. (verified: pin;
@@ -98,24 +98,24 @@ Provenance and tag legend:
 
 ## Environment
 
-- Current peer env: `AGENT_SESSIONS_SESSION_ID`, `AGENT_SESSIONS_PRODUCT=qwen`,
-  `AGENT_SESSIONS_SESSION_NAME`, `AGENT_SESSIONS_GROUPS` (JSON array string),
-  `AGENT_SESSIONS_QWEN_INPUT_FILE`, `AGENT_SESSIONS_QWEN_EVENTS_FILE`. (verified: pin;
+- Current peer env: `SESSIONBUS_SESSION_ID`, `SESSIONBUS_PRODUCT=qwen`,
+  `SESSIONBUS_SESSION_NAME`, `SESSIONBUS_GROUPS` (JSON array string),
+  `SESSIONBUS_QWEN_INPUT_FILE`, `SESSIONBUS_QWEN_EVENTS_FILE`. (verified: pin;
   source: internal/launcher/peer_context.go:14-19,63-82;
   internal/launcher/qwen_peer.go:20-21,148-151)
 - Current lane MCP child env (inside the stdio mcpServers entry):
-  `AGENT_SESSIONS_HOST_BINARY`, `AGENT_SESSIONS_PRODUCT`, `AGENT_SESSIONS_SESSION_ID`.
+  `SESSIONBUS_HOST_BINARY`, `SESSIONBUS_PRODUCT`, `SESSIONBUS_SESSION_ID`.
   (verified: pin; source: internal/products/qwen/lane.go:373-392)
 - `QWEN_HOME` resolution: `$QWEN_HOME` when set, else `$HOME/.qwen`; `QWEN_RUNTIME_DIR`
   is part of the profile identity and both are rewritten in the child env. (verified: pin;
   source: internal/qwenprofile/profile.go:30-58,74)
-- Picture env contract (exact table): `AGENTBUS_SESSION_ID` bare ID part (peer launcher),
-  `AGENTBUS_SESSION_NAME` bare name part (peer launcher), `AGENTBUS_GROUPS` JSON array
-  string (peer launcher), `AGENTBUS_SOCKET` (both), `AGENTBUS_LOCAL_KEY` optional (both),
-  `AGENTBUS_LAUNCH_TOKEN` (lane spawn only), `AGENTBUS_LANE_SOCKET` (lane wrapper only).
+- Picture env contract (exact table): `SESSIONBUS_SESSION_ID` bare ID part (peer launcher),
+  `SESSIONBUS_SESSION_NAME` bare name part (peer launcher), `SESSIONBUS_GROUPS` JSON array
+  string (peer launcher), `SESSIONBUS_SOCKET` (both), `SESSIONBUS_LOCAL_KEY` optional (both),
+  `SESSIONBUS_LAUNCH_TOKEN` (lane spawn only), `SESSIONBUS_LANE_SOCKET` (lane wrapper only).
   (verified: n/a (design); source: picture
   docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1502-1512)
-- Picture exclusivity lock: `dirname(AGENTBUS_SOCKET)/locks/<product>/<session_id>`
+- Picture exclusivity lock: `dirname(SESSIONBUS_SOCKET)/locks/<product>/<session_id>`
   opened `O_CREAT` + exclusive flock before resume (and before fresh creation when the
   wrapper mints the ID); fd inherited by the native child; stale files harmless;
   contention → `spawn_failed` "session busy". (verified: n/a (design); source: picture
@@ -154,7 +154,7 @@ Provenance and tag legend:
   resume must use the original cwd. (unverified: old catalog; source:
   docs/PRODUCTS.md:34)
 - Current peer identity observer accepts any UUID shape (no version check) — looser than
-  the product's v1–v5 rule. (verified: pin; source: cmd/agent-sessions/qwen_peer.go:23)
+  the product's v1–v5 rule. (verified: pin; source: `ff81565:cmd/agent-sessions/qwen_peer.go:23`)
 
 ## Frame shapes (verbatim)
 
@@ -177,7 +177,7 @@ Provenance and tag legend:
 - mcpServers stdio entry (current code) — `env` is a name-sorted list of `{name,value}`
   objects, not a map: (verified: pin; source: internal/products/qwen/lane.go:373-392)
 ```json
-{"name":"agent_sessions","command":"<host binary>","args":["connector","qwen"],"env":[{"name":"AGENT_SESSIONS_HOST_BINARY","value":"<host binary>"},{"name":"AGENT_SESSIONS_PRODUCT","value":"qwen"},{"name":"AGENT_SESSIONS_SESSION_ID","value":"<lane id>"}]}
+{"name":"sessionbus","command":"<host binary>","args":["connector","qwen"],"env":[{"name":"SESSIONBUS_HOST_BINARY","value":"<host binary>"},{"name":"SESSIONBUS_PRODUCT","value":"qwen"},{"name":"SESSIONBUS_SESSION_ID","value":"<lane id>"}]}
 ```
 - Open result: `sessionId` required; fresh opens also read `modes.currentModeId` and
   require `"yolo"` when bypass was requested. (verified: pin;
@@ -246,7 +246,7 @@ Provenance and tag legend:
 
 - Picture: idle delivery enters the shared bounded FIFO (64 deliveries / 1 MiB rendered)
   and is prepended to the next run; the host renderer emits the
-  `[agentbus-metadata: ...]` carrier line, preserves arrival order, joins with newlines;
+  `[sessionbus-metadata: ...]` carrier line, preserves arrival order, joins with newlines;
   at run start the host atomically swaps the FIFO; overflow → `queue_full`. (verified:
   n/a (design); source: picture docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1496,1570)
 - Picture: during a run, `craft/drainMidTurnQueue` hands queued entries to Qwen and an
@@ -296,7 +296,7 @@ Provenance and tag legend:
 
 - Current: daemon-routed `message.deliver` for a qwen peer is served by the launcher's
   live call, which appends one submit record to the `--input-file`; success → `{}`.
-  (verified: pin; source: cmd/agent-sessions/qwen_peer.go:126-146)
+  (verified: pin; source: `ff81565:cmd/agent-sessions/qwen_peer.go:126-146`)
 - Product: `--input-file` = "File path for receiving remote input commands (bidirectional
   sync). An external process writes JSONL commands; the TUI watches and processes them."
   (verified: 0.23.0; source: docs/products/qwen-0.23.0-help.txt:66)
@@ -315,7 +315,7 @@ Provenance and tag legend:
 - Title observation (current): product title read from the transcript JSONL
   `system/custom_title` events; fallback title = session id; 1 Hz projection re-reports
   changes. (verified: pin; source: internal/bridge/qwen_title.go:41-84,87-128,125-126;
-  cmd/agent-sessions/qwen_peer.go:99-124)
+  `ff81565:cmd/agent-sessions/qwen_peer.go:99-124`)
 - Transcript location: exactly one regular non-symlink
   `QWEN_HOME/projects/<project-dir>/chats/<session-id>.jsonl`; ambiguity or absence → no
   title fact. (verified: pin; source: internal/bridge/qwen_title.go:11-37)
@@ -395,7 +395,8 @@ Provenance and tag legend:
   docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1573; accepted per-block review,
   2026-09-06)
 - Deletion inventory at migration: internal/products/qwen (4 files / 1,031 lines),
-  internal/launcher qwen_peer files (3 / 1,412), cmd/agent-sessions qwen_peer files
+  internal/launcher qwen_peer files (3 / 1,412), `ff81565:cmd/agent-sessions/qwen_peer.go`
+  and `ff81565:cmd/agent-sessions/qwen_peer_test.go`
   (2 / 234), qwen/scripts/native-entry (11): 10 files / 2,688 lines. (verified: pin —
   counts re-verified in tree; source: picture
   docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1574)
@@ -408,13 +409,13 @@ Provenance and tag legend:
 - initialize result advertises `mcpCapabilities {"sse":true,"http":true}`. (verified:
   0.21.15 (fixture); source: internal/bridge/testdata/qwen/acp.jsonl:1)
 - Current lane ingress: stdio MCP entry injected at session/new (frame above); current
-  peer ingress: `qwen/mcp.json` stdio server `agent_sessions` → `./scripts/native-entry`
-  → `${AGENT_SESSIONS_HOST_BINARY:-$HOME/.local/bin/agent-sessions} connector qwen
-  --release-identity @AGENT_SESSIONS_RELEASE_ID@`. (verified: pin;
+  peer ingress: `qwen/mcp.json` stdio server `sessionbus` → `./scripts/native-entry`
+  → `${SESSIONBUS_HOST_BINARY:-$HOME/.local/bin/sessionbus} connector qwen
+  --release-identity @SESSIONBUS_RELEASE_ID@`. (verified: pin;
   source: qwen/mcp.json:1-15; qwen/scripts/native-entry:6)
 - Picture tool ingress: lane mode — ACP `mcpServers` starts `qwen-peer mcp` (stdio helper)
   against the wrapper's private Unix socket
-  `dirname(AGENTBUS_SOCKET)/lanes/<session_id>.sock` passed as `AGENTBUS_LANE_SOCKET` and
+  `dirname(SESSIONBUS_SOCKET)/lanes/<session_id>.sock` passed as `SESSIONBUS_LANE_SOCKET` and
   unlinked on exit; peer mode — the same stdio MCP entry owns the direct daemon peer
   connection. (verified: n/a (design); source: picture
   docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1493,1569)
@@ -440,17 +441,17 @@ Provenance and tag legend:
 
 ## Peer identity resolution (current connector)
 
-- Identity: `AGENT_SESSIONS_SESSION_ID` env, with qwen events-file first-line fallback;
-  name from `AGENT_SESSIONS_SESSION_NAME`; groups parsed from `AGENT_SESSIONS_GROUPS`
-  JSON array. (verified: pin; source: cmd/agent-sessions/connector.go:420,438-444,102,188-193)
+- Identity: `SESSIONBUS_SESSION_ID` env, with qwen events-file first-line fallback;
+  name from `SESSIONBUS_SESSION_NAME`; groups parsed from `SESSIONBUS_GROUPS`
+  JSON array. (verified: pin; source: `ff81565:cmd/agent-sessions/connector.go:420`)
 - Qwen is not a live-presence owner in the connector (claude/grok only): the launcher
   process reports qwen peer presence via livepresence. (verified: pin;
-  source: cmd/agent-sessions/connector.go:304-306; cmd/agent-sessions/qwen_peer.go:41-56)
+  source: `ff81565:cmd/agent-sessions/connector.go:304-306`; `ff81565:cmd/agent-sessions/qwen_peer.go:41-56`)
 - Identity admission (current): first events-file line must be `system/session_start`
   with a UUID-shaped session_id; 45 s deadline. (verified: pin;
-  source: cmd/agent-sessions/qwen_peer.go:21-23,57-96)
+  source: `ff81565:cmd/agent-sessions/qwen_peer.go:21-23`)
 
-## qwen serve surface (unused by Agent Sessions)
+## qwen serve surface (unused by Sessionbus)
 
 - `qwen serve` HTTP bridge v1 (fixture): features include session_create,
   session_id_override, session_load, session_resume, unstable_session_resume,

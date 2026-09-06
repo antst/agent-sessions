@@ -11,10 +11,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
-	"github.com/antst/agent-sessions/wrappers/mcp"
-	"github.com/antst/agent-sessions/wrappers/qwen"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
+	"github.com/antst/sessionbus/wrappers/mcp"
+	"github.com/antst/sessionbus/wrappers/qwen"
 )
 
 func main() {

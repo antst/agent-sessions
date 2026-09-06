@@ -5,7 +5,7 @@ description: Start, collect, message, resume, and archive durable local or remot
 
 # Claude lanes from Qwen
 
-Use the attested `agent_sessions.lane` MCP tool. Set `product` to `claude`, the
+Use the attested `sessionbus.lane` MCP tool. Set `product` to `claude`, the
 lifecycle verb in `command`, native arguments in `arguments`, and the briefing in
 `input`. Add `host` only for a target advertising `claude-lane`; never use SSH or
 local fallback.

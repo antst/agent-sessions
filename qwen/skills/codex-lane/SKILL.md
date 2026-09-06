@@ -5,7 +5,7 @@ description: Start, collect, message, resume, and archive durable local or remot
 
 # Codex lanes from Qwen
 
-Use the attested `agent_sessions.lane` MCP tool; do not shell-execute a launcher.
+Use the attested `sessionbus.lane` MCP tool; do not shell-execute a launcher.
 Set `product` to `codex`, put the lifecycle verb in `command`, native arguments in
 `arguments`, and the briefing in `input`. Add `host` only for an explicit target
 with `codex-lane` capability; never fall back locally.
