@@ -139,6 +139,15 @@ test("peer rejected hello is terminal", async (t) => {
   let ready = false; peer.ready.then(() => { ready = true; }); await Promise.resolve(); assert.equal(ready, false);
 });
 
+for (const replacement of [false, true]) test(`peer rejected ${replacement ? "replace" : "live rehello"} is terminal`, async (t) => {
+  const endpoint = peerEndpoint(), scheduled = [];
+  const peer = connectPeer({ product: "native-product", session_id: "session", name: "old title", groups: [], info: {} }, async () => ({ disposition: "injected" }), { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: (call) => scheduled.push(call) });
+  t.after(() => endpoint.daemon.close()); const hello = await endpoint.next(); await endpoint.daemon.result(hello, {}); await peer.ready;
+  const changed = replacement ? peer.replace({ product: "native-product", session_id: "next", name: "next title", groups: [], info: {} }) : peer.rehello({ name: "next title", info: {} });
+  const rejected = await endpoint.next(); await endpoint.daemon.error(rejected, -32602); await assert.rejects(changed, (error) => error instanceof ProtocolError && error.code === -32602); await peer.closed;
+  assert.equal(peer.error.code, -32602); assert.equal(scheduled.length, 0); await assert.rejects(peer.call("session.list", {}), /not connected/);
+});
+
 async function harness(t, product, options = {}) {
   const [workerSocket, daemonSocket] = pair(); const hello = deferred(); const env = { AGENTBUS_LAUNCH_TOKEN: "token", AGENTBUS_LOCAL_KEY: "", AGENTBUS_SOCKET: "/fixture/socket" }; product.env = env;
   const worker = new Worker(product, env, { connect: (socket) => { assert.equal(socket, "/fixture/socket"); return workerSocket; } }); product.worker = worker;

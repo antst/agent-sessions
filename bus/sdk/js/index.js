@@ -120,12 +120,12 @@ class Peer {
     if (replacement) { this.identityController?.abort(new Error("not connected")); this.identityController = null; this.admitted = null; this.connection = null; this.caller.disconnected(); }
     if (!connection || connection.signal.aborted) throw new Error("not connected");
     try { const result = await this._hello(connection, identity); if (replacement && (this.wire !== connection || connection.signal.aborted)) throw new Error("not connected"); return result; }
-    catch (error) { if (connection.signal.aborted) throw new Error("not connected"); if (replacement) connection.close(); throw error; }
+    catch (error) { if (this._failHello(error, connection)) throw error; if (connection.signal.aborted) throw new Error("not connected"); if (replacement) connection.close(); throw error; }
   }
   shutdown() { this.terminal = true; this.connection = null; this.identityController?.abort(new Error("not connected")); this.caller.disconnected(); this.wire?.close(); this.finish(); }
   async _open() {
     if (this.terminal) return; let connection; try { connection = new Connection(this.connect(this.socket), true, (request) => this._handle(request, connection)); } catch { this.schedule(() => { this.ready = this._open(); }, 2000); return; } this.wire = connection;
-    try { await this._hello(connection); } catch (error) { connection.close(); if (error instanceof ProtocolError && error.code === -32602) { this.terminal = true; this.error = error; this.wire = null; this.connection = null; this.identityController?.abort(error); this.identityController = null; this.admitted = null; this.caller.disconnected(); this.finish(); return never; } }
+    try { await this._hello(connection); } catch (error) { if (this._failHello(error, connection)) return never; connection.close(); }
     if (!connection.signal.aborted) void connection.done.then(() => this._lost(connection)); else this._lost(connection);
   }
   async _hello(connection, identity = this.identity) { for (;;) { let installed = false; const result = await connection.call("session.hello", { protocol: 1, ...identity }, undefined, () => {
@@ -133,6 +133,7 @@ class Peer {
     if (identity === this.identity) { if (this.admitted?.session_id !== identity.session_id || !this.identityController || this.identityController.signal.aborted) this.identityController = new AbortController(); this.admitted = identity; this.connection = connection; installed = true; }
   }); if (installed) return result; identity = this.identity; } }
   _lost(connection) { if (this.wire !== connection || this.terminal) return; this.wire = null; this.connection = null; this.admitted = null; this.identityController?.abort(connection.signal.reason); this.identityController = null; this.caller.disconnected(); this.schedule(() => { this.ready = this._open(); }, 2000); }
+  _failHello(error, connection) { if (!(error instanceof ProtocolError) || error.code !== -32602) return false; this.terminal = true; this.error = error; this.wire = null; this.connection = null; this.identityController?.abort(error); this.identityController = null; this.admitted = null; this.caller.disconnected(); connection.close(); this.finish(); return true; }
   _handle(request, connection) {
     if (request.method === "session.superseded") { this.terminal = true; this.error = new ProtocolError({ code: -32012, message: "superseded" }); this.connection = null; this.caller.disconnected(); void connection.result(request, {}).finally(() => { this.identityController?.abort(this.error); connection.close(); this.finish(); }); return; }
     if (request.method === "message.deliver") { const current = this.connection === connection && this.admitted && this.identityController && !this.identityController.signal.aborted; const admission = current ? { identity: snapshot(this.admitted), signal: this.identityController.signal } : null; void Promise.resolve().then(() => admission ? this.deliver(admission.signal, request.params, admission.identity) : { disposition: "rejected", reason: "closing" }).then((result) => connection.result(request, result), (error) => connection.result(request, { disposition: "rejected", reason: clean(error) })).catch(() => connection.close()); }
