@@ -52,6 +52,7 @@ type appClient struct {
 	next        int64
 	pending     map[int64]chan appReply
 	failed      error
+	done        chan struct{}
 	notify      func(string, json.RawMessage)
 	onFailure   func(error)
 }
@@ -61,7 +62,7 @@ func newAppClient(input io.WriteCloser, output io.ReadCloser, notify func(string
 }
 
 func newTransportClient(transport appTransport, notify func(string, json.RawMessage), failure func(error)) *appClient {
-	c := &appClient{transport: transport, pending: map[int64]chan appReply{}, notify: notify, onFailure: failure}
+	c := &appClient{transport: transport, pending: map[int64]chan appReply{}, done: make(chan struct{}), notify: notify, onFailure: failure}
 	go c.read()
 	return c
 }
@@ -127,6 +128,7 @@ func (c *appClient) write(value any) error {
 }
 
 func (c *appClient) read() {
+	defer close(c.done)
 	if stream, ok := c.transport.(*streamTransport); ok {
 		defer stream.output.Close()
 	}
@@ -172,6 +174,12 @@ func (c *appClient) read() {
 			reply <- appReply{result: frame.Result}
 		}
 	}
+}
+
+func (c *appClient) isFailed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.failed != nil
 }
 
 func (c *appClient) remove(id int64) {
