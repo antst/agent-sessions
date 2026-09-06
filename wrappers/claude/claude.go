@@ -64,7 +64,13 @@ type frame struct {
 	Error          string
 	IsError        bool `json:"is_error"`
 	IsReplay       bool
-	Response       map[string]string
+	Response       controlResponse
+}
+
+type controlResponse struct {
+	RequestID string `json:"request_id"`
+	Subtype   string
+	Error     string
 }
 
 func New(socket string) *Wrapper { return &Wrapper{socket: socket} }
@@ -272,9 +278,9 @@ func (p *Wrapper) receive(item frame) {
 			}
 		}
 	case "control_response":
-		if p.control != nil && item.Response["request_id"] == p.controlID {
-			err := errors.New(first(item.Response["error"], "Claude rejected interrupt control request"))
-			if item.Response["subtype"] == "success" {
+		if p.control != nil && item.Response.RequestID == p.controlID {
+			err := errors.New(first(item.Response.Error, "Claude rejected interrupt control request"))
+			if item.Response.Subtype == "success" {
 				err = nil
 			}
 			p.control <- err

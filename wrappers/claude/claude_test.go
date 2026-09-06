@@ -187,7 +187,9 @@ func TestStreamRunDeliveryAndInterrupt(t *testing.T) {
 	go func() { interrupted <- native.Interrupt(context.Background()) }()
 	control := <-writes.wrote
 	check(t, string(control) == `{"request":{"subtype":"interrupt"},"request_id":"interrupt-1","type":"control_request"}`, "control frame = %s", control)
-	p.receive(frame{Type: "control_response", Response: map[string]string{"request_id": "interrupt-1", "subtype": "success"}})
+	var response frame
+	must(t, json.Unmarshal([]byte(`{"type":"control_response","response":{"subtype":"success","request_id":"interrupt-1","response":{"still_queued":[]}}}`), &response))
+	p.receive(response)
 	must(t, <-interrupted)
 	p.receive(frame{Type: "result", Subtype: "interrupted", SessionID: fixtureID})
 	result, err := native.Wait(context.Background())
