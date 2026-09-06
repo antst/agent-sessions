@@ -217,6 +217,16 @@ Provenance and tag legend:
   craft/claimTodoStopGuardContinuation, craft/todoStopGuardQueueReleased, plus qwen/*
   namespaces. (verified: 0.23.0; source: bundle:lib/chunks/acpAgent-2GTFCIEP.js:20211;
   bundle:lib/chunks/chunk-ZGCKTAL5.js:77-81)
+- ACP method probe: `session/list` returned `{"sessions":[]}`, `session/set_mode`
+  returned `{}`, `session/set_model` returned `_meta.qwenModelSwitch`, and
+  `session/set_config_option` returned the config-option inventory; `session/fork`
+  returned JSON-RPC `-32601` with message `"Method not found": session/fork`. (verified:
+  0.23.0; source:
+  /home/antst/agentbus-evidence/qwen-probes-20260906T150057Z/P1-methods/frames.jsonl)
+- ACP `session/new` advertises config option `reasoning_effort`, with values `none`,
+  `low`, `medium`, and `xhigh`; the captured current value and
+  `_meta.qwenCode/reasoning.defaultEffort` were both `xhigh`. (verified: 0.23.0; source:
+  /home/antst/agentbus-evidence/qwen-probes-20260906T150057Z/P1-methods/frames.jsonl)
 - Dual-output (`--json-file`) session_start event (fixture): (verified: 0.21.15 (fixture);
   source: internal/bridge/testdata/qwen/dual-output.jsonl:1)
 ```json
@@ -264,11 +274,15 @@ Provenance and tag legend:
   source: bundle:lib/chunks/acpAgent-2GTFCIEP.js:8340-8358,8318-8338,8341-8344,8682-8688)
 - Observed drain call sites (0.23.0): the agent pulls `craft/drainMidTurnQueue` at
   tool-run boundaries, stop-inspection, and stopped-run preservation paths. (verified:
-  0.23.0; source: bundle:lib/chunks/acpAgent-2GTFCIEP.js:7215,7300,8345,8364) Whether a
-  run with no tool round ever reaches a drain boundary is UNVERIFIED (see below); until a
-  product probe settles it, the picture's tool-less fallback (undrained entries return to
-  the wrapper FIFO, docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1570) is a design
-  assumption, not an observed product fact.
+  0.23.0; source: bundle:lib/chunks/acpAgent-2GTFCIEP.js:7215,7300,8345,8364)
+- A captured tool-less run emitted zero `craft/drainMidTurnQueue` requests before its
+  `end_turn` terminal; the wrapper must recover every undrained active delivery to its
+  FIFO at terminal. (verified: 0.23.0; source:
+  /home/antst/agentbus-evidence/qwen-probes-20260906T150057Z/P2-tool-less/frames.jsonl)
+- When the client answered a captured drain with
+  `{"messages":["QUEUE_MARK"],"hasQueuedPrompt":true}`, Qwen retained the message in
+  the same running turn and later returned `end_turn`. (verified: 0.23.0; source:
+  /home/antst/agentbus-evidence/qwen-probes-20260906T150057Z/P5-has-queued-prompt/frames.jsonl)
 - Current 0.4.0 lane driver has no mid-turn path: Steer returns ErrUnsupportedSteer.
   (verified: pin; source: internal/products/qwen/lane.go:263-264)
 
@@ -280,6 +294,15 @@ Provenance and tag legend:
 - Product: `--input-file` = "File path for receiving remote input commands (bidirectional
   sync). An external process writes JSONL commands; the TUI watches and processes them."
   (verified: 0.23.0; source: docs/products/qwen-0.23.0-help.txt:66)
+- An exact input-file record `{"type":"submit","text":"INPUT_MARK"}` appended after
+  the active turn's initial user event was observed by Qwen inside that same turn, with no
+  intervening prompt boundary; its monotonic append timestamp was 19089588312077108 after
+  the initial user event at 19089588311695131. (verified: 0.23.0; source:
+  /home/antst/agentbus-evidence/qwen-probes-20260906T150057Z/P4-active-input-file-rerun/{harness.jsonl,events.jsonl})
+- The captured TUI dual-output stream contained `system`, `user`, `stream_event`, and
+  `assistant` events plus `system/session_end`, but no `type:"result"` event; `/exit`
+  then returned process status 0. (verified: 0.23.0; source:
+  /home/antst/agentbus-evidence/qwen-probes-20260906T150057Z/P4-active-input-file-rerun/{harness.jsonl,events.jsonl})
 - Picture: a peer integration may let the interactive product start a turn in response to
   delivery and report `injected`; the FIFO rule is lane-only. (verified: n/a (design);
   source: picture docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1497)
@@ -314,6 +337,11 @@ Provenance and tag legend:
 - Standard `session/cancel` exists in the stdio wire table; the integration does not use
   it (uses craft/cancelPendingPrompt). (verified: 0.23.0;
   source: bundle:lib/chunks/chunk-IW6RQPQB.js:19-33; internal/products/qwen/lane.go:272)
+- In plan mode, after the client answered `session/request_permission` with
+  `{"outcome":{"outcome":"cancelled"}}`, Qwen ended the prompt with exact
+  `stopReason:"end_turn"`; no `refused` terminal was emitted. (verified: 0.23.0;
+  source:
+  /home/antst/agentbus-evidence/qwen-probes-20260906T150057Z/P6-refused/frames.jsonl)
 - Picture handoff boundary: FIFO extraction, native-turn creation, and interrupt are
   serialized under one boundary — interrupt before native creation aborts creation and
   returns terminal `interrupted` without a native call; after creation it calls native
@@ -322,15 +350,10 @@ Provenance and tag legend:
 
 ## Unsupported and exceptions
 
-- `reasoning_effort` is the declared unsupported open field: no effort/thinking/reasoning
-  flag exists anywhere in the committed 0.23.0 CLI surface (0 matches for
-  `effort|thinking|reasoning` across all 81 fixture lines), and the ACP session/new and
-  config-normalization surface carries no reasoning field. (verified: 0.23.0;
-  source: docs/products/qwen-0.23.0-help.txt:1-81 (absence);
-  bundle:lib/chunks/acpAgent-2GTFCIEP.js:15416-15472; picture
-  docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1572)
-- Wrapper options `--effort`/`--reasoning-effort` reject Qwen before launch.
-  (verified: pin; source: docs/PRODUCTS.md:58)
+- `reasoning_effort` has no CLI flag, but ACP advertises and applies it through
+  `session/set_config_option`; the wrapper supports it by verifying the returned
+  `currentValue`. (verified: 0.23.0; source:
+  /home/antst/agentbus-evidence/qwen-probes-20260906T150057Z/P1-methods/frames.jsonl)
 - Approval policy (0.23.0): `yolo` acts; `auto` and the omitted-mode default block tool
   actions triggered solely by a cross-session message; `auto-edit` and `default` prompt
   the human in the TUI; `plan` rejects the action. A lane must use
@@ -375,6 +398,19 @@ Provenance and tag legend:
   source: bundle:lib/chunks/acpAgent-2GTFCIEP.js:15416-15472; picture
   docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1493,1569; ruling (fable-architect,
   2026-09-05): stdio helper over the per-session socket; loopback HTTP not used)
+- Qwen 0.23.0 accepted and spawned both bare and absolute stdio MCP commands, and both
+  exchanged initialize and discovery frames. (verified: 0.23.0; source:
+  /home/antst/agentbus-evidence/qwen-probes-20260906T150057Z/P0-http/{stdio-bare.jsonl,stdio-absolute.jsonl})
+- Qwen 0.23.0 connected to an ACP HTTP MCP entry and sent initialize, initialized,
+  prompts/list, resources/list, and tools/list; the probe server returned invalid empty
+  list shapes for prompts/resources, Qwen emitted exact warning `Warning: MCP server(s)
+  failed to start: http_probe. Continuing with built-in tools and any servers that did
+  connect.`, and HTTP tools/call therefore remains unverified. (verified: 0.23.0;
+  source: /home/antst/agentbus-evidence/qwen-probes-20260906T150057Z/P0-http/{http.jsonl,http-server.err})
+- Teardown of that failed HTTP probe ended its active ACP prompt with exact
+  `{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}`. (verified:
+  0.23.0; source:
+  /home/antst/agentbus-evidence/qwen-probes-20260906T150057Z/P0-http/frames.jsonl)
 
 ## Peer identity resolution (current connector)
 
@@ -411,28 +447,23 @@ Provenance and tag legend:
 - 0.23.0 default approval mode is `auto` (per cited product settings doc). (verified:
   0.23.0 via citation; source: docs/PRODUCTS.md:73 → bundle
   lib/bundled/qc-helper/docs/configuration/settings.md:374)
+- Installed provenance is `@qwen-code/qwen-code` 0.23.0; no 0.22.3 package was locally
+  available under the existing npm/cache trees, so the installed binary was not changed
+  for comparison. (verified: 0.23.0; source:
+  /home/antst/agentbus-evidence/qwen-probes-20260906T150057Z/P3-provenance/{installed.txt,qwen-0.22.3-local-packages.txt})
+- Every probe-session orphan check and the final process-tree check found no Qwen,
+  wrapper, or probe MCP process; the final relevant-process file is empty. (verified:
+  0.23.0; source:
+  /home/antst/agentbus-evidence/qwen-probes-20260906T150057Z/P7-final-processes-relevant.txt)
 
 ## UNVERIFIED
 
-- UNVERIFIED: whether the stdio `--acp` agent implements session/set_mode,
-  session/set_model, session/set_config_option, session/fork, session/list (listed in the
-  library wire table; only serve-side handlers cited; not exercised by our code).
-- UNVERIFIED: whether a run with no tool round ever reaches a `craft/drainMidTurnQueue`
-  boundary — the cited call sites (bundle:lib/chunks/acpAgent-2GTFCIEP.js:7215,7300,8345,
-  8364) show where drains occur but cannot prove absence elsewhere; requires a live
-  product probe (queued delivery into a tool-less run, observe whether the product pulls
-  it before terminal).
+- UNVERIFIED: Qwen 0.23.0 HTTP MCP tool invocation; the transport handshake succeeded,
+  but the probe server returned invalid list-result shapes before a tool could be called.
 - UNVERIFIED: whether `--input-file`, `--json-file`, `--chat-recording` exist in upstream
   qwen-code releases (present in the committed 0.23.0 fixture at
   docs/products/qwen-0.23.0-help.txt:33,64,66; upstream parity not checked).
-- UNVERIFIED: exact TUI handling of an input-file submit during an active turn (whether
-  it joins the same mid-turn drain queue) — inferred from the product input pipeline, not
-  directly observed.
-- UNVERIFIED: agent-side semantics of `hasQueuedPrompt` beyond the todo-stop-guard watch
-  (bundle:lib/chunks/acpAgent-2GTFCIEP.js:7211-7233).
 - UNVERIFIED: 0.22.x behavior (catalog pin claims validation on 0.22.3; this file
   directly verifies 0.23.0 only; fixtures are 0.21.15).
-- UNVERIFIED: terminal-outcome mapping for stopReason `refused` under the picture
-  (current code maps every non-cancelled stopReason to completed;
-  internal/products/qwen/lane.go:253-259; the picture Run row does not enumerate the
-  mapping).
+- UNVERIFIED: any Qwen version emitting terminal stopReason `refused`; 0.23.0 emitted
+  `end_turn` after a cancelled permission response.
