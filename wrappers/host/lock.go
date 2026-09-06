@@ -36,13 +36,7 @@ func AcquireSessionLock(socket, product, sessionID string) (*SessionLock, error)
 }
 
 func (l *SessionLock) File() *os.File { return l.file }
-func (l *SessionLock) Close() error {
-	err := os.Remove(l.path)
-	if errors.Is(err, os.ErrNotExist) {
-		err = nil
-	}
-	return errors.Join(err, l.file.Close())
-}
+func (l *SessionLock) Close() error   { return l.file.Close() }
 func (l *SessionLock) Rename(name string) error {
 	return l.rename(name, os.Link, os.SameFile)
 }

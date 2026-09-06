@@ -26,8 +26,6 @@ func TestSessionLockRenamePreservesClaim(t *testing.T) {
 	_, err = os.Stat(filepath.Join(filepath.Dir(socket), "locks", "example", "provisional"))
 	check(t, os.IsNotExist(err), "provisional lock remains: %v", err)
 	must(t, lock.Close())
-	_, err = os.Stat(filepath.Join(filepath.Dir(socket), "locks", "example", "session"))
-	check(t, os.IsNotExist(err), "closed native lock remains: %v", err)
 }
 
 func TestSessionLockOrderlyCloseAllowsResume(t *testing.T) {
