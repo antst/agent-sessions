@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 
 	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
@@ -20,18 +21,13 @@ type fakeBackend struct {
 }
 
 type preparedBackend struct {
-	prepared bool
+	fakeBackend
+	prepared int
 	caller   *sessionkit.Caller
 }
 
-func (b *preparedBackend) Call(context.Context, string, any) (json.RawMessage, error) {
-	return nil, errors.New("backend call bypassed caller")
-}
-func (b *preparedBackend) Caller() *sessionkit.Caller { return b.caller }
-func (b *preparedBackend) Prepare(context.Context) error {
-	b.prepared = true
-	return nil
-}
+func (b *preparedBackend) Caller() *sessionkit.Caller    { return b.caller }
+func (b *preparedBackend) Prepare(context.Context) error { b.prepared++; return nil }
 
 func (b *fakeBackend) Call(_ context.Context, method string, params any) (json.RawMessage, error) {
 	encoded, _ := json.Marshal(params)
@@ -111,13 +107,25 @@ func TestToolArgumentsMustBeObject(t *testing.T) {
 }
 
 func TestServerUsesBackendCallerAfterPrepare(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
 	backend := &preparedBackend{caller: sessionkit.NewCaller(func(_ context.Context, method string, _ any) (json.RawMessage, error) {
-		check(t, method == "session.list", "method = %q", method)
-		return json.RawMessage(`{"sessions":[]}`), nil
+		check(t, method == "turn.run", "method = %q", method)
+		close(started)
+		<-release
+		return json.RawMessage(`{"outcome":"completed","result":"done"}`), nil
 	})}
-	response, err := serveOne(&Server{Backend: backend}, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"list"}}}`)
-	check(t, err == nil, "serve: %v", err)
-	check(t, response["error"] == nil && backend.prepared, "response = %#v, prepared = %v", response, backend.prepared)
+	server := &Server{Backend: backend}
+	response, _ := serveOne(server, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"start","arguments":{"session_id":"lane@local","input":"work"}}}}`)
+	encoded, _ := json.Marshal(response)
+	check(t, strings.Contains(string(encoded), `\"turn_id\":\"t-1\"`), "start = %s", encoded)
+	<-started
+	response, _ = serveOne(server, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"status","arguments":{"turn_id":"t-1"}}}}`)
+	encoded, _ = json.Marshal(response)
+	check(t, strings.Contains(string(encoded), `\"state\":\"running\"`), "status = %s", encoded)
+	close(release)
+	response, _ = serveOne(server, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"wait","arguments":{"turn_id":"t-1"}}}}`)
+	encoded, _ = json.Marshal(response)
+	check(t, strings.Contains(string(encoded), `\"state\":\"done\"`) && strings.Contains(string(encoded), `\"result\":\"done\"`) && backend.prepared == 3, "wait = %s, prepare = %d", encoded, backend.prepared)
 }
 
 func TestServerReturnsOutputFailure(t *testing.T) {
