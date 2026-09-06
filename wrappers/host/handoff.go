@@ -1,8 +1,10 @@
 package host
 
 import (
+	"cmp"
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 
@@ -23,14 +25,30 @@ type Turn interface {
 }
 
 type StartTurn func(context.Context, string) (Turn, error)
-type Inject func(context.Context, string) (bool, error)
+type Injection uint8
+
+const (
+	NotInjected Injection = iota
+	Injected
+	Pending
+)
+
+type Inject func(context.Context, string) (Injection, error)
 type nativeTurn struct{ Turn }
+type Rendered string
+type deliverySlot struct {
+	body    Rendered
+	pending bool
+	order   uint64
+}
 
 // Handoff owns the FIFO and its boundary with native-turn creation.
 type Handoff struct {
 	mu        sync.Mutex
-	queue     []string
+	queue     []*deliverySlot
+	active    []*deliverySlot
 	queueSize int
+	nextOrder uint64
 }
 
 func (h *Handoff) Run(ctx context.Context, run *sessionkit.Run, input string, start StartTurn) (sessionkit.TurnResult, error) {
@@ -39,8 +57,12 @@ func (h *Handoff) Run(ctx context.Context, run *sessionkit.Run, input string, st
 		h.mu.Unlock()
 		return sessionkit.TurnResult{Outcome: "interrupted"}, nil
 	}
-	queued := append([]string(nil), h.queue...)
-	prompt := strings.Join(queued, "\n")
+	queued := append([]*deliverySlot(nil), h.queue...)
+	parts := make([]string, len(queued))
+	for index := range queued {
+		parts[index] = string(queued[index].body)
+	}
+	prompt := strings.Join(parts, "\n")
 	if prompt != "" && input != "" {
 		prompt += "\n"
 	}
@@ -53,14 +75,17 @@ func (h *Handoff) Run(ctx context.Context, run *sessionkit.Run, input string, st
 	}
 	if err != nil {
 		interrupted := run.Interrupted()
+		h.queue = mergeSlots(h.queue, h.active)
+		h.active = nil
+		h.recount()
 		h.mu.Unlock()
 		if interrupted {
 			return sessionkit.TurnResult{Outcome: "interrupted"}, nil
 		}
 		return sessionkit.TurnResult{}, err
 	}
-	h.queue = append([]string(nil), h.queue[len(queued):]...)
-	h.queueSize = len(strings.Join(h.queue, "\n"))
+	h.queue = append([]*deliverySlot(nil), h.queue[len(queued):]...)
+	h.recount()
 	slot := &nativeTurn{Turn: turn}
 	run.Native = slot
 	if run.Interrupted() {
@@ -70,6 +95,7 @@ func (h *Handoff) Run(ctx context.Context, run *sessionkit.Run, input string, st
 	h.mu.Unlock()
 
 	result, err := turn.Wait(ctx)
+	h.Finish()
 	h.mu.Lock()
 	if run.Native == slot {
 		run.Native = nil
@@ -83,27 +109,98 @@ func (h *Handoff) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
+	h.mu.Lock()
+	added := len(rendered)
+	if len(h.queue)+len(h.active) > 0 {
+		added++
+	}
+	if len(h.queue)+len(h.active) == MaxQueuedDeliveries || h.queueSize+added > MaxQueuedBytes {
+		h.mu.Unlock()
+		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: ErrQueueFull.Error()}, nil
+	}
+	slot := &deliverySlot{body: Rendered(rendered), order: h.nextOrder}
+	h.nextOrder++
+	h.active = append(h.active, slot)
+	h.queueSize += added
+	h.mu.Unlock()
+
+	disposition := NotInjected
 	if inject != nil {
-		injected, injectErr := inject(ctx, rendered)
-		if injectErr != nil {
-			return sessionkit.DeliveryReceipt{}, injectErr
-		}
-		if injected {
-			return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
-		}
+		disposition, err = inject(ctx, rendered)
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	added := len(rendered)
-	if len(h.queue) > 0 {
-		added++
+	index := slices.Index(h.active, slot)
+	if index < 0 {
+		return sessionkit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
 	}
-	if len(h.queue) == MaxQueuedDeliveries || h.queueSize+added > MaxQueuedBytes {
-		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: ErrQueueFull.Error()}, nil
+	if err != nil {
+		h.active = slices.Delete(h.active, index, index+1)
+		h.recount()
+		return sessionkit.DeliveryReceipt{}, err
 	}
-	h.queueSize += added
-	h.queue = append(h.queue, rendered)
-	return sessionkit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+	switch disposition {
+	case Injected:
+		h.active = slices.Delete(h.active, index, index+1)
+		h.recount()
+		return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
+	case Pending:
+		slot.pending = true
+		return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
+	case NotInjected:
+		h.active = slices.Delete(h.active, index, index+1)
+		h.queue = mergeSlots(h.queue, []*deliverySlot{slot})
+		return sessionkit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+	default:
+		h.active = slices.Delete(h.active, index, index+1)
+		h.recount()
+		return sessionkit.DeliveryReceipt{}, errors.New("invalid injection outcome")
+	}
+}
+
+func (h *Handoff) Claim() []Rendered {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	claimed := []Rendered{}
+	kept := h.active[:0]
+	for _, slot := range h.active {
+		if slot.pending {
+			claimed = append(claimed, slot.body)
+		} else {
+			kept = append(kept, slot)
+		}
+	}
+	h.active = kept
+	h.recount()
+	return claimed
+}
+
+func (h *Handoff) Finish() {
+	h.mu.Lock()
+	h.queue = mergeSlots(h.queue, h.active)
+	h.active = nil
+	h.recount()
+	h.mu.Unlock()
+}
+
+func mergeSlots(a, b []*deliverySlot) []*deliverySlot {
+	merged := append(slices.Clone(a), b...)
+	slices.SortFunc(merged, func(a, b *deliverySlot) int { return cmp.Compare(a.order, b.order) })
+	return merged
+}
+
+func (h *Handoff) recount() {
+	size, count := 0, 0
+	for _, slots := range [][]*deliverySlot{h.active, h.queue} {
+		for _, slot := range slots {
+			size += len(slot.body)
+			count++
+		}
+	}
+	if count > 0 {
+		size += count - 1
+	}
+	h.queueSize = size
 }
 
 func (h *Handoff) Interrupt(ctx context.Context, run *sessionkit.Run) error {

@@ -38,13 +38,14 @@ func (t *fakeTurn) Interrupt(context.Context) error {
 func TestHandoffDeliveryAndQueueCommit(t *testing.T) {
 	h := &Handoff{}
 	var injected string
-	receipt, err := h.Deliver(context.Background(), delivery("active"), func(_ context.Context, message string) (bool, error) { injected = message; return true, nil })
+	receipt, err := h.Deliver(context.Background(), delivery("active"), func(_ context.Context, message string) (Injection, error) { injected = message; return Injected, nil })
 	must(t, err)
 	check(t, receipt.Disposition == "injected" && strings.Contains(injected, "active"), "active receipt = %#v", receipt)
+	check(t, len(h.Claim()) == 0 && h.queueSize == 0, "claimed injection stayed pending: size %d", h.queueSize)
 	started, release := make(chan struct{}), make(chan struct{})
 	delivered := make(chan sessionkit.DeliveryReceipt, 1)
 	go func() {
-		receipt, _ := h.Deliver(context.Background(), delivery("racing"), func(context.Context, string) (bool, error) { close(started); <-release; return false, nil })
+		receipt, _ := h.Deliver(context.Background(), delivery("racing"), func(context.Context, string) (Injection, error) { close(started); <-release; return NotInjected, nil })
 		delivered <- receipt
 	}()
 	<-started
@@ -56,11 +57,15 @@ func TestHandoffDeliveryAndQueueCommit(t *testing.T) {
 	close(next.done)
 	_, err = h.Run(context.Background(), &sessionkit.Run{}, "", func(_ context.Context, got string) (Turn, error) { prompt = got; return next, nil })
 	must(t, err)
-	check(t, strings.Count(prompt, "racing") == 1 && strings.Index(prompt, "racing") < strings.Index(prompt, "after"), "next prompt = %q", prompt)
+	check(t, !strings.Contains(prompt, "active") && strings.Count(prompt, "racing") == 1 && strings.Index(prompt, "racing") < strings.Index(prompt, "after") && h.queueSize == 0, "next prompt/size = %q/%d", prompt, h.queueSize)
 }
 
 func TestHandoffFailedCreationKeepsFullQueue(t *testing.T) {
-	h := &Handoff{queue: make([]string, MaxQueuedDeliveries), queueSize: MaxQueuedDeliveries - 1}
+	full := make([]*deliverySlot, MaxQueuedDeliveries)
+	for index := range full {
+		full[index] = &deliverySlot{}
+	}
+	h := &Handoff{queue: full, queueSize: MaxQueuedDeliveries - 1}
 	started, release := make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
@@ -76,10 +81,129 @@ func TestHandoffFailedCreationKeepsFullQueue(t *testing.T) {
 	must(t, err)
 	close(release)
 	check(t, receipt.Reason == "queue_full" && (<-done).Error() == "failed" && len(h.queue) == MaxQueuedDeliveries, "receipt = %#v, queue = %d", receipt, len(h.queue))
-	h = &Handoff{queue: []string{"full"}, queueSize: MaxQueuedBytes}
+	h = &Handoff{queue: []*deliverySlot{{body: "full"}}, queueSize: MaxQueuedBytes}
 	receipt, err = h.Deliver(context.Background(), delivery("overflow"), nil)
 	must(t, err)
 	check(t, receipt.Reason == "queue_full", "byte-bound receipt = %#v", receipt)
+}
+
+func TestHandoffFailedCreationRestoresPendingDelivery(t *testing.T) {
+	h := &Handoff{}
+	_, err := h.Deliver(context.Background(), delivery("older"), nil)
+	must(t, err)
+	creating, fail, injecting, release := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := h.Run(context.Background(), &sessionkit.Run{}, "input", func(context.Context, string) (Turn, error) {
+			close(creating)
+			<-fail
+			return nil, errors.New("failed")
+		})
+		runDone <- err
+	}()
+	<-creating
+	delivered := make(chan sessionkit.DeliveryReceipt, 1)
+	go func() {
+		receipt, _ := h.Deliver(context.Background(), delivery("pending"), func(context.Context, string) (Injection, error) {
+			close(injecting)
+			<-release
+			return Pending, nil
+		})
+		delivered <- receipt
+	}()
+	<-injecting
+	close(fail)
+	check(t, (<-runDone).Error() == "failed", "creation did not fail")
+	close(release)
+	check(t, (<-delivered).Disposition == "queued_for_next_turn", "failed-start delivery was acknowledged")
+	next, prompt := newFakeTurn(), ""
+	close(next.done)
+	_, err = h.Run(context.Background(), &sessionkit.Run{}, "next", func(_ context.Context, got string) (Turn, error) { prompt = got; return next, nil })
+	must(t, err)
+	check(t, strings.Count(prompt, "older") == 1 && strings.Count(prompt, "pending") == 1 && strings.Index(prompt, "older") < strings.Index(prompt, "pending") && h.queueSize == 0, "prompt/size = %q/%d", prompt, h.queueSize)
+}
+
+func TestHandoffFailedCreationPreservesAdmissionOrder(t *testing.T) {
+	h := &Handoff{}
+	creating, fail := make(chan struct{}), make(chan struct{})
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := h.Run(context.Background(), &sessionkit.Run{}, "input", func(context.Context, string) (Turn, error) {
+			close(creating)
+			<-fail
+			return nil, errors.New("failed")
+		})
+		runDone <- err
+	}()
+	<-creating
+
+	aStarted, releaseA := make(chan struct{}), make(chan struct{})
+	aDone := make(chan sessionkit.DeliveryReceipt, 1)
+	go func() {
+		receipt, _ := h.Deliver(context.Background(), delivery("A-pending"), func(context.Context, string) (Injection, error) {
+			close(aStarted)
+			<-releaseA
+			return Pending, nil
+		})
+		aDone <- receipt
+	}()
+	<-aStarted
+	b, err := h.Deliver(context.Background(), delivery("B-queued"), func(context.Context, string) (Injection, error) { return NotInjected, nil })
+	must(t, err)
+	check(t, b.Disposition == "queued_for_next_turn", "B receipt = %#v", b)
+	close(fail)
+	check(t, (<-runDone).Error() == "failed", "creation did not fail")
+	close(releaseA)
+	check(t, (<-aDone).Disposition == "queued_for_next_turn", "A receipt was acknowledged")
+
+	next, prompt := newFakeTurn(), ""
+	close(next.done)
+	_, err = h.Run(context.Background(), &sessionkit.Run{}, "next", func(_ context.Context, got string) (Turn, error) { prompt = got; return next, nil })
+	must(t, err)
+	check(t, strings.Count(prompt, "A-pending") == 1 && strings.Count(prompt, "B-queued") == 1 && strings.Index(prompt, "A-pending") < strings.Index(prompt, "B-queued") && h.queueSize == 0, "prompt/size = %q/%d", prompt, h.queueSize)
+}
+
+func TestHandoffClaimAndFinish(t *testing.T) {
+	h := &Handoff{}
+	started, release := make(chan struct{}), make(chan struct{})
+	done := make(chan sessionkit.DeliveryReceipt, 1)
+	go func() {
+		receipt, _ := h.Deliver(context.Background(), delivery("active"), func(context.Context, string) (Injection, error) {
+			close(started)
+			<-release
+			return Pending, nil
+		})
+		done <- receipt
+	}()
+	<-started
+	check(t, len(h.Claim()) == 0, "pending delivery was claimed")
+	close(release)
+	check(t, (<-done).Disposition == "injected", "delivery was not injected")
+	check(t, h.queueSize > 0, "pending delivery released its charge")
+	claimed := h.Claim()
+	check(t, len(claimed) == 1 && strings.Contains(string(claimed[0]), "active") && len(h.Claim()) == 0 && h.queueSize == 0, "claim/size = %#v/%d", claimed, h.queueSize)
+
+	_, _ = h.Deliver(context.Background(), delivery("unclaimed"), func(context.Context, string) (Injection, error) { return Pending, nil })
+	_, _ = h.Deliver(context.Background(), delivery("idle"), nil)
+	h.Finish()
+	crossed, finish := make(chan struct{}), make(chan struct{})
+	go func() {
+		receipt, _ := h.Deliver(context.Background(), delivery("crossed"), func(context.Context, string) (Injection, error) {
+			close(crossed)
+			<-finish
+			return Injected, nil
+		})
+		done <- receipt
+	}()
+	<-crossed
+	h.Finish()
+	close(finish)
+	check(t, (<-done).Disposition == "queued_for_next_turn", "crossed injection was acknowledged")
+	next, prompt := newFakeTurn(), ""
+	close(next.done)
+	_, err := h.Run(context.Background(), &sessionkit.Run{}, "", func(_ context.Context, got string) (Turn, error) { prompt = got; return next, nil })
+	must(t, err)
+	check(t, strings.Count(prompt, "unclaimed") == 1 && strings.Count(prompt, "idle") == 1 && strings.Count(prompt, "crossed") == 1 && strings.Index(prompt, "unclaimed") < strings.Index(prompt, "idle") && h.queueSize == 0, "prompt/size = %q/%d", prompt, h.queueSize)
 }
 
 type workerProduct struct {
