@@ -185,6 +185,9 @@ func (p *Wrapper) startLeader(cwd, permission string) (*nativeProcess, error) {
 
 func startLeader(socket, key, cwd, permission string, environment []string) (*nativeProcess, error) {
 	path := leaderSocket(socket, key)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
 	_ = os.Remove(path)
 	arguments := []string{"--permission-mode", first(permission, "default")}
 	if permission == "" || permission == "default" {
