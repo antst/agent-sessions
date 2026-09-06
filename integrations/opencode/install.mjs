@@ -116,11 +116,12 @@ function atomicCommit(changes, rename = renameSync) {
 export function configure(options = {}) {
   const remove = options.remove === true;
   const specifier = options.specifier || defaultSpecifier;
-  if (!remove && (!text(specifier) || !(/^file:/u.test(specifier) || /^https?:\/\//u.test(specifier) || /^@sessionbus\/opencode@[^\s]+$/u.test(specifier)))) throw new Error("OpenCode plugin specifier is invalid");
+  if (!remove && !text(specifier)) throw new Error("OpenCode plugin specifier is invalid");
   const candidates = configFiles(options);
   const existing = candidates.filter(existsSync);
   if (remove && existing.length === 0) return false;
   const selected = existing[0] || candidates[0];
+  if (!remove && !ownedSpecifier(specifier, selected)) throw new Error("OpenCode plugin specifier is not @sessionbus/opencode");
   const documents = existing.map(readConfig);
   if (!existing.length) documents.push({ file: selected, body: "{}\n", value: {}, mode: 0o600 });
   for (const document of documents) document.selected = document.file === selected;

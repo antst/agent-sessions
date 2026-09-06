@@ -89,6 +89,39 @@ test("unrelated package tokens and URL queries are preserved on install and remo
   assert.deepEqual(value(selected), { plugin: [unrelatedName, [unrelatedURL, { native: true }], unrelatedFile] });
 });
 
+test("requested package, directory, and archive forms each converge and remove", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sessionbus-opencode-forms-"));
+  const plugin = path.join(root, "plugin");
+  mkdirSync(plugin);
+  writeFileSync(path.join(plugin, "package.json"), '{"name":"@sessionbus/opencode"}\n');
+  const archive = path.join(root, "sessionbus-opencode-0.1.0-pre.1.tgz");
+  writeFileSync(archive, "package");
+  const forms = ["@sessionbus/opencode@0.1.0-pre.1", `file:${plugin}`, `file:${archive}`, "https://packages.example/sessionbus-opencode-0.1.0-pre.1.tgz?download=1"];
+  for (const [index, specifier] of forms.entries()) {
+    const directory = path.join(root, String(index));
+    mkdirSync(directory);
+    assert.equal(configure({ directory, specifier }), true);
+    assert.equal(configure({ directory, specifier }), false);
+    assert.deepEqual(value(path.join(directory, "opencode.jsonc")), { plugin: [specifier] });
+    assert.equal(configure({ directory, remove: true }), true);
+    assert.equal(configure({ directory, remove: true }), false);
+  }
+});
+
+test("unrelated requested HTTP and file packages are rejected without edits", () => {
+  const { directory } = fixture();
+  const selected = path.join(directory, "opencode.jsonc");
+  const unrelated = path.join(directory, "unrelated");
+  mkdirSync(unrelated);
+  writeFileSync(path.join(unrelated, "package.json"), '{"name":"unrelated"}\n');
+  writeFileSync(selected, '{// untouched\n"plugin":["native"]}\n');
+  const before = readFileSync(selected, "utf8");
+  for (const specifier of ["https://example.invalid/unrelated.tgz?note=@sessionbus/opencode", `file:${unrelated}`]) {
+    assert.throws(() => configure({ directory, specifier }), /not @sessionbus\/opencode/u);
+    assert.equal(readFileSync(selected, "utf8"), before);
+  }
+});
+
 test("an invalid merged file or failed transaction leaves every file byte-exact", () => {
   const { directory, specifier } = fixture();
   const selected = path.join(directory, "opencode.jsonc");
