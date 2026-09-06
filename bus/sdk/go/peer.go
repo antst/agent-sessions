@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"reflect"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ type Peer struct {
 	Caller        *Caller
 	mu            sync.Mutex
 	identity      PeerIdentity
+	admitted      PeerIdentity
 	generation    uint64
 	deliver       DeliverFunc
 	socket        string
@@ -59,26 +61,47 @@ func (p *Peer) Err() error {
 	return p.terminal
 }
 
-func (p *Peer) Rehello(name string, info map[string]any) error {
-	next, wire, generation, err := p.desire(Identity{Name: name, Info: info}, false)
+func (p *Peer) Rehello(ctx context.Context, name string, info map[string]any) error {
+	next, wire, generation, unchanged, err := p.desire(Identity{Name: name, Info: info}, false)
 	if err != nil {
 		return err
+	}
+	if unchanged {
+		return nil
 	}
 	if wire == nil {
 		return errNotConnected
 	}
-	err = p.hello(p.ctx, wire, next, generation)
-	if p.failHello(err) {
+	done, acknowledged := make(chan error, 1), make(chan struct{})
+	go func() {
+		helloErr := p.helloObserved(p.ctx, wire, next, generation, func() { close(acknowledged) })
+		if !p.failHello(helloErr) && helloErr != nil && wire.Context().Err() != nil {
+			helloErr = errNotConnected
+		}
+		done <- helloErr
+	}()
+	select {
+	case err = <-done:
 		return err
+	default:
 	}
-	if err != nil && wire.Context().Err() != nil {
-		return errNotConnected
+	select {
+	case err = <-done:
+		return err
+	case <-ctx.Done():
+		select {
+		case <-acknowledged:
+			return <-done
+		case err = <-done:
+			return err
+		default:
+			return ctx.Err()
+		}
 	}
-	return err
 }
 
 func (p *Peer) Replace(ctx context.Context, identity Identity) error {
-	identity, wire, generation, err := p.desire(identity, true)
+	identity, wire, generation, _, err := p.desire(identity, true)
 	if err != nil {
 		return err
 	}
@@ -92,21 +115,24 @@ func (p *Peer) Replace(ctx context.Context, identity Identity) error {
 	return err
 }
 
-func (p *Peer) desire(identity Identity, replacement bool) (Identity, *rpc.Conn, uint64, error) {
+func (p *Peer) desire(identity Identity, replacement bool) (Identity, *rpc.Conn, uint64, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.ctx.Err() != nil {
-		return Identity{}, nil, 0, &ProtocolError{Code: protocol.Superseded, Message: "superseded"}
+		return Identity{}, nil, 0, false, &ProtocolError{Code: protocol.Superseded, Message: "superseded"}
 	}
 	if !replacement {
 		identity.Product, identity.SessionID, identity.Groups = p.identity.Product, p.identity.SessionID, p.identity.Groups
 	}
 	identity, err := snapshotIdentity(identity)
 	if err != nil {
-		return Identity{}, nil, 0, err
+		return Identity{}, nil, 0, false, err
 	}
 	if replacement && identity.SessionID == p.identity.SessionID {
-		return Identity{}, nil, 0, &ProtocolError{Code: protocol.InvalidHello, Message: "invalid_hello"}
+		return Identity{}, nil, 0, false, &ProtocolError{Code: protocol.InvalidHello, Message: "invalid_hello"}
+	}
+	if !replacement && reflect.DeepEqual(identity, p.identity) {
+		return identity, p.wire, p.generation, true, nil
 	}
 	p.identity, p.generation = identity, p.generation+1
 	wire := p.wire
@@ -117,7 +143,7 @@ func (p *Peer) desire(identity Identity, replacement bool) (Identity, *rpc.Conn,
 		p.wire = nil
 		p.Caller.disconnected()
 	}
-	return identity, wire, p.generation, nil
+	return identity, wire, p.generation, false, nil
 }
 
 func (p *Peer) Shutdown() {
@@ -210,6 +236,10 @@ func (p *Peer) failHello(err error) bool {
 }
 
 func (p *Peer) hello(ctx context.Context, wire *rpc.Conn, identity PeerIdentity, generation uint64) error {
+	return p.helloObserved(ctx, wire, identity, generation, nil)
+}
+
+func (p *Peer) helloObserved(ctx context.Context, wire *rpc.Conn, identity PeerIdentity, generation uint64, acknowledged func()) error {
 	for {
 		installed := false
 		err := wire.CallObserved(ctx, "session.hello", identity, &struct{}{}, func() error {
@@ -222,7 +252,7 @@ func (p *Peer) hello(ctx context.Context, wire *rpc.Conn, identity PeerIdentity,
 				if p.wire != wire {
 					p.identityCtx, p.identityStop = context.WithCancel(wire.Context())
 				}
-				p.wire, installed = wire, true
+				p.admitted, p.wire, installed = identity, wire, true
 			} else {
 				identity, generation = p.identity, p.generation
 			}
@@ -232,6 +262,9 @@ func (p *Peer) hello(ctx context.Context, wire *rpc.Conn, identity PeerIdentity,
 			return err
 		}
 		if installed {
+			if acknowledged != nil {
+				acknowledged()
+			}
 			return nil
 		}
 	}
@@ -253,7 +286,7 @@ func (p *Peer) handle(wire *rpc.Conn, request *rpc.Request) {
 		go func() { _ = wire.Result(request, struct{}{}); p.cancel(); _ = wire.Close() }()
 	case "message.deliver":
 		p.mu.Lock()
-		identity, err := snapshotIdentity(p.identity)
+		identity, err := snapshotIdentity(p.admitted)
 		identityCtx := p.identityCtx
 		current := p.wire == wire && identityCtx != nil
 		p.mu.Unlock()
