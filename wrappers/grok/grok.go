@@ -69,6 +69,11 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 	if p.backend == nil || p.socket == "" || p.key == "" {
 		return sessionkit.OpenResult{}, errors.New("Grok lane host is incomplete")
 	}
+	cwd, err := filepath.Abs(first(request.Open.Cwd, "."))
+	if err != nil {
+		return sessionkit.OpenResult{}, fmt.Errorf("resolve Grok cwd: %w", err)
+	}
+	request.Open.Cwd = cwd
 	name, err := namePart(request.Name)
 	if err != nil {
 		return sessionkit.OpenResult{}, err
@@ -184,7 +189,7 @@ func (p *Wrapper) startLeader(cwd, permission string) (*nativeProcess, error) {
 			p.stopAux(process)
 			return nil, errors.New("Grok leader socket was not ready")
 		case <-tick.C:
-			if _, err := os.Stat(path); err == nil {
+			if grokSocketReady(path) {
 				return process, nil
 			}
 		}
@@ -192,7 +197,7 @@ func (p *Wrapper) startLeader(cwd, permission string) (*nativeProcess, error) {
 }
 
 func (p *Wrapper) startObserverClient(ctx context.Context, cwd string) (*acpClient, *nativeProcess, error) {
-	args := []string{"--permission-mode", "default", "--leader-socket", leaderSocket(p.socket, p.key), "agent", "--leader", "stdio"}
+	args := []string{"--no-auto-update", "--permission-mode", "default", "--leader-socket", leaderSocket(p.socket, p.key), "agent", "--leader", "stdio"}
 	cmd := command("grok", args...)
 	cmd.Dir, cmd.Env, cmd.Stderr = cwd, nativeEnvironment(), os.Stderr
 	input, _ := cmd.StdinPipe()
@@ -361,15 +366,21 @@ func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 		return sessionkit.DeliveryReceipt{}, err
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	observer, id := p.observer, p.sessionID
-	active := p.run != nil && p.run.Native != nil
+	var native any
+	if p.run != nil {
+		native = p.run.Native
+	}
+	p.mu.Unlock()
 	if observer == nil {
 		return sessionkit.DeliveryReceipt{}, errors.New("Grok observer is unavailable")
 	}
 	if err := observer.interject(ctx, id, request.MessageID, message); err != nil {
 		return sessionkit.DeliveryReceipt{}, fmt.Errorf("Grok interject: %w", err)
 	}
+	p.mu.Lock()
+	active := native != nil && p.run != nil && p.run.Native == native
+	p.mu.Unlock()
 	if active {
 		return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
 	}
@@ -484,12 +495,17 @@ func leaderSocket(socket, key string) string {
 	return filepath.Join(filepath.Dir(socket), "grok-"+key+".sock")
 }
 
+func grokSocketReady(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode()&os.ModeSocket != 0
+}
+
 func launchArguments(request sessionkit.OpenRequest, leader string) ([]string, error) {
 	extra, err := extraArguments(request.Open.Arguments)
 	if err != nil {
 		return nil, err
 	}
-	arguments := []string{}
+	arguments := []string{"--no-auto-update"}
 	if request.ResumeSessionID != "" {
 		arguments = append(arguments, "--resume", request.ResumeSessionID)
 	}

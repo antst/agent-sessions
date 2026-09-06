@@ -44,11 +44,22 @@ func TestMain(m *testing.M) {
 func fakeGrok() {
 	index := slices.Index(os.Args, "--")
 	arguments := os.Args[index+1:]
-	record("START", arguments)
+	cwd, _ := os.Getwd()
+	record("START", map[string]any{"arguments": arguments, "cwd": cwd})
 	if slices.Contains(arguments, "leader") && !slices.Contains(arguments, "stdio") {
 		path := option(arguments, "--leader-socket")
-		_ = os.WriteFile(path, nil, 0o600)
+		listener, err := net.Listen("unix", path)
+		if err != nil {
+			os.Exit(2)
+		}
+		defer listener.Close()
 		time.Sleep(24 * time.Hour)
+	}
+	if path := os.Getenv("GROK_TEST_DESCENDANT_PID"); path != "" {
+		child := exec.Command("sleep", "3600")
+		if child.Start() == nil {
+			_ = os.WriteFile(path, []byte(strconv.Itoa(child.Process.Pid)), 0o600)
+		}
 	}
 	title, cancelled, rosterCalls := "", make(chan struct{}, 1), 0
 	titles := strings.Split(os.Getenv("GROK_TEST_TITLES"), ",")
@@ -84,6 +95,9 @@ func fakeGrok() {
 			session := first(os.Getenv("GROK_TEST_SESSION_ID"), testSessionID)
 			reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"result": map[string]any{"sessions": []map[string]any{{"sessionId": session, "title": title, "cwd": os.TempDir(), "activity": "working", "resident": true, "yolo": true}}}}})
 		case "_x.ai/interject":
+			if path := os.Getenv("GROK_TEST_INTERJECT_BLOCK"); path != "" {
+				<-fileReady(path)
+			}
 			reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"result": map[string]string{"status": "queued"}}})
 			reply(map[string]any{"jsonrpc": "2.0", "method": "_x.ai/session/interjection", "params": params})
 		case "session/prompt":
@@ -124,10 +138,14 @@ func fakeGrok() {
 }
 
 func released() <-chan time.Time {
+	return fileReady(os.Getenv("GROK_TEST_RELEASE"))
+}
+
+func fileReady(path string) <-chan time.Time {
 	ready := make(chan time.Time, 1)
 	go func() {
 		for {
-			if _, err := os.Stat(os.Getenv("GROK_TEST_RELEASE")); err == nil {
+			if _, err := os.Stat(path); err == nil {
 				ready <- time.Now()
 				return
 			}
@@ -164,28 +182,13 @@ func TestFreshLaneNativeLifecycle(t *testing.T) {
 	frames := records(t, recordPath)
 	check(t, containsStart(frames, "--permission-mode", "bypassPermissions", "--reasoning-effort", "low", "-m", "grok-4.6", "--disable-web-search"), "typed argv not preserved")
 	check(t, containsStart(frames, "--relay-on-demand") && !containsStart(frames, "--no-exit-on-disconnect"), "leader argv did not preserve relay-on-demand")
+	check(t, allStartsContain(frames, "--no-auto-update"), "an ACP client omitted --no-auto-update")
 	check(t, countFrames(frames, "initialize") == 3, "authenticated startup hold absent: %d handshakes", countFrames(frames, "initialize"))
 	open := findFrame(frames, "session/new")
 	check(t, !strings.Contains(string(open), "--session-id") && strings.Contains(string(open), `"agent_sessions"`) && strings.Contains(string(open), `"AGENTBUS_LANE_SOCKET"`) && strings.Contains(string(open), `"yoloMode":true`), "fresh open = %s", open)
-
-	result, err := p.Run(context.Background(), &sessionkit.Run{}, "plain")
-	must(t, err)
-	check(t, result == (sessionkit.TurnResult{Outcome: "completed", Result: "answer", NativeStopReason: "end_turn"}), "turn = %#v", result)
-	p.mu.Lock()
-	p.run = nil // Direct callback invocation has no kit-owned Done signal.
-	p.mu.Unlock()
 	idle, err := p.Deliver(context.Background(), delivery("idle"))
 	must(t, err)
 	check(t, idle.Disposition == "queued_for_next_turn", "idle = %#v", idle)
-
-	done := make(chan sessionkit.TurnResult, 1)
-	go func() { result, _ := p.Run(context.Background(), &sessionkit.Run{}, "hold"); done <- result }()
-	waitFrame(t, recordPath, "session/prompt", 2)
-	active, err := p.Deliver(context.Background(), delivery("active"))
-	must(t, err)
-	check(t, active.Disposition == "injected", "active = %#v", active)
-	must(t, os.WriteFile(os.Getenv("GROK_TEST_RELEASE"), nil, 0o600))
-	check(t, (<-done).Outcome == "completed", "held run failed")
 	must(t, p.Close(context.Background()))
 	check(t, !exists(filepath.Join(root, "lanes", p.key+".sock")), "lane socket remains")
 }
@@ -194,25 +197,44 @@ func TestInterruptAndResume(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GROK_TEST_RECORD", filepath.Join(root, "record"))
 	t.Setenv("GROK_TEST_RELEASE", filepath.Join(root, "never"))
-	open := func(resume string) *Wrapper {
-		p := New(filepath.Join(root, "agentbus.sock"), "token-"+resume)
-		p.SetCall(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
-		_, err := p.Open(context.Background(), sessionkit.OpenRequest{Name: "lane@local", ResumeSessionID: resume, Open: sessionkit.OpenOptions{Cwd: root}})
-		must(t, err)
-		return p
-	}
-	p := open("")
-	done := make(chan sessionkit.TurnResult, 1)
-	run := &sessionkit.Run{}
-	go func() { result, _ := p.Run(context.Background(), run, "hold"); done <- result }()
+	_, connection, reader := startGrokWorker(t, root)
+	writeWorkerRequest(t, connection, 2, "turn.run", map[string]any{"session_id": testSessionID + "@local", "input": "hold"})
 	waitFrame(t, os.Getenv("GROK_TEST_RECORD"), "session/prompt", 1)
-	must(t, p.Interrupt(context.Background(), run))
-	check(t, (<-done).Outcome == "interrupted", "interrupt terminal changed")
-	must(t, p.Close(context.Background()))
-	p = open(testSessionID)
+	writeWorkerRequest(t, connection, 3, "turn.interrupt", map[string]string{"session_id": testSessionID + "@local"})
+	var terminal sessionkit.TurnResult
+	must(t, json.Unmarshal(readWorkerResponse(t, reader, 2).Result, &terminal))
+	check(t, terminal.Outcome == "interrupted", "interrupt terminal changed")
+	check(t, readWorkerResponse(t, reader, 3).Result != nil, "interrupt ack absent")
+	writeWorkerRequest(t, connection, 4, "session.close", map[string]string{"session_id": testSessionID + "@local"})
+	check(t, readWorkerResponse(t, reader, 4).Result != nil, "close response absent")
+	p := New(filepath.Join(root, "agentbus.sock"), "resume-token")
+	p.SetCall(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
+	_, err := p.Open(context.Background(), sessionkit.OpenRequest{Name: "lane@local", ResumeSessionID: testSessionID, Open: sessionkit.OpenOptions{Cwd: root}})
+	must(t, err)
 	frames := records(t, os.Getenv("GROK_TEST_RECORD"))
 	check(t, len(findFrame(frames, "session/load")) > 0, "resume did not load")
 	check(t, containsStart(frames, "--permission-mode", "default", "--allow", "MCPTool(agent_sessions__*)"), "default leader MCP allow absent")
+	must(t, p.Close(context.Background()))
+}
+
+func TestOmittedCwdAndSocketReadiness(t *testing.T) {
+	root, recordPath := t.TempDir(), filepath.Join(t.TempDir(), "record")
+	regular := filepath.Join(root, "not-a-socket")
+	must(t, os.WriteFile(regular, nil, 0o600))
+	check(t, !grokSocketReady(regular), "regular file reported ready")
+	t.Setenv("GROK_TEST_RECORD", recordPath)
+	p := New(filepath.Join(root, "agentbus.sock"), "cwd-token")
+	p.SetCall(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
+	_, err := p.Open(context.Background(), sessionkit.OpenRequest{Name: "lane@local"})
+	must(t, err)
+	want, err := os.Getwd()
+	must(t, err)
+	for _, frame := range records(t, recordPath) {
+		if strings.Contains(string(frame), `"kind":"START"`) {
+			check(t, strings.Contains(string(frame), `"cwd":`+strconv.Quote(want)), "child cwd = %s", frame)
+		}
+	}
+	check(t, strings.Contains(string(findFrame(records(t, recordPath), "session/new")), `"cwd":`+strconv.Quote(want)), "ACP cwd was empty")
 	must(t, p.Close(context.Background()))
 }
 
@@ -255,6 +277,29 @@ func TestKitRunTokenCrossings(t *testing.T) {
 	check(t, readWorkerResponse(t, reader, 5).Result != nil, "close response absent")
 }
 
+func TestDeliveryDoesNotHoldRunHandoff(t *testing.T) {
+	root, recordPath := t.TempDir(), filepath.Join(t.TempDir(), "record")
+	interjectRelease := filepath.Join(root, "interject-release")
+	t.Setenv("GROK_TEST_RECORD", recordPath)
+	t.Setenv("GROK_TEST_RELEASE", filepath.Join(root, "never"))
+	t.Setenv("GROK_TEST_INTERJECT_BLOCK", interjectRelease)
+	_, connection, reader := startGrokWorker(t, root)
+	writeWorkerRequest(t, connection, 2, "turn.run", map[string]any{"session_id": testSessionID + "@local", "input": "hold"})
+	waitFrame(t, recordPath, "session/prompt", 1)
+	writeWorkerRequest(t, connection, 3, "message.deliver", delivery("crossed delivery"))
+	waitFrame(t, recordPath, "_x.ai/interject", 1)
+	writeWorkerRequest(t, connection, 4, "turn.interrupt", map[string]string{"session_id": testSessionID + "@local"})
+	check(t, readWorkerResponse(t, reader, 4).Result != nil, "interrupt did not progress")
+	check(t, readWorkerResponse(t, reader, 2).Result != nil, "terminal did not progress")
+	must(t, os.WriteFile(interjectRelease, nil, 0o600))
+	response := readWorkerResponse(t, reader, 3)
+	var receipt sessionkit.DeliveryReceipt
+	must(t, json.Unmarshal(response.Result, &receipt))
+	check(t, receipt.Disposition == "queued_for_next_turn", "stale native token reported %q", receipt.Disposition)
+	writeWorkerRequest(t, connection, 5, "session.close", map[string]string{"session_id": testSessionID + "@local"})
+	check(t, readWorkerResponse(t, reader, 5).Result != nil, "close response absent")
+}
+
 func TestChildExitWaitsForRunDoneBeforeShutdown(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GROK_TEST_OUTPUT_SIZE", "300000")
@@ -266,7 +311,7 @@ func TestChildExitWaitsForRunDoneBeforeShutdown(t *testing.T) {
 	var terminal sessionkit.TurnResult
 	must(t, json.Unmarshal(response.Result, &terminal))
 	check(t, terminal.Outcome == "completed" && len(terminal.Result) == 262144, "terminal before EOF = %s/%d", terminal.Outcome, len(terminal.Result))
-	_, err := reader.ReadBytes('\n')
+	_, err := reader.reader.ReadBytes('\n')
 	check(t, errors.Is(err, io.EOF), "worker did not shut down after terminal: %v", err)
 }
 
@@ -276,7 +321,12 @@ type workerResponse struct {
 	Error  json.RawMessage `json:"error"`
 }
 
-func startGrokWorker(t *testing.T, root string) (*Wrapper, net.Conn, *bufio.Reader) {
+type workerReader struct {
+	reader  *bufio.Reader
+	pending map[int]workerResponse
+}
+
+func startGrokWorker(t *testing.T, root string) (*Wrapper, net.Conn, *workerReader) {
 	socket := filepath.Join(root, "agentbus.sock")
 	listener, err := net.Listen("unix", socket)
 	must(t, err)
@@ -289,8 +339,8 @@ func startGrokWorker(t *testing.T, root string) (*Wrapper, net.Conn, *bufio.Read
 	go func() { _ = worker.Serve(context.Background()) }()
 	connection, err := listener.Accept()
 	must(t, err)
-	reader := bufio.NewReader(connection)
-	readLine(t, reader)
+	reader := &workerReader{reader: bufio.NewReader(connection), pending: map[int]workerResponse{}}
+	readLine(t, reader.reader)
 	_, err = connection.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}` + "\n"))
 	must(t, err)
 	writeWorkerRequest(t, connection, 1, "session.open", map[string]any{"name": "parent/grok@local", "groups": []string{"group"}, "open": map[string]any{"cwd": root}})
@@ -307,13 +357,18 @@ func writeWorkerRequest(t *testing.T, connection net.Conn, id int, method string
 	must(t, err)
 }
 
-func readWorkerResponse(t *testing.T, reader *bufio.Reader, id int) workerResponse {
+func readWorkerResponse(t *testing.T, reader *workerReader, id int) workerResponse {
+	if response, ok := reader.pending[id]; ok {
+		delete(reader.pending, id)
+		return response
+	}
 	for {
 		var response workerResponse
-		must(t, json.Unmarshal(readLine(t, reader), &response))
+		must(t, json.Unmarshal(readLine(t, reader.reader), &response))
 		if response.ID == id {
 			return response
 		}
+		reader.pending[response.ID] = response
 	}
 }
 
@@ -396,6 +451,20 @@ func containsStart(records []json.RawMessage, values ...string) bool {
 		return true
 	}
 	return false
+}
+
+func allStartsContain(records []json.RawMessage, value string) bool {
+	found := false
+	for _, raw := range records {
+		if !strings.Contains(string(raw), `"kind":"START"`) {
+			continue
+		}
+		found = true
+		if !strings.Contains(string(raw), value) {
+			return false
+		}
+	}
+	return found
 }
 
 func option(arguments []string, name string) string {

@@ -6,7 +6,7 @@
 - verified: Grok Build 1.0.13 — a fresh ACP session is created with `session/new`; the returned product-minted `sessionId` is the Agentbus session id. Passing `--session-id` to the ACP process did not determine the id returned by `session/new`. source: `/home/antst/agentbus-evidence/grok-20260906T072333Z/P1-P7-acp-raw-v3.txt`
 - verified: Grok Build 1.0.13 — an exact resume starts Grok with `--resume <product-id>` and calls `session/load {sessionId:<product-id>}`; Grok returns the same id and preserves the session. source: `/home/antst/agentbus-evidence/grok-20260906T072333Z/P1-P7-acp-raw-v3.txt`
 - verified: Grok Build 1.0.13 — `cwd`, `permission_mode`, `reasoning_effort`, `model`, and supported extra arguments are process flags on the primary ACP command. source: `/home/antst/agentbus-evidence/grok-20260906T072333Z/P1-P7-acp-raw-v3.txt`
-- verified: Grok Build 1.0.13 — the pinned CLI accepts permission modes `default`, `plan`, `acceptEdits`, `dontAsk`, and `bypassPermissions`, and accepts reasoning efforts `low`, `medium`, `high`, and `xhigh`. source: `/home/antst/agentbus-evidence/grok-20260906T072333Z/P0-version-help.txt`
+- verified: Grok Build 1.0.13 — the pinned CLI accepts permission modes `default`, `auto`, `plan`, `acceptEdits`, `dontAsk`, and `bypassPermissions`, and accepts reasoning efforts `low`, `medium`, `high`, and `xhigh`. source: `/home/antst/agentbus-evidence/grok-20260906T072333Z/P0-version-help.txt`
 - verified: Grok Build 1.0.13 — the session open object carries `cwd`, `mcpServers`, `_meta.yoloMode`, and `_meta.autoMode`; bypass permission maps to `yoloMode:true`, while default maps to `false`. source: `/home/antst/agentbus-evidence/grok-20260906T072333Z/P1-P7-acp-raw-v3.txt`; `c5b280d:internal/bridge/grok_native_session.go:211-240`
 - verified: Grok Build 1.0.13 — the lane's private MCP entry is described in `session/new` or `session/load`; Grok invokes it as an MCP client during a turn. source: `/home/antst/agentbus-evidence/grok-20260906T072333Z/P8-product-mcp-raw-v5.txt`; `/home/antst/agentbus-evidence/grok-20260906T072333Z/P8-mcp-raw-v5.txt`
 - verified: Grok Build 1.0.13 — the wrapper starts a private leader with `agent leader`, `--leader-socket`, `--relay-on-demand`, and `--no-auto-update`; default permission also grants `MCPTool(agent_sessions__*)`. source: `c5b280d:internal/bridge/grok_native_session.go:31-72`
@@ -26,3 +26,61 @@
 - verified: Grok Build 1.0.13 — the 0.4.0 launcher searched configured and product-specific fallback locations for Grok. That behavior is retired: the split-ready wrapper follows the product-independent Agentbus rule and resolves the real `grok` executable from `PATH`. source: `c5b280d:internal/launcher/grok_peer.go:478-547`
 - verified: Grok Build 1.0.13 — process-group cleanup, inherited session locks, the token-digest provisional lock/socket name, MCP message rendering, and peer reconnect/identity cancellation are shared host or SDK mechanisms rather than Grok-specific lifecycle state. source: `c5b280d:internal/bridge/grok_process_unix.go:1-49`; `c5b280d:internal/sessiontools/envelope.go:1-78`
 - UNVERIFIED: Grok Build versions after 1.0.13 may add or change ACP methods, roster fields, activity values, permission values, or interactive flags; a version update requires fresh captures before changing these closed surfaces. source: `/home/antst/agentbus-evidence/grok-20260906T072333Z/P0-version-help.txt`
+
+## Exact captured frames typed by the wrapper
+
+Each line below is copied byte-for-byte, excluding its terminating newline, from a `STDIN` frame in `/home/antst/agentbus-evidence/grok-20260906T072333Z/P1-P7-acp-raw-v3.txt` (Grok Build 1.0.13).
+
+- `initialize`
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false}}}
+```
+
+- `authenticate`
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"authenticate","params":{"methodId":"cached_token","_meta":{"headless":true}}}
+```
+
+- `session/new`
+
+```json
+{"jsonrpc":"2.0","id":30,"method":"session/new","params":{"cwd":"/home/antst/agentbus-evidence/grok-20260906T072333Z/work","mcpServers":[],"_meta":{"yoloMode":false,"autoMode":false}}}
+```
+
+- `session/load`
+
+```json
+{"jsonrpc":"2.0","id":303,"method":"session/load","params":{"sessionId":"01a075a0-43ac-7d70-919f-f5e0f6f5e4e2","cwd":"/home/antst/agentbus-evidence/grok-20260906T072333Z/work","mcpServers":[],"_meta":{"yoloMode":false,"autoMode":false}}}
+```
+
+- `session/prompt`
+
+```json
+{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"01a075a0-43ac-7d70-919f-f5e0f6f5e4e2","prompt":[{"type":"text","text":"Reply with exactly GROK_PROBE_OK after waiting five seconds."}]}}
+```
+
+- `session/cancel`
+
+```json
+{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"01a075a0-43ac-7d70-919f-f5e0f6f5e4e2"}}
+```
+
+- `_x.ai/interject`
+
+```json
+{"jsonrpc":"2.0","id":106,"method":"_x.ai/interject","params":{"sessionId":"01a075a0-43ac-7d70-919f-f5e0f6f5e4e2","text":"Also include ACTIVE_INTERJECT_OK in the same answer.","interjectionId":"active-message-1"}}
+```
+
+- `_x.ai/sessions/list`
+
+```json
+{"jsonrpc":"2.0","id":103,"method":"_x.ai/sessions/list","params":{}}
+```
+
+- `session/close`
+
+```json
+{"jsonrpc":"2.0","id":305,"method":"session/close","params":{"sessionId":"01a075a0-43ac-7d70-919f-f5e0f6f5e4e2"}}
+```

@@ -44,7 +44,7 @@ func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
 	if raw := os.Getenv(host.GroupsEnv); raw != "" && json.Unmarshal([]byte(raw), &groups) != nil {
 		return nil, errors.New("AGENTBUS_GROUPS must be a JSON array")
 	}
-	cmd := command("grok", "agent", "--leader", "stdio")
+	cmd := command("grok", "--no-auto-update", "agent", "--leader", "stdio")
 	cmd.Env, cmd.Stderr, cmd.SysProcAttr = nativeEnvironment(), os.Stderr, &syscall.SysProcAttr{Setpgid: true}
 	input, _ := cmd.StdinPipe()
 	output, _ := cmd.StdoutPipe()
@@ -55,8 +55,7 @@ func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
 	observer := newACPClient(input, output, nil)
 	stop := func(err error) (*PeerBackend, error) {
 		observer.close()
-		_ = process.cmd.Process.Signal(syscall.SIGKILL)
-		<-process.done
+		stopPeerProcess(process)
 		return nil, err
 	}
 	if err = initializeACP(ctx, observer); err != nil {
@@ -207,9 +206,13 @@ func (b *PeerBackend) Shutdown() {
 		observer.close()
 	}
 	if process != nil {
-		_ = process.cmd.Process.Signal(syscall.SIGKILL)
-		<-process.done
+		stopPeerProcess(process)
 	}
+}
+
+func stopPeerProcess(process *nativeProcess) {
+	_ = syscall.Kill(-process.cmd.Process.Pid, syscall.SIGKILL)
+	<-process.done
 }
 
 func InteractivePlan(arguments, environment []string) (host.ExecPlan, error) {
@@ -227,13 +230,11 @@ func InteractivePlan(arguments, environment []string) (host.ExecPlan, error) {
 		}
 		arguments = append([]string{"--session-id", id}, arguments...)
 	}
-	if !slices.Contains(arguments, "--leader") {
-		index := slices.Index(arguments, "--")
-		if index < 0 {
-			index = len(arguments)
-		}
-		arguments = slices.Insert(arguments, index, "--leader")
+	index := slices.Index(arguments, "--")
+	if index < 0 {
+		index = len(arguments)
 	}
+	arguments = slices.Insert(arguments, index, "--leader")
 	if !slices.ContainsFunc(environment, func(value string) bool { return strings.HasPrefix(value, host.SocketEnv+"=") }) {
 		environment = append(environment, host.SocketEnv+"="+sessionkit.Socket())
 	}

@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/antst/agent-sessions/wrappers/host"
 )
@@ -42,6 +45,14 @@ func TestInteractivePlan(t *testing.T) {
 	must(t, err)
 	separator := slices.Index(plan.Args, "--")
 	check(t, separator > 0 && slices.Index(plan.Args, "--leader") < separator, "leader follows separator: %#v", plan.Args)
+	plan, err = InteractivePlan([]string{"--model", "--leader", "prompt"}, nil)
+	must(t, err)
+	model = slices.Index(plan.Args, "--model")
+	check(t, model >= 0 && plan.Args[model+1] == "--leader" && count(plan.Args, "--leader") == 2, "leader-valued option changed: %#v", plan.Args)
+	plan, err = InteractivePlan([]string{"--", "--leader"}, nil)
+	must(t, err)
+	separator = slices.Index(plan.Args, "--")
+	check(t, separator > 0 && plan.Args[separator-1] == "--leader" && plan.Args[separator+1] == "--leader", "post-separator literal changed: %#v", plan.Args)
 }
 
 func TestPeerMCPUsesRosterTitleAndDefaultLeader(t *testing.T) {
@@ -147,6 +158,33 @@ func TestExactRosterAuthority(t *testing.T) {
 	must(t, err)
 }
 
+func TestPeerShutdownKillsItsProcessGroup(t *testing.T) {
+	root := t.TempDir()
+	server, hellos := fakeDaemon(t, filepath.Join(root, "agentbus.sock"))
+	defer server.Close()
+	t.Setenv(host.SocketEnv, filepath.Join(root, "agentbus.sock"))
+	t.Setenv(host.SessionIDEnv, testSessionID)
+	t.Setenv("GROK_TEST_DESCENDANT_PID", filepath.Join(root, "descendant.pid"))
+	opened := make(chan *PeerBackend, 1)
+	go func() {
+		backend, _ := NewPeerBackend(context.Background())
+		opened <- backend
+	}()
+	(<-hellos).ack <- true
+	backend := <-opened
+	body, err := os.ReadFile(filepath.Join(root, "descendant.pid"))
+	must(t, err)
+	var pid int
+	_, err = fmt.Sscan(string(body), &pid)
+	must(t, err)
+	backend.Shutdown()
+	deadline := time.Now().Add(3 * time.Second)
+	for processRunning(pid) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	check(t, !processRunning(pid), "peer descendant %d survived group shutdown", pid)
+}
+
 type hello struct {
 	SessionID string   `json:"session_id"`
 	Name      string   `json:"name"`
@@ -208,4 +246,23 @@ func environment(values []string, name string) string {
 		}
 	}
 	return ""
+}
+
+func count(values []string, target string) int {
+	total := 0
+	for _, value := range values {
+		if value == target {
+			total++
+		}
+	}
+	return total
+}
+
+func processRunning(pid int) bool {
+	body, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return false
+	}
+	fields := strings.Fields(string(body))
+	return len(fields) < 3 || fields[2] != "Z"
 }
