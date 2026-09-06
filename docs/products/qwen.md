@@ -9,8 +9,11 @@ Provenance and tag legend:
   `docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:lines` at 2e0e498 and are tagged
   `source: picture`.
 - Product facts were verified directly against the installed qwen-code 0.23.0 bundle at
-  `/home/antst/.local/lib/qwen-code` (cited `bundle:lib/chunks/<file>:<lines>`; help lines
-  cite `qwen --help` output of 0.23.0). `qwen --version` → `0.23.0`.
+  `/home/antst/.local/lib/qwen-code` (cited `bundle:lib/chunks/<file>:<lines>`). CLI
+  surface facts cite the committed fixture `docs/products/qwen-0.23.0-help.txt`: line 1
+  is the exact `qwen --version` output (`0.23.0`), lines 2-81 are the exact `qwen --help`
+  output, both captured 2026-09-06 on this host (`/home/antst/.local/bin/qwen` →
+  `/home/antst/.local/lib/qwen-code`), non-TTY, unedited.
 - Fixture frames were captured by the repo against qwen-code 0.21.15 and are tagged
   `verified: 0.21.15 (fixture)`.
 - `verified: pin` = fact about Agent Sessions code, which holds against the catalog pin
@@ -25,7 +28,18 @@ Provenance and tag legend:
   `internal/products/qwen/`, `internal/launcher/qwen_peer*.go`,
   `cmd/agent-sessions/{qwen_peer.go,connector.go}`, `internal/bridge/qwen*.go`,
   `internal/qwenprofile/`, `internal/daemon/adapter_qwen.go`, and `qwen/`. (verified: pin;
-  source: tree listing)
+  source: path inventory — `git ls-tree -r --name-only ff81565 | grep -i qwen`, code and
+  plugin paths: cmd/agent-sessions/qwen_peer.go, cmd/agent-sessions/qwen_peer_test.go,
+  internal/bridge/qwen.go, internal/bridge/qwen_test.go, internal/bridge/qwen_title.go,
+  internal/bridge/qwen_title_test.go, internal/bridge/testdata/qwen/{acp.jsonl,
+  dual-output.jsonl,serve.json,version.json}, internal/daemon/adapter_qwen.go,
+  internal/daemon/adapter_qwen_test.go, internal/launcher/qwen_peer.go,
+  internal/launcher/qwen_peer_test.go, internal/launcher/qwen_test_helpers_test.go,
+  internal/products/qwen/{client.go,lane.go,lane_test.go,process.go},
+  internal/qwenprofile/{profile.go,profile_test.go}, qwen/mcp.json, qwen/plugin.json,
+  qwen/scripts/native-entry; the same grep also lists qwen-named skill and spec docs
+  (claude/skills/qwen-lane/, qwen/skills/, skills/qwen-lane/, specs/001-qwen-support/),
+  which carry no runtime code)
 - `bus/` contains zero qwen mentions at ff81565 and 2e0e498: the universal `qwen-peer`
   wrapper is designed but not yet implemented; current facts describe the 0.4.0
   launcher/driver paths, picture facts describe the accepted design. (verified: pin;
@@ -52,11 +66,11 @@ Provenance and tag legend:
   `model`, `arguments`; model maps to `-m`; default permission uses Qwen's ordinary mode;
   bypass adds `--yolo` and verifies the returned mode. (verified: n/a (design);
   source: picture docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1567)
-- Product flags (installed 0.23.0): `--acp` (help:44), `--session-id` (help:68),
-  `-m/--model` (help:33), `--approval-mode` choices plan|default|auto-edit|auto|yolo
-  (help:43), `-y/--yolo` (help:42), `-r/--resume` (help:67), `--chat-recording`
-  (help:32), `--json-file` (help:63), `--input-file` (help:65). (verified: 0.23.0;
-  source: qwen --help)
+- Product flags (installed 0.23.0): `--acp` (qwen-0.23.0-help.txt:45), `--session-id`
+  (:69), `-m/--model` (:34), `--approval-mode` choices plan|default|auto-edit|auto|yolo
+  (:44), `-y/--yolo` (:43), `-r/--resume` (:68), `--chat-recording` (:33), `--json-file`
+  (:64), `--input-file` (:66). (verified: 0.23.0;
+  source: docs/products/qwen-0.23.0-help.txt:33-69)
 - Reserved lane arguments (rejected): `--acp`, `--approval-mode`, `--yolo`, `-r`,
   `--resume`, `-c`, `--continue`, `--session-id`, `-p`, `--prompt`, `-i`,
   `--prompt-interactive`, `-o`, `--output-format`, `-n`, `--name`, `--`, including
@@ -132,7 +146,8 @@ Provenance and tag legend:
   leaves it undefined → recorded → resumable after process exit; `--chat-recording=false`
   disables persistence and breaks `--continue`/`--resume`. (verified: 0.23.0;
   source: bundle:lib/chunks/chunk-4F7GQGXB.js:160402;
-  bundle:lib/chunks/acpAgent-2GTFCIEP.js:17827-17841; qwen --help:32)
+  bundle:lib/chunks/acpAgent-2GTFCIEP.js:17827-17841;
+  docs/products/qwen-0.23.0-help.txt:33)
 - Resume selector passes to the native resume flag unchanged; native name/title lookup is
   cwd/project-scoped, so resume must use the original cwd. (verified: pin;
   source: docs/PRODUCTS.md:34)
@@ -247,9 +262,13 @@ Provenance and tag legend:
   user parts to the session chat history; aborted runs instead take only already-drained
   messages from the internal recovery buffer. (verified: 0.23.0;
   source: bundle:lib/chunks/acpAgent-2GTFCIEP.js:8340-8358,8318-8338,8341-8344,8682-8688)
-- Runs with no tool round hit no drain boundary; entries stay in the wrapper queue
-  (fallback above). (verified: 0.23.0; source: drain call sites are tool-run/stop paths
-  only, bundle:lib/chunks/acpAgent-2GTFCIEP.js:7215,7300,8345,8364)
+- Observed drain call sites (0.23.0): the agent pulls `craft/drainMidTurnQueue` at
+  tool-run boundaries, stop-inspection, and stopped-run preservation paths. (verified:
+  0.23.0; source: bundle:lib/chunks/acpAgent-2GTFCIEP.js:7215,7300,8345,8364) Whether a
+  run with no tool round ever reaches a drain boundary is UNVERIFIED (see below); until a
+  product probe settles it, the picture's tool-less fallback (undrained entries return to
+  the wrapper FIFO, docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1570) is a design
+  assumption, not an observed product fact.
 - Current 0.4.0 lane driver has no mid-turn path: Steer returns ErrUnsupportedSteer.
   (verified: pin; source: internal/products/qwen/lane.go:263-264)
 
@@ -260,7 +279,7 @@ Provenance and tag legend:
   (verified: pin; source: cmd/agent-sessions/qwen_peer.go:126-146)
 - Product: `--input-file` = "File path for receiving remote input commands (bidirectional
   sync). An external process writes JSONL commands; the TUI watches and processes them."
-  (verified: 0.23.0; source: qwen --help:65)
+  (verified: 0.23.0; source: docs/products/qwen-0.23.0-help.txt:66)
 - Picture: a peer integration may let the interactive product start a turn in response to
   delivery and report `injected`; the FIFO rule is lane-only. (verified: n/a (design);
   source: picture docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1497)
@@ -304,8 +323,10 @@ Provenance and tag legend:
 ## Unsupported and exceptions
 
 - `reasoning_effort` is the declared unsupported open field: no effort/thinking/reasoning
-  flag exists anywhere in 0.23.0 help, and the ACP session/new and config-normalization
-  surface carries no reasoning field. (verified: 0.23.0; source: qwen --help (absence);
+  flag exists anywhere in the committed 0.23.0 CLI surface (0 matches for
+  `effort|thinking|reasoning` across all 81 fixture lines), and the ACP session/new and
+  config-normalization surface carries no reasoning field. (verified: 0.23.0;
+  source: docs/products/qwen-0.23.0-help.txt:1-81 (absence);
   bundle:lib/chunks/acpAgent-2GTFCIEP.js:15416-15472; picture
   docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1572)
 - Wrapper options `--effort`/`--reasoning-effort` reject Qwen before launch.
@@ -348,10 +369,12 @@ Provenance and tag legend:
   unlinked on exit; peer mode — the same stdio MCP entry owns the direct daemon peer
   connection. (verified: n/a (design); source: picture
   docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1493,1569)
-- URL transports (http/sse) exist in the product but the design uses none: loopback HTTP
-  MCP ingress was deleted by ruling (2026-09-05 edge-hunt disposition) in favor of the
-  per-session Unix socket. (verified: 0.23.0 for product support; source: picture ruling
-  + bundle:lib/chunks/acpAgent-2GTFCIEP.js:15416-15472)
+- URL transports (http/sse) exist in the product but the design uses none: lane tool
+  ingress is the stdio helper `qwen-peer mcp` against the wrapper's private per-session
+  Unix socket. (verified: 0.23.0 for product support;
+  source: bundle:lib/chunks/acpAgent-2GTFCIEP.js:15416-15472; picture
+  docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1493,1569; ruling (fable-architect,
+  2026-09-05): stdio helper over the per-session socket; loopback HTTP not used)
 
 ## Peer identity resolution (current connector)
 
@@ -394,9 +417,14 @@ Provenance and tag legend:
 - UNVERIFIED: whether the stdio `--acp` agent implements session/set_mode,
   session/set_model, session/set_config_option, session/fork, session/list (listed in the
   library wire table; only serve-side handlers cited; not exercised by our code).
+- UNVERIFIED: whether a run with no tool round ever reaches a `craft/drainMidTurnQueue`
+  boundary — the cited call sites (bundle:lib/chunks/acpAgent-2GTFCIEP.js:7215,7300,8345,
+  8364) show where drains occur but cannot prove absence elsewhere; requires a live
+  product probe (queued delivery into a tool-less run, observe whether the product pulls
+  it before terminal).
 - UNVERIFIED: whether `--input-file`, `--json-file`, `--chat-recording` exist in upstream
-  qwen-code releases (present in the installed 0.23.0 build's help; upstream parity not
-  checked).
+  qwen-code releases (present in the committed 0.23.0 fixture at
+  docs/products/qwen-0.23.0-help.txt:33,64,66; upstream parity not checked).
 - UNVERIFIED: exact TUI handling of an input-file submit during an active turn (whether
   it joins the same mid-turn drain queue) — inferred from the product input pipeline, not
   directly observed.
