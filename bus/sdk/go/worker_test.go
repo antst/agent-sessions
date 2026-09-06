@@ -134,6 +134,15 @@ func (p *fakeProduct) Deliver(ctx context.Context, _ DeliveryRequest, run *Run) 
 	return DeliveryReceipt{Disposition: "injected"}, nil
 }
 
+func TestWorkerDeliveryGetsNilWhileIdle(t *testing.T) {
+	p := &fakeProduct{deliverRun: make(chan *Run)}
+	h := startHarness(t, p, true, true)
+	var receipt DeliveryReceipt
+	delivered := async(h, "message.deliver", delivery, &receipt)
+	check(t, <-p.deliverRun == nil, "idle delivery received a run")
+	check(t, <-delivered == nil && receipt.Disposition == "queued_for_next_turn", "idle receipt = %#v", receipt)
+}
+
 func TestWorkerDeliveryKeepsAdmissionRun(t *testing.T) {
 	p := &fakeProduct{started: make(chan *Run), release: make(chan struct{}), deliverRun: make(chan *Run), deliverRelease: make(chan struct{})}
 	h := startHarness(t, p, true, true)
