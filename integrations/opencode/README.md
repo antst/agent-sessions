@@ -12,8 +12,10 @@ product-verified local or tarball specifier:
 sessionbus-opencode-install --specifier file:/absolute/path/to/integrations/opencode
 ```
 
-Run `sessionbus-opencode-install --remove` to remove the managed entry. Other
-config keys and plugin entries are retained. OpenCode resolves the configured
+Run `sessionbus-opencode-install --remove` to remove the managed entry. The
+installer follows OpenCode's native global-config selection, removes its owned
+string or tuple entry from every merged JSON/JSONC file, and preserves comments,
+config keys, and unrelated plugin entries. OpenCode resolves the configured
 package; the installer does not copy plugin source into its config directory.
 
 The plugin registers the `sessionbus` tool and uses OpenCode's v2 session API
