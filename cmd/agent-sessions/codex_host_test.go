@@ -10,17 +10,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/bridge"
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/launcher"
-	"github.com/antst/agent-sessions/internal/livepresence"
-	claudeproduct "github.com/antst/agent-sessions/internal/products/claude"
-	grokproduct "github.com/antst/agent-sessions/internal/products/grok"
-	kiloproduct "github.com/antst/agent-sessions/internal/products/kilocode"
-	ompproduct "github.com/antst/agent-sessions/internal/products/omp"
-	opencodeproduct "github.com/antst/agent-sessions/internal/products/opencode"
-	piproduct "github.com/antst/agent-sessions/internal/products/pi"
-	qwenproduct "github.com/antst/agent-sessions/internal/products/qwen"
+	"github.com/antst/sessionbus/internal/bridge"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
+	"github.com/antst/sessionbus/internal/launcher"
+	"github.com/antst/sessionbus/internal/livepresence"
+	claudeproduct "github.com/antst/sessionbus/internal/products/claude"
+	grokproduct "github.com/antst/sessionbus/internal/products/grok"
+	kiloproduct "github.com/antst/sessionbus/internal/products/kilocode"
+	ompproduct "github.com/antst/sessionbus/internal/products/omp"
+	opencodeproduct "github.com/antst/sessionbus/internal/products/opencode"
+	piproduct "github.com/antst/sessionbus/internal/products/pi"
+	qwenproduct "github.com/antst/sessionbus/internal/products/qwen"
 )
 
 func TestHostCoordinatorComposesProductLaneDriversAndProductCandidateLookups(t *testing.T) {

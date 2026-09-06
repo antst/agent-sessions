@@ -14,7 +14,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/sessionbus/internal/federation"
 )
 
 var version = "dev"

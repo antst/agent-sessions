@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/statestore"
+	"github.com/antst/sessionbus/internal/statestore"
 )
 
 func TestPrepareStateRootRemovesEveryNonCurrentSafeRoot(t *testing.T) {

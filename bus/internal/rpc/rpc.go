@@ -8,10 +8,10 @@ import (
 	"net"
 	"sync"
 
-	"github.com/antst/agent-sessions/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/protocol"
 )
 
-var ErrClosed = errors.New("agentbus connection closed")
+var ErrClosed = errors.New("sessionbus connection closed")
 
 type Request struct {
 	ID     int64

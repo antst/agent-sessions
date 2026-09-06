@@ -9,8 +9,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/antst/agent-sessions/bus/internal/daemon"
-	"github.com/antst/agent-sessions/bus/internal/stateroot"
+	"github.com/antst/sessionbus/bus/internal/daemon"
+	"github.com/antst/sessionbus/bus/internal/stateroot"
 )
 
 func main() {
@@ -48,7 +48,7 @@ func parse(arguments []string) (daemon.Config, error) {
 	if err != nil {
 		return daemon.Config{}, err
 	}
-	set := flag.NewFlagSet("agentbus", flag.ContinueOnError)
+	set := flag.NewFlagSet("sessionbus", flag.ContinueOnError)
 	configuration := daemon.Config{}
 	products := ""
 	set.StringVar(&configuration.SocketPath, "socket", socket, "unix socket path")

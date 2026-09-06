@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/sessionbus/internal/procinfo"
 )
 
 func TestQwenAdapterAdoptsExactDualOutputEvidence(t *testing.T) {

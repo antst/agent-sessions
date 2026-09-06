@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	federationpkg "github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/livepresence"
-	"github.com/antst/agent-sessions/internal/productruntime"
-	grokproduct "github.com/antst/agent-sessions/internal/products/grok"
-	ompproduct "github.com/antst/agent-sessions/internal/products/omp"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
+	federationpkg "github.com/antst/sessionbus/internal/federation"
+	"github.com/antst/sessionbus/internal/livepresence"
+	"github.com/antst/sessionbus/internal/productruntime"
+	grokproduct "github.com/antst/sessionbus/internal/products/grok"
+	ompproduct "github.com/antst/sessionbus/internal/products/omp"
 )
 
 type passiveMessageTestDriver struct{}

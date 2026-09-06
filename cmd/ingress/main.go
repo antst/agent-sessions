@@ -10,9 +10,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/livepresence"
-	"github.com/antst/agent-sessions/internal/stateroot"
+	"github.com/antst/sessionbus/internal/federation"
+	"github.com/antst/sessionbus/internal/livepresence"
+	"github.com/antst/sessionbus/internal/stateroot"
 )
 
 type options struct {

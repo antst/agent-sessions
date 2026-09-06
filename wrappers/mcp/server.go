@@ -10,10 +10,10 @@ import (
 	"slices"
 	"sync"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
 )
 
-const ToolName, ProtocolVersion = "agent_sessions", "2025-06-18"
+const ToolName, ProtocolVersion = "sessionbus", "2025-06-18"
 
 type PreparedBackend interface {
 	Prepare(context.Context, json.RawMessage) error
@@ -123,7 +123,7 @@ func (s *Server) handle(ctx context.Context, caller *sessionkit.Caller, body []b
 func (s *Server) call(ctx context.Context, caller *sessionkit.Caller, request request) (any, *failure) {
 	switch request.Method {
 	case "initialize":
-		return map[string]any{"protocolVersion": ProtocolVersion, "capabilities": map[string]any{"tools": map[string]any{}}, "serverInfo": map[string]string{"name": "agent-sessions", "version": "unified"}}, nil
+		return map[string]any{"protocolVersion": ProtocolVersion, "capabilities": map[string]any{"tools": map[string]any{}}, "serverInfo": map[string]string{"name": "sessionbus", "version": "unified"}}, nil
 	case "tools/list":
 		return map[string]any{"tools": []any{toolDefinition()}}, nil
 	case "tools/call":
@@ -166,7 +166,7 @@ func (s *Server) callTool(ctx context.Context, caller *sessionkit.Caller, raw js
 	}
 	var structured any
 	if !json.Valid(result) || json.Unmarshal(result, &structured) != nil {
-		return nil, &failure{Code: -32603, Message: "Agentbus backend returned an invalid response"}
+		return nil, &failure{Code: -32603, Message: "Sessionbus backend returned an invalid response"}
 	}
 	return map[string]any{"content": []map[string]string{{"type": "text", "text": string(result)}}, "structuredContent": structured}, nil
 }
@@ -214,11 +214,11 @@ func (s *Server) write(output io.Writer, id json.RawMessage, result any, failed 
 func toolDefinition() map[string]any {
 	return map[string]any{
 		"name":        ToolName,
-		"description": "Use Agent Sessions to list or message peers and control product lanes.",
+		"description": "Use Sessionbus to list or message peers and control product lanes.",
 		"inputSchema": map[string]any{
 			"type": "object", "additionalProperties": false, "required": []string{"action"},
 			"properties": map[string]any{
-				"action":    map[string]any{"type": "string", "enum": sessionkit.Actions, "description": "Exact Agent Sessions operation."},
+				"action":    map[string]any{"type": "string", "enum": sessionkit.Actions, "description": "Exact Sessionbus operation."},
 				"arguments": map[string]any{"type": "object", "additionalProperties": true, "description": "Arguments in the exact shape for the selected operation."},
 			},
 		},

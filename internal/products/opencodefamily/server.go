@@ -13,8 +13,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/antst/agent-sessions/internal/productruntime"
-	"github.com/antst/agent-sessions/internal/productserver"
+	"github.com/antst/sessionbus/internal/productruntime"
+	"github.com/antst/sessionbus/internal/productserver"
 )
 
 type ServerOpenRequest struct {

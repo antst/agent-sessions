@@ -9,7 +9,7 @@ import (
 
 func TestStartSweepsStaleSocketsAndLeavesLiveOnes(t *testing.T) {
 	directory := t.TempDir()
-	socket := filepath.Join(directory, "agentbus.sock")
+	socket := filepath.Join(directory, "sessionbus.sock")
 	lanes := filepath.Join(directory, "lanes")
 	if err := os.Mkdir(lanes, 0o700); err != nil {
 		t.Fatal(err)

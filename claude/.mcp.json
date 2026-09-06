@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "agent_sessions": {
+    "sessionbus": {
       "command": "claude-peer",
       "args": [
         "mcp"

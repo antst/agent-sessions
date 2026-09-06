@@ -8,10 +8,10 @@ import (
 	"sort"
 	"strings"
 
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	federationpkg "github.com/antst/agent-sessions/internal/federation"
-	"github.com/antst/agent-sessions/internal/livepresence"
-	"github.com/antst/agent-sessions/internal/productruntime"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
+	federationpkg "github.com/antst/sessionbus/internal/federation"
+	"github.com/antst/sessionbus/internal/livepresence"
+	"github.com/antst/sessionbus/internal/productruntime"
 )
 
 type connectorToolCall struct {

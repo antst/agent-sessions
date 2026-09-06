@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/releaseevidence"
+	"github.com/antst/sessionbus/internal/releaseevidence"
 )
 
 // Verdict is the exact outcome of one acceptance cell execution.

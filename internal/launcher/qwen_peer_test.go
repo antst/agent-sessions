@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/qwenprofile"
+	"github.com/antst/sessionbus/internal/qwenprofile"
 )
 
 const testQwenSessionID = "12345678-1234-4234-8234-123456789abc"

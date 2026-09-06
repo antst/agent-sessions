@@ -29,7 +29,7 @@ when agents on separate build hosts need one shared collaboration surface.
 Install from a source checkout:
 
 ```sh
-git clone https://github.com/antst/agent-sessions.git
+git clone https://github.com/antst/sessionbus.git
 cd agent-sessions
 make install
 ```

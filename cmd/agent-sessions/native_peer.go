@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/livepresence"
+	"github.com/antst/sessionbus/internal/livepresence"
 )
 
 type launcherHeldChild struct {

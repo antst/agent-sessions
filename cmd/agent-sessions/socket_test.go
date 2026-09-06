@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/testutil"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
+	"github.com/antst/sessionbus/internal/testutil"
 )
 
 // shortDaemonTestRoot avoids testing.T.TempDir's test-name component in paths

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/bus/internal/daemon"
-	sdk "github.com/antst/agent-sessions/bus/sdk/go"
+	"github.com/antst/sessionbus/bus/internal/daemon"
+	sdk "github.com/antst/sessionbus/bus/sdk/go"
 )
 
 type runResult struct {
@@ -19,7 +19,7 @@ type runResult struct {
 }
 
 func TestMain(m *testing.M) {
-	if os.Getenv("AGENTBUS_LAUNCH_TOKEN") != "" {
+	if os.Getenv("SESSIONBUS_LAUNCH_TOKEN") != "" {
 		main()
 		os.Exit(0)
 	}
@@ -64,7 +64,7 @@ func TestRunDeliveryInterruptAndCall(t *testing.T) {
 		return nil
 	}
 	for _, body := range []string{"first", "second"} {
-		receipt, err := product.Deliver(context.Background(), sdk.DeliveryRequest{Body: body})
+		receipt, err := product.Deliver(context.Background(), sdk.DeliveryRequest{Body: body}, nil)
 		if err != nil || receipt.Disposition != "queued_for_next_turn" {
 			t.Fatalf("idle receipt = %#v, %v", receipt, err)
 		}
@@ -88,7 +88,7 @@ func TestRunDeliveryInterruptAndCall(t *testing.T) {
 		terminal <- runResult{result, err}
 	}()
 	waitActive(t, product)
-	receipt, err := product.Deliver(context.Background(), sdk.DeliveryRequest{Body: "during"})
+	receipt, err := product.Deliver(context.Background(), sdk.DeliveryRequest{Body: "during"}, nil)
 	if err != nil || receipt.Disposition != "injected" {
 		t.Fatalf("active receipt = %#v, %v", receipt, err)
 	}
@@ -104,7 +104,7 @@ func TestRunDeliveryInterruptAndCall(t *testing.T) {
 	if err != nil || result.Outcome != "interrupted" || result.Result != "during" {
 		t.Fatalf("interrupted result = %#v, %v", result, err)
 	}
-	if err = product.Close(context.Background()); err != nil {
+	if err = product.Close(context.Background(), sdk.SessionCloseRequest{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -119,13 +119,13 @@ func TestInstalledReferenceWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
-	socket := filepath.Join(directory, "agentbus.sock")
+	socket := filepath.Join(directory, "sessionbus.sock")
 	service, err := daemon.Start(daemon.Config{SocketPath: socket, TablePath: filepath.Join(directory, "sessions")})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer service.Close()
-	t.Setenv("AGENTBUS_SOCKET", socket)
+	t.Setenv("SESSIONBUS_SOCKET", socket)
 	peer, err := sdk.ConnectPeer(sdk.PeerIdentity{Product: "fixture", SessionID: "caller", Name: "caller", Groups: []string{"shared"}, Info: map[string]any{}}, func(context.Context, sdk.PeerIdentity, sdk.DeliveryRequest) (sdk.DeliveryReceipt, error) {
 		return sdk.DeliveryReceipt{Disposition: "injected"}, nil
 	})

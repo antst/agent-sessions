@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
 )
 
 type daemonGenerationSource func(context.Context) (uint64, error)

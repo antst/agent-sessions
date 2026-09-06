@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/pathidentity"
-	"github.com/antst/agent-sessions/internal/socketpath"
+	"github.com/antst/sessionbus/internal/pathidentity"
+	"github.com/antst/sessionbus/internal/socketpath"
 )
 
 // ControlServer serves one fixed same-user local control endpoint.

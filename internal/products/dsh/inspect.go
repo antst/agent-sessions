@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/envutil"
-	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/sessionbus/internal/envutil"
+	"github.com/antst/sessionbus/internal/productruntime"
 )
 
 type SessionCandidate struct {
