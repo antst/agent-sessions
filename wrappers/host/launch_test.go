@@ -27,19 +27,19 @@ func TestLaunchTokenDigestLength(t *testing.T) {
 
 func TestInteractivePlan(t *testing.T) {
 	plan, err := InteractivePlan("example", []string{
-		"--model", "-g", "-g", "project", "--group=review", "--", "-g", "literal",
+		"--model", "-g", "-g", "project", "--group=review", "--peer-name", "chosen", "--", "-g", "literal",
 	}, []string{"PATH=/bin", GroupsEnv + "=[\"old\"]"}, PeerIdentity{SessionID: "id", Name: "name"}, func(option string) bool { return option == "--model" })
 	must(t, err)
 	wantArgs := []string{"--model", "-g", "--", "-g", "literal"}
 	check(t, reflect.DeepEqual(plan.Args, wantArgs), "args = %q", plan.Args)
 	joined := "\n" + strings.Join(plan.Env, "\n") + "\n"
-	for _, want := range []string{"\nAGENTBUS_SESSION_ID=id\n", "\nAGENTBUS_SESSION_NAME=name\n", "\nAGENTBUS_GROUPS=[\"project\",\"review\"]\n"} {
+	for _, want := range []string{"\nAGENTBUS_SESSION_ID=id\n", "\nAGENTBUS_SESSION_NAME=chosen\n", "\nAGENTBUS_GROUPS=[\"project\",\"review\"]\n"} {
 		check(t, strings.Contains(joined, want), "environment missing %q: %s", want, joined)
 	}
 }
 
 func TestInteractivePlanErrors(t *testing.T) {
-	for _, arguments := range [][]string{{"-g"}, {"--group="}} {
+	for _, arguments := range [][]string{{"-g"}, {"--group="}, {"-n"}, {"--peer-name="}} {
 		_, err := InteractivePlan("product", arguments, nil, PeerIdentity{}, nil)
 		check(t, err != nil, "arguments %q succeeded", arguments)
 	}
