@@ -1,6 +1,7 @@
 package host
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"slices"
@@ -38,6 +39,7 @@ type Rendered string
 type deliverySlot struct {
 	body    Rendered
 	pending bool
+	order   uint64
 }
 
 // Handoff owns the FIFO and its boundary with native-turn creation.
@@ -46,6 +48,7 @@ type Handoff struct {
 	queue     []*deliverySlot
 	active    []*deliverySlot
 	queueSize int
+	nextOrder uint64
 }
 
 func (h *Handoff) Run(ctx context.Context, run *sessionkit.Run, input string, start StartTurn) (sessionkit.TurnResult, error) {
@@ -72,7 +75,7 @@ func (h *Handoff) Run(ctx context.Context, run *sessionkit.Run, input string, st
 	}
 	if err != nil {
 		interrupted := run.Interrupted()
-		h.queue = append(h.queue, h.active...)
+		h.queue = mergeSlots(h.queue, h.active)
 		h.active = nil
 		h.recount()
 		h.mu.Unlock()
@@ -106,7 +109,6 @@ func (h *Handoff) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
-	slot := &deliverySlot{body: Rendered(rendered)}
 	h.mu.Lock()
 	added := len(rendered)
 	if len(h.queue)+len(h.active) > 0 {
@@ -116,6 +118,8 @@ func (h *Handoff) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 		h.mu.Unlock()
 		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: ErrQueueFull.Error()}, nil
 	}
+	slot := &deliverySlot{body: Rendered(rendered), order: h.nextOrder}
+	h.nextOrder++
 	h.active = append(h.active, slot)
 	h.queueSize += added
 	h.mu.Unlock()
@@ -145,7 +149,7 @@ func (h *Handoff) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 		return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
 	case NotInjected:
 		h.active = slices.Delete(h.active, index, index+1)
-		h.queue = append(h.queue, slot)
+		h.queue = mergeSlots(h.queue, []*deliverySlot{slot})
 		return sessionkit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
 	default:
 		h.active = slices.Delete(h.active, index, index+1)
@@ -173,10 +177,16 @@ func (h *Handoff) Claim() []Rendered {
 
 func (h *Handoff) Finish() {
 	h.mu.Lock()
-	h.queue = append(append([]*deliverySlot(nil), h.active...), h.queue...)
+	h.queue = mergeSlots(h.queue, h.active)
 	h.active = nil
 	h.recount()
 	h.mu.Unlock()
+}
+
+func mergeSlots(a, b []*deliverySlot) []*deliverySlot {
+	merged := append(slices.Clone(a), b...)
+	slices.SortFunc(merged, func(a, b *deliverySlot) int { return cmp.Compare(a.order, b.order) })
+	return merged
 }
 
 func (h *Handoff) recount() {
