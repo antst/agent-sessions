@@ -17,6 +17,7 @@
 - The 0.4.0 connector takes Codex identity from MCP `_meta.threadId`, never from tool arguments. — verified: 0.4.0 — source: `cmd/agent-sessions/connector.go:247`
 - The 0.4.0 connector delivers to an active interactive thread with `turn/steer` and wakes an idle thread with `turn/start`. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:479`
 - The 0.4.0 launcher starts `codex app-server daemon` and runs the TUI through `--remote unix://<control-socket>`. — verified: 0.4.0 — source: `internal/launcher/codex_peer.go:129`
+- Informational and non-TUI subcommand invocations pass through with their original argv and environment; `resume` and `fork` are coordinated TUI selectors and receive the wrapper-owned `--remote` address. — verified: 0.4.0 — source: `internal/launcher/codex_peer.go:122`
 - The Codex interactive option table records value-taking `--remote`, `--remote-auth-token-env`, `-i`/`--image`, `--local-provider`, and `--add-dir`; a wrapper must preserve their value arity when projecting its own flags. — verified: 0.4.0 — source: `internal/launcher/options.go:18`
 - The 0.4.0 lane validates effective approval after `thread/start`, validates effective cwd and approval after `thread/resume`, and applies approval and sandbox through `thread/settings/update`. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:224`
 - The 0.4.0 lane disables `features.code_mode_host` so headless tool calls stay in the App Server. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:713`

@@ -68,29 +68,27 @@ func namePart(name string) (string, error) {
 }
 
 func InteractivePlan(arguments, environment []string) (host.ExecPlan, bool, error) {
-	originalEnvironment := environment
-	if !slices.ContainsFunc(environment, func(value string) bool { return strings.HasPrefix(value, host.SocketEnv+"=") }) {
-		environment = append(environment, host.SocketEnv+"="+sessionkit.Socket())
-	}
-	passthrough, remote := false, false
-	plan, err := host.InteractivePlan("codex", arguments, environment, host.PeerIdentity{}, func(argument string) bool {
+	remote := false
+	plan, passthrough, err := host.ClassifiedInteractivePlan("codex", arguments, environment, host.PeerIdentity{}, func(argument string) bool {
 		key, _, attached := strings.Cut(argument, "=")
 		if key == "--remote" || key == "--remote-auth-token-env" {
 			remote = true
 		}
-		if argument == "-h" || argument == "--help" || argument == "-V" || argument == "--version" || codexSubcommand(argument) {
-			passthrough = true
-		}
 		return !attached && codexOptionTakesValue(key)
+	}, func(argument string) bool {
+		return argument == "-h" || argument == "--help" || argument == "-V" || argument == "--version" || codexSubcommand(argument)
 	})
 	if err != nil {
 		return host.ExecPlan{}, false, err
 	}
 	if passthrough {
-		return host.ExecPlan{Path: "codex", Args: arguments, Env: originalEnvironment}, false, nil
+		return plan, false, nil
 	}
 	if remote {
 		return host.ExecPlan{}, false, errors.New("caller-controlled --remote options are not supported")
+	}
+	if !slices.ContainsFunc(plan.Env, func(value string) bool { return strings.HasPrefix(value, host.SocketEnv+"=") }) {
+		plan.Env = append(plan.Env, host.SocketEnv+"="+sessionkit.Socket())
 	}
 	socket, err := appServerSocket()
 	if err != nil {

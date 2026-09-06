@@ -81,13 +81,19 @@ func TestInteractivePlanRemoteAndPassthrough(t *testing.T) {
 		}
 	}
 	for _, arguments := range [][]string{
-		{"--help", "-g", "literal", "--peer-name", "literal"},
-		{"exec", "-g", "literal"},
+		{"--help", "--peer-name="},
+		{"exec", "-g"},
 	} {
 		environment := []string{"PATH=/bin"}
 		plan, coordinated, err := InteractivePlan(arguments, environment)
 		if err != nil || coordinated || !slices.Equal(plan.Args, arguments) || !slices.Equal(plan.Env, environment) {
 			t.Fatalf("passthrough = %#v, %v", plan, err)
+		}
+	}
+	for _, selector := range []string{"resume", "fork"} {
+		plan, coordinated, err := InteractivePlan([]string{selector, "id"}, nil)
+		if err != nil || !coordinated || !slices.Equal(plan.Args[2:], []string{selector, "id"}) {
+			t.Fatalf("%s: %#v, %v", selector, plan, err)
 		}
 	}
 	for _, argument := range []string{"-i", "--image=x", "--local-provider", "--add-dir=x"} {
