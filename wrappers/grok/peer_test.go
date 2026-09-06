@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/antst/agent-sessions/wrappers/host"
+	"golang.org/x/sys/unix"
 )
 
 func TestInteractivePlan(t *testing.T) {
@@ -177,12 +178,15 @@ func TestPeerShutdownKillsItsProcessGroup(t *testing.T) {
 	var pid int
 	_, err = fmt.Sscan(string(body), &pid)
 	must(t, err)
+	pidfd, err := unix.PidfdOpen(pid, 0)
+	must(t, err)
+	defer unix.Close(pidfd)
 	backend.Shutdown()
 	deadline := time.Now().Add(3 * time.Second)
-	for processRunning(pid) && time.Now().Before(deadline) {
+	for processRunning(t, pidfd) && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	check(t, !processRunning(pid), "peer descendant %d survived group shutdown", pid)
+	check(t, !processRunning(t, pidfd), "peer descendant %d survived group shutdown", pid)
 }
 
 type hello struct {
@@ -258,11 +262,10 @@ func count(values []string, target string) int {
 	return total
 }
 
-func processRunning(pid int) bool {
-	body, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return false
-	}
-	fields := strings.Fields(string(body))
-	return len(fields) < 3 || fields[2] != "Z"
+func processRunning(t *testing.T, pidfd int) bool {
+	t.Helper()
+	poll := []unix.PollFd{{Fd: int32(pidfd), Events: unix.POLLIN}}
+	count, err := unix.Poll(poll, 0)
+	must(t, err)
+	return count == 0
 }
