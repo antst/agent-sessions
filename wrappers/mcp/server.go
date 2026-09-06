@@ -19,6 +19,12 @@ type Backend interface {
 	Call(context.Context, string, any) (json.RawMessage, error)
 }
 
+type BackendFunc func(context.Context, string, any) (json.RawMessage, error)
+
+func (call BackendFunc) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	return call(ctx, method, params)
+}
+
 type Server struct {
 	Backend  Backend
 	mu       sync.Mutex
