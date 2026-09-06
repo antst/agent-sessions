@@ -296,8 +296,8 @@ at most once per run, and later interrupt requests return `{}`.
 
 Either a caller sends `session.close` to the daemon or the daemon sends it to
 the addressed lane. The request has optional `forget`, default false. The
-worker asks the product to close and returns `{}` when
-it does. One constant `closeBound = 10s`, measured from the daemon sending this
+worker asks the product to close and always returns `{}`; a product cleanup
+error is one quoted line on worker stderr. One constant `closeBound = 10s`, measured from the daemon sending this
 request, bounds the entire close path. A result before the bound makes the
 daemon close the socket, send TERM, and reap; expiry makes it close the socket,
 send KILL, and reap with no second waiting period. The spawn/open transaction
@@ -436,9 +436,10 @@ The closed method authority therefore shrinks from twenty-one methods to eleven.
 ### 1.4 Error authority
 
 Every correlated failure uses exactly one numeric JSON-RPC code and symbolic
-message from this table. Kits match the code, never free-form text. Only
-`spawn_failed` has `data`: the closed object
-`{exit_code?:integer,stderr_tail:[string]}`. `exit_code` is absent when process
+message from this table. Kits match the code, never free-form text.
+`spawn_failed` has the closed `data` object
+`{exit_code?:integer,stderr_tail:[string]}`; `internal` has a non-empty string
+containing the daemon error. No other code has `data`. `exit_code` is absent when process
 creation itself failed, because no child existed from which to obtain one. If an
 invalid frame has no valid request ID, the daemon cannot correlate a response
 and closes the connection without writing one.
@@ -461,7 +462,7 @@ and closes the connection without writing one.
 | `-32013` | `name_taken` | New `lane.spawn` when another row on that host already holds the requested composed name. |
 | `-32014` | `unknown_host` | `lane.describe` or new `lane.spawn` naming an unfederated `host`, or any canonical identity input whose host part is neither local nor connected. |
 | `-32015` | `forward_lost` | A one-hop federated request whose transport ends before its response; the request may or may not have been applied on the target host and is never retried. |
-| `-32603` | `internal` | A durable row-file operation fails after directory cleanup, or a worker interrupt/close callback fails; it has no other use. |
+| `-32603` | `internal` | The daemon's own shutdown or durable row-file operation fails; `data` carries its error text. A product callback never raises this code. |
 
 ## 2. Daemon
 
@@ -744,7 +745,9 @@ limits. A row removed by a preceding `forget` is `unknown_session`.
 
 On the first admitted `session.close`, the lane owner marks the row claimed and
 sends exactly one worker close. The worker kit interrupts and awaits any current
-run. A successful close response is held in the caller owner only while that
+run. A product cleanup error is written as one quoted worker-stderr line and the
+worker still responds `{}`; daemon cleanup and the offline resumable row do not
+change. A successful close response is held in the caller owner only while that
 same target still has a run reply outstanding; a busy close is an admission
 failure and is never held. When no same-target run reply remains pending, all
 eligible held successful closes are released. The run terminal is written
@@ -1104,9 +1107,9 @@ Callback failures map exactly once:
 | --- | --- |
 | `open` | `spawn_failed` with `stderr_tail:[message]`; the daemon passes it through unchanged. |
 | `run` | Terminal `{outcome:"failed",result:message}`; a run callback never returns an RPC error. |
-| `interrupt` | `internal`. |
+| `interrupt` | `{}`; the callback message is one quoted line on worker stderr, and the run terminal remains the stopping truth. |
 | `deliver` | Rejected receipt with the callback message as `reason`. |
-| `close` | `internal`, followed by ordinary kit exit. |
+| `close` | `{}` followed by ordinary kit exit; the callback message is one quoted line on worker stderr. |
 
 The worker kit reads `AGENTBUS_SOCKET`,
 `AGENTBUS_LAUNCH_TOKEN`, and the optional `AGENTBUS_LOCAL_KEY`;
@@ -1770,7 +1773,7 @@ check.
 | Daemon lane actors, registries, projections, collectors, archives, timers, product dispatch, and argv reparse | Router/table tests drive the eleven methods over a real connection and assert only rows, current pointers, pending calls, and supervisor ownership. |
 | Presence, messaging, federation, roster, names, and notices | Daemon visibility/resolution tests plus the federation gate; no test constructs a private actor or product driver. |
 | Product lane drivers and peer launchers | Each Section 4 wrapper test drives its six callbacks and exact native transcript; the shared wrapper-host unit suite proves the FIFO cap of 64 deliveries / 1 MiB rendered bytes, overflow `queue_full`, stale lock files do not block, a live inherited flock survives wrapper death until the child exits, interrupt at native-turn creation, first-turn/terminal delivery handoff races, and child death with a non-empty FIFO invents no receipt while leaving the row resumable; peer exec-plan tests stop at product config and never claim socket ownership. |
-| Go/JavaScript lifecycle duplication | The one 17-row fixture table runs unchanged through both native kits and the reference worker. |
+| Go/JavaScript lifecycle duplication | The one 19-row fixture table runs unchanged through both native kits and the reference worker. |
 | Connector and plugin tool tests | Caller-kit conformance C1-C9 through the installed peer MCP/plugin entry, with product-private transport tested only at its local boundary. |
 | Packaging and release projections | Package tests assert one schema/kit projection, correct peer and lane entry forms, no deleted compatibility artifact, and byte-identical installed assets. |
 | Protocol and design documentation | Generate `bus/docs/PROTOCOL.md` from Sections 1 and 3.1 verbatim, with this document as the sole source and `bus/internal/protocol` as the sole embedded schema/fixture authority re-exported by the public SDKs. Delete every superseded lane-convergence, presence-supersession, adapter-boundary, and DSH-adapter note under `docs/designs`; do not retain archived or paraphrased protocol authorities. |
