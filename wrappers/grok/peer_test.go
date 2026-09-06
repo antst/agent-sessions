@@ -16,8 +16,8 @@ import (
 	"syscall"
 	"testing"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
 	"golang.org/x/sys/unix"
 )
 
@@ -45,7 +45,7 @@ func TestInteractivePlan(t *testing.T) {
 	}
 	for _, arguments := range [][]string{{"--single", "prompt"}, {"-pprompt"}, {"--prompt-file", "prompt.txt"}, {"--prompt-json", `[]`}, {"--output-format", "json"}, {"--json-schema", `{}`}, {"--max-turns", "1"}, {"--include-partial-messages"}} {
 		_, err = InteractivePlan(arguments, nil)
-		check(t, err != nil && strings.Contains(err.Error(), "Agentbus Grok lane"), "headless surface accepted: %#v / %v", arguments, err)
+		check(t, err != nil && strings.Contains(err.Error(), "Sessionbus Grok lane"), "headless surface accepted: %#v / %v", arguments, err)
 	}
 	plan, err = InteractivePlan([]string{"sessions", "list"}, []string{"PATH=/bin"})
 	must(t, err)
@@ -58,7 +58,7 @@ func TestInteractivePlan(t *testing.T) {
 
 func TestProductHelperOwnsPeerAndLazilyObserves(t *testing.T) {
 	root := t.TempDir()
-	socket := filepath.Join(root, "agentbus.sock")
+	socket := filepath.Join(root, "sessionbus.sock")
 	server, hellos := fakeDaemon(t, socket)
 	defer server.Close()
 	t.Setenv(host.SocketEnv, socket)
@@ -120,7 +120,7 @@ func TestProductHelperOwnsPeerAndLazilyObserves(t *testing.T) {
 func TestProductSessionIDsCreateDistinctPeers(t *testing.T) {
 	for index, id := range []string{testSessionID, "01a07800-94fb-7b12-b531-2f0509e033f1"} {
 		root := t.TempDir()
-		socket := filepath.Join(root, "agentbus.sock")
+		socket := filepath.Join(root, "sessionbus.sock")
 		server, hellos := fakeDaemon(t, socket)
 		t.Setenv(host.SocketEnv, socket)
 		environment := setEnvironment(setEnvironment(os.Environ(), grokSessionIDEnv, id), grokLeaderSocketEnv, filepath.Join(root, "leader.sock"))
@@ -144,7 +144,7 @@ func TestPeerHelperRequiresProductIdentity(t *testing.T) {
 func TestInteractiveLauncherOwnsLeaderHoldAndTUI(t *testing.T) {
 	root := shortRoot(t)
 	recordPath := filepath.Join(root, "record")
-	socket := filepath.Join(root, "agentbus.sock")
+	socket := filepath.Join(root, "sessionbus.sock")
 	t.Setenv(host.SocketEnv, socket)
 	t.Setenv("GROK_TEST_RECORD", recordPath)
 	started := filepath.Join(root, "interactive-started")
@@ -165,7 +165,7 @@ func TestInteractiveLauncherOwnsLeaderHoldAndTUI(t *testing.T) {
 	check(t, len(clients) == 1 && slices.Equal(peerClientMethods(frames, clients[0]), []string{"initialize", "authenticate"}), "startup hold was not the only quiet ACP client: %#v", frames)
 	check(t, countFrames(frames, "_x.ai/sessions/list") == 0, "launcher queried the roster")
 	check(t, containsStartEnv(frames, "leader", host.SocketEnv, socket) && containsStartEnv(frames, "leader", host.GroupsEnv, `["team"]`), "leader did not inherit helper bus identity")
-	check(t, !containsStart(frames, "AGENTBUS_LANE_SOCKET"), "interactive launcher published a private action endpoint")
+	check(t, !containsStart(frames, "SESSIONBUS_LANE_SOCKET"), "interactive launcher published a private action endpoint")
 	leaderPidfd, holdPidfd, tuiPidfd := interactivePidfd(t, leaderPID), interactivePidfd(t, holdPID), interactivePidfd(t, tuiPID)
 	defer unix.Close(leaderPidfd)
 	defer unix.Close(holdPidfd)
@@ -181,7 +181,7 @@ func TestInteractiveLauncherOwnsLeaderHoldAndTUI(t *testing.T) {
 func TestStartupHoldExitStopsInteractiveOwner(t *testing.T) {
 	root := shortRoot(t)
 	recordPath := filepath.Join(root, "record")
-	t.Setenv(host.SocketEnv, filepath.Join(root, "agentbus.sock"))
+	t.Setenv(host.SocketEnv, filepath.Join(root, "sessionbus.sock"))
 	t.Setenv("GROK_TEST_RECORD", recordPath)
 	tuiPID, leaderPID, holdPID := filepath.Join(root, "tui.pid"), filepath.Join(root, "leader.pid"), filepath.Join(root, "hold.pid")
 	release := filepath.Join(root, "release-hold")
@@ -207,7 +207,7 @@ func TestStartupHoldExitStopsInteractiveOwner(t *testing.T) {
 
 func TestInteractiveLauncherReturnsProductExit(t *testing.T) {
 	root := shortRoot(t)
-	t.Setenv(host.SocketEnv, filepath.Join(root, "agentbus.sock"))
+	t.Setenv(host.SocketEnv, filepath.Join(root, "sessionbus.sock"))
 	leaderPID, holdPID := filepath.Join(root, "leader.pid"), filepath.Join(root, "hold.pid")
 	interactivePID, release := filepath.Join(root, "interactive.pid"), filepath.Join(root, "release")
 	t.Setenv("GROK_TEST_LEADER_PID", leaderPID)
@@ -253,7 +253,7 @@ func TestExactRosterAuthority(t *testing.T) {
 
 func TestPeerShutdownKillsItsObserverProcessGroup(t *testing.T) {
 	root := t.TempDir()
-	socket := filepath.Join(root, "agentbus.sock")
+	socket := filepath.Join(root, "sessionbus.sock")
 	server, hellos := fakeDaemon(t, socket)
 	defer server.Close()
 	t.Setenv(host.SocketEnv, socket)

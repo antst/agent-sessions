@@ -5,12 +5,12 @@ description: Start, collect, message, resume, and archive durable Codex, Claude,
 
 # Agent lanes
 
-Use the attested `agent_sessions.lane` MCP tool to delegate from Grok without attaching a second
+Use the attested `sessionbus.lane` MCP tool to delegate from Grok without attaching a second
 driver to this Grok conversation. It executes the exact packaged runtime, retains this Grok peer as
 the lifecycle and communication parent, and returns `exit`, `stdout`, and `stderr`. Set `product` to
 `codex`, `claude`, `grok`, or `qwen`, put the lifecycle verb in `command`, pass native trailing arguments in
 `arguments`, and pass briefings as `input`. Add `host` for federation. Do not shell-execute a lane
-launcher when the MCP tool is available; every lifecycle example below is an `agent_sessions.lane`
+launcher when the MCP tool is available; every lifecycle example below is an `sessionbus.lane`
 argument object.
 
 Example:
@@ -74,7 +74,7 @@ Report outcome and exit. A wait timeout exits 124 without interrupting the worke
 
 ## Message, follow up, and retire
 
-Use the installed `agent_sessions` tools to send ordinary messages to a lane's current peer name or
+Use the installed `sessionbus` tools to send ordinary messages to a lane's current peer name or
 session identity. A terminal pointer still requires `wait`; do not answer it conversationally.
 
 ```json

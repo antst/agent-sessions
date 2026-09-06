@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antst/agent-sessions/wrappers/host"
+	"github.com/antst/sessionbus/wrappers/host"
 )
 
 func TestLaneModeRejectsArguments(t *testing.T) {
@@ -16,7 +16,7 @@ func TestLaneModeRejectsArguments(t *testing.T) {
 }
 
 func TestMCPRequiresManagedLauncher(t *testing.T) {
-	t.Setenv("AGENTBUS_LANE_SOCKET", "")
+	t.Setenv("SESSIONBUS_LANE_SOCKET", "")
 	err := runMCP(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "start Grok with grok-peer") {
 		t.Fatalf("runMCP = %v", err)

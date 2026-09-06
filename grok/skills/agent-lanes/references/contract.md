@@ -10,5 +10,5 @@ fields, and has no transcript archive API; lane archive retires the worker while
 Claude session resumable. Grok owns one ACP driver, persists its native UUID, and uses bridge-owned
 archive before exact `session/load` resume.
 
-One collector owns a lane result cursor. Resume refuses uncollected debt. Ordinary Agent Sessions
+One collector owns a lane result cursor. Resume refuses uncollected debt. Ordinary Sessionbus
 messages wake or steer live workers, but a terminal notification is only a collection pointer.

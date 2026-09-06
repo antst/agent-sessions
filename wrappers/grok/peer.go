@@ -14,8 +14,8 @@ import (
 	"sync"
 	"syscall"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
 )
 
 type peerSession struct {
@@ -57,7 +57,7 @@ func NewPeerBackend(ctx context.Context, environment []string) (*PeerBackend, er
 	}
 	groups := []string{}
 	if raw := environmentValue(environment, host.GroupsEnv); raw != "" && json.Unmarshal([]byte(raw), &groups) != nil {
-		return nil, errors.New("AGENTBUS_GROUPS must be a JSON array")
+		return nil, errors.New("SESSIONBUS_GROUPS must be a JSON array")
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -75,7 +75,7 @@ func NewPeerBackend(ctx context.Context, environment []string) (*PeerBackend, er
 	case <-peer.Closed():
 		err = peer.Err()
 		if err == nil {
-			err = errors.New("Agentbus peer closed before ready")
+			err = errors.New("Sessionbus peer closed before ready")
 		}
 	case <-ctx.Done():
 		err = ctx.Err()
@@ -174,7 +174,7 @@ func peerIdentity(environment []string) (sessionkit.PeerIdentity, string, error)
 	}
 	groups := []string{}
 	if raw := environmentValue(environment, host.GroupsEnv); raw != "" && json.Unmarshal([]byte(raw), &groups) != nil {
-		return sessionkit.PeerIdentity{}, "", errors.New("AGENTBUS_GROUPS must be a JSON array")
+		return sessionkit.PeerIdentity{}, "", errors.New("SESSIONBUS_GROUPS must be a JSON array")
 	}
 	socket := first(environmentValue(environment, host.SocketEnv), sessionkit.Socket())
 	return sessionkit.PeerIdentity{Product: "grok", SessionID: id, Name: first(name, id), Groups: groups}, socket, nil
@@ -336,7 +336,7 @@ func InteractivePlan(arguments, environment []string) (host.ExecPlan, error) {
 		return host.ExecPlan{Path: "grok", Args: slices.Clone(arguments), Env: slices.Clone(environment)}, nil
 	}
 	if argument := grokHeadless(arguments); argument != "" {
-		return host.ExecPlan{}, fmt.Errorf("%s is headless; use an Agentbus Grok lane", argument)
+		return host.ExecPlan{}, fmt.Errorf("%s is headless; use an Sessionbus Grok lane", argument)
 	}
 	id, err := interactiveIdentity(arguments)
 	if err != nil {

@@ -14,9 +14,9 @@ import (
 	"syscall"
 	"time"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
-	"github.com/antst/agent-sessions/wrappers/mcp"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
+	"github.com/antst/sessionbus/wrappers/mcp"
 )
 
 const Product = "grok-peer"
@@ -188,7 +188,7 @@ func startLeader(socket, key, cwd, permission string, environment []string) (*na
 	_ = os.Remove(path)
 	arguments := []string{"--permission-mode", first(permission, "default")}
 	if permission == "" || permission == "default" {
-		arguments = append(arguments, "--allow", "MCPTool(agent_sessions__*)")
+		arguments = append(arguments, "--allow", "MCPTool(sessionbus__*)")
 	}
 	arguments = append(arguments, "agent", "leader", "--leader-socket", path, "--relay-on-demand", "--no-auto-update")
 	cmd := command("grok", arguments...)
@@ -466,7 +466,7 @@ func (p *Wrapper) watch(child *host.Child) {
 	closing, run, shutdown := p.closing, p.run, p.shutdown
 	p.mu.Unlock()
 	if err != nil && !closing {
-		fmt.Fprintf(os.Stderr, "agentbus: Grok primary exited: %v\n", err)
+		fmt.Fprintf(os.Stderr, "sessionbus: Grok primary exited: %v\n", err)
 	}
 	if !closing && shutdown != nil {
 		if run != nil {
@@ -523,7 +523,7 @@ func startNative(cmd *exec.Cmd) (*nativeProcess, error) {
 }
 
 func mcpServer(socket string) map[string]any {
-	return map[string]any{"name": "agent_sessions", "command": Product, "args": []string{"mcp"}, "env": []map[string]string{{"name": mcp.LaneSocketEnv, "value": socket}}}
+	return map[string]any{"name": "sessionbus", "command": Product, "args": []string{"mcp"}, "env": []map[string]string{{"name": mcp.LaneSocketEnv, "value": socket}}}
 }
 
 func leaderSocket(socket, key string) string {

@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # Grok starts this stdio MCP entry in both peer and lane mode.
-peer_binary="${AGENTBUS_GROK_PEER_BINARY:-${HOME}/.local/bin/grok-peer}"
+peer_binary="${SESSIONBUS_GROK_PEER_BINARY:-${HOME}/.local/bin/grok-peer}"
 if [[ ! -x "$peer_binary" ]]; then
-  printf 'agent-sessions: grok-peer is not installed\n' >&2
+  printf 'sessionbus: grok-peer is not installed\n' >&2
   exit 1
 fi
 exec "$peer_binary" mcp

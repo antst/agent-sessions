@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
 )
 
 const testSessionID = "01a075aa-7c7e-7f21-87dd-28c7b43f5bbc"
@@ -45,7 +45,7 @@ func fakeGrok() {
 	index := slices.Index(os.Args, "--")
 	arguments := os.Args[index+1:]
 	cwd, _ := os.Getwd()
-	record("START", map[string]any{"pid": os.Getpid(), "arguments": arguments, "cwd": cwd, "laneSocket": os.Getenv("AGENTBUS_LANE_SOCKET"), "environment": map[string]string{host.SocketEnv: os.Getenv(host.SocketEnv), host.GroupsEnv: os.Getenv(host.GroupsEnv)}})
+	record("START", map[string]any{"pid": os.Getpid(), "arguments": arguments, "cwd": cwd, "laneSocket": os.Getenv("SESSIONBUS_LANE_SOCKET"), "environment": map[string]string{host.SocketEnv: os.Getenv(host.SocketEnv), host.GroupsEnv: os.Getenv(host.GroupsEnv)}})
 	if path := os.Getenv("GROK_TEST_INTERACTIVE_STARTED"); path != "" && slices.Contains(arguments, "--leader") && !slices.Contains(arguments, "stdio") {
 		publishTestFile(path, []byte("started"))
 	}
@@ -236,7 +236,7 @@ func TestFreshLaneNativeLifecycle(t *testing.T) {
 	root, recordPath := t.TempDir(), filepath.Join(t.TempDir(), "record")
 	t.Setenv("GROK_TEST_RECORD", recordPath)
 	t.Setenv("GROK_TEST_RELEASE", filepath.Join(root, "release"))
-	p := New(filepath.Join(root, "agentbus.sock"), "single-use-token")
+	p := New(filepath.Join(root, "sessionbus.sock"), "single-use-token")
 	p.SetCall(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
 	request := sessionkit.OpenRequest{Name: "parent/grok@local", Groups: []string{"group"}, Open: sessionkit.OpenOptions{Cwd: root, PermissionMode: "bypassPermissions", Model: "grok-4.6", ReasoningEffort: "low", Arguments: []string{"--disable-web-search"}}}
 	opened, err := p.Open(context.Background(), request)
@@ -249,7 +249,7 @@ func TestFreshLaneNativeLifecycle(t *testing.T) {
 	check(t, allStartsContain(frames, "--no-auto-update"), "an ACP client omitted --no-auto-update")
 	check(t, countFrames(frames, "initialize") == 3, "authenticated startup hold absent: %d handshakes", countFrames(frames, "initialize"))
 	open := findFrame(frames, "session/new")
-	check(t, !strings.Contains(string(open), "--session-id") && strings.Contains(string(open), `"agent_sessions"`) && strings.Contains(string(open), `"AGENTBUS_LANE_SOCKET"`) && strings.Contains(string(open), `"yoloMode":true`), "fresh open = %s", open)
+	check(t, !strings.Contains(string(open), "--session-id") && strings.Contains(string(open), `"sessionbus"`) && strings.Contains(string(open), `"SESSIONBUS_LANE_SOCKET"`) && strings.Contains(string(open), `"yoloMode":true`), "fresh open = %s", open)
 	idle, err := p.Deliver(context.Background(), delivery("idle"))
 	must(t, err)
 	check(t, idle.Disposition == "queued_for_next_turn", "idle = %#v", idle)
@@ -272,7 +272,7 @@ func TestInterruptAndResume(t *testing.T) {
 	check(t, readWorkerResponse(t, reader, 3).Result != nil, "interrupt ack absent")
 	writeWorkerRequest(t, connection, 4, "session.close", map[string]string{"session_id": testSessionID + "@local"})
 	check(t, readWorkerResponse(t, reader, 4).Result != nil, "close response absent")
-	p := New(filepath.Join(root, "agentbus.sock"), "resume-token")
+	p := New(filepath.Join(root, "sessionbus.sock"), "resume-token")
 	p.SetCall(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
 	_, err := p.Open(context.Background(), sessionkit.OpenRequest{Name: "lane@local", ResumeSessionID: testSessionID, Open: sessionkit.OpenOptions{Cwd: root}})
 	must(t, err)
@@ -280,7 +280,7 @@ func TestInterruptAndResume(t *testing.T) {
 	load := findFrame(frames, "session/load")
 	check(t, strings.Contains(string(load), `"sessionId":"`+testSessionID+`"`), "resume load = %s", load)
 	check(t, !containsStart(frames, "--resume", testSessionID), "resume was selected in both argv and session/load")
-	check(t, containsStart(frames, "--permission-mode", "default", "--allow", "MCPTool(agent_sessions__*)"), "default leader MCP allow absent")
+	check(t, containsStart(frames, "--permission-mode", "default", "--allow", "MCPTool(sessionbus__*)"), "default leader MCP allow absent")
 	must(t, p.Close(context.Background()))
 }
 
@@ -288,7 +288,7 @@ func TestResumeIdentityFailureRepliesBeforeCleanup(t *testing.T) {
 	root := shortRoot(t)
 	t.Setenv("GROK_TEST_RECORD", filepath.Join(root, "record"))
 	t.Setenv("GROK_TEST_LOAD_ID", "different-product-id")
-	socket := filepath.Join(root, "agentbus.sock")
+	socket := filepath.Join(root, "sessionbus.sock")
 	listener, err := net.Listen("unix", socket)
 	must(t, err)
 	t.Setenv(host.SocketEnv, socket)
@@ -323,7 +323,7 @@ func TestOmittedCwdAndSocketReadiness(t *testing.T) {
 	must(t, os.WriteFile(regular, nil, 0o600))
 	check(t, !grokSocketReady(regular), "regular file reported ready")
 	t.Setenv("GROK_TEST_RECORD", recordPath)
-	p := New(filepath.Join(root, "agentbus.sock"), "cwd-token")
+	p := New(filepath.Join(root, "sessionbus.sock"), "cwd-token")
 	p.SetCall(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
 	_, err := p.Open(context.Background(), sessionkit.OpenRequest{Name: "lane@local"})
 	must(t, err)
@@ -351,7 +351,7 @@ func TestArgumentsAndHello(t *testing.T) {
 func TestCloseReturnsNativeErrorAfterCleanup(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GROK_TEST_CLOSE_ERROR", "1")
-	p := New(filepath.Join(root, "agentbus.sock"), "close-error")
+	p := New(filepath.Join(root, "sessionbus.sock"), "close-error")
 	p.SetCall(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
 	_, err := p.Open(context.Background(), sessionkit.OpenRequest{Name: "lane@local", Open: sessionkit.OpenOptions{Cwd: root}})
 	must(t, err)
@@ -362,7 +362,7 @@ func TestCloseReturnsNativeErrorAfterCleanup(t *testing.T) {
 
 func TestCancelledCloseJoinsNativeProcesses(t *testing.T) {
 	root := t.TempDir()
-	p := New(filepath.Join(root, "agentbus.sock"), "cancelled-close")
+	p := New(filepath.Join(root, "sessionbus.sock"), "cancelled-close")
 	p.SetCall(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
 	_, err := p.Open(context.Background(), sessionkit.OpenRequest{Name: "lane@local", Open: sessionkit.OpenOptions{Cwd: root}})
 	must(t, err)
@@ -486,7 +486,7 @@ type workerReader struct {
 }
 
 func startGrokWorker(t *testing.T, root string) (*Wrapper, net.Conn, *workerReader) {
-	socket := filepath.Join(root, "agentbus.sock")
+	socket := filepath.Join(root, "sessionbus.sock")
 	listener, err := net.Listen("unix", socket)
 	must(t, err)
 	t.Setenv(host.SocketEnv, socket)
