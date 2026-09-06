@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -22,7 +21,6 @@ type PeerBackend struct {
 	mu            sync.Mutex
 	prepareMu     sync.Mutex
 	app           *appClient
-	process       *exec.Cmd
 	processDone   chan error
 	peer          *sessionkit.Peer
 	caller        *sessionkit.Caller
@@ -45,7 +43,6 @@ func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
 	if err != nil {
 		return nil, err
 	}
-	b.process = command
 	b.app = newAppClient(input, output, nil, b.nativeFailure)
 	b.caller = sessionkit.NewCaller(b.Call)
 	go func() { b.processDone <- command.Wait() }()
@@ -72,15 +69,11 @@ func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
 }
 
 func startPeerApp() (*exec.Cmd, io.WriteCloser, io.Reader, error) {
-	home := strings.TrimSpace(os.Getenv("CODEX_HOME"))
-	if home == "" {
-		user, err := os.UserHomeDir()
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		home = filepath.Join(user, ".codex")
+	socket, err := appServerSocket()
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	command := exec.Command("codex", "app-server", "proxy", "--sock", filepath.Join(home, "app-server-control", "app-server-control.sock"))
+	command := exec.Command("codex", "app-server", "proxy", "--sock", socket)
 	command.Stderr = os.Stderr
 	command.Env = slices.DeleteFunc(os.Environ(), func(value string) bool {
 		key, _, _ := strings.Cut(value, "=")
@@ -230,13 +223,25 @@ func (b *PeerBackend) deliver(ctx context.Context, request sessionkit.DeliveryRe
 	if err = b.app.call(ctx, "thread/read", map[string]any{"threadId": id, "includeTurns": false}, &read); err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
-	status := statusType(read.Thread.Status)
+	if read.Thread.ID != id {
+		return sessionkit.DeliveryReceipt{}, fmt.Errorf("Codex App Server returned thread %q, expected %q", read.Thread.ID, id)
+	}
+	status, err := statusType(read.Thread.Status)
+	if err != nil {
+		return sessionkit.DeliveryReceipt{}, err
+	}
 	if status == "notLoaded" {
 		var resumed threadReply
 		if err = b.app.call(ctx, "thread/resume", map[string]any{"threadId": id, "excludeTurns": true}, &resumed); err != nil {
 			return sessionkit.DeliveryReceipt{}, err
 		}
-		status = statusType(resumed.Thread.Status)
+		if resumed.Thread.ID != id {
+			return sessionkit.DeliveryReceipt{}, fmt.Errorf("Codex App Server resumed thread %q, expected %q", resumed.Thread.ID, id)
+		}
+		status, err = statusType(resumed.Thread.Status)
+		if err != nil {
+			return sessionkit.DeliveryReceipt{}, err
+		}
 	}
 	if status == "active" {
 		var page struct {
@@ -265,19 +270,14 @@ func (b *PeerBackend) deliver(ctx context.Context, request sessionkit.DeliveryRe
 	return sessionkit.DeliveryReceipt{Disposition: "injected"}, err
 }
 
-func statusType(raw json.RawMessage) string {
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		if text == "inProgress" {
-			return "active"
-		}
-		return text
-	}
+func statusType(raw json.RawMessage) (string, error) {
 	var object struct {
 		Type string `json:"type"`
 	}
-	_ = json.Unmarshal(raw, &object)
-	return object.Type
+	if json.Unmarshal(raw, &object) != nil || !slices.Contains([]string{"active", "idle", "notLoaded"}, object.Type) {
+		return "", errors.New("Codex App Server returned an unsupported thread status")
+	}
+	return object.Type, nil
 }
 
 func (b *PeerBackend) Shutdown() {

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -15,9 +14,10 @@ func TestAppClientCapturedFrames(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
 	notified := make(chan string, 1)
+	failed := make(chan error, 1)
 	client := newAppClient(clientSide, clientSide, func(method string, params json.RawMessage) {
 		notified <- method + " " + string(params)
-	}, func(error) {})
+	}, func(err error) { failed <- err })
 	requests := make(chan string, 1)
 	go func() {
 		line, _ := bufio.NewReader(serverSide).ReadString('\n')
@@ -42,7 +42,7 @@ func TestAppClientCapturedFrames(t *testing.T) {
 		t.Fatalf("notification = %s", got)
 	}
 	_ = serverSide.Close()
-	<-client.closed
+	<-failed
 }
 
 func TestAppClientProtocolFailures(t *testing.T) {
@@ -76,7 +76,8 @@ func TestAppClientProtocolFailures(t *testing.T) {
 
 func TestAppClientServerRequest(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
-	client := newAppClient(clientSide, clientSide, nil, func(error) {})
+	failed := make(chan error, 1)
+	_ = newAppClient(clientSide, clientSide, nil, func(err error) { failed <- err })
 	defer serverSide.Close()
 	go func() {
 		_, _ = serverSide.Write([]byte(`{"id":41,"method":"item/commandExecution/requestApproval","params":{}}` + "\n"))
@@ -93,7 +94,7 @@ func TestAppClientServerRequest(t *testing.T) {
 		t.Fatalf("response = %s", line)
 	}
 	_ = serverSide.Close()
-	<-client.closed
+	<-failed
 }
 
 func TestAppClientPreCanceledCallWritesNothing(t *testing.T) {
@@ -113,31 +114,30 @@ func TestAppClientPreCanceledCallWritesNothing(t *testing.T) {
 	_ = serverSide.Close()
 }
 
-func TestAppClientCancelStopsBlockedWrite(t *testing.T) {
-	input := &blockedAppInput{started: make(chan struct{}), closed: make(chan struct{})}
+func TestAppClientCanceledCallDrainsResponse(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
-	defer serverSide.Close()
-	client := newAppClient(input, clientSide, nil, func(error) {})
+	notified := make(chan struct{}, 1)
+	client := newAppClient(clientSide, clientSide, func(string, json.RawMessage) { notified <- struct{}{} }, func(error) {})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() {
-		done <- client.call(ctx, "blocked", map[string]string{"body": strings.Repeat("x", 4096)}, &struct{}{})
-	}()
-	<-input.started
+	go func() { done <- client.call(ctx, "method", struct{}{}, &struct{}{}) }()
+	request := readAppRequest(t, serverSide)
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v", err)
 	}
+	client.mu.Lock()
+	if len(client.pending) != 1 || client.failed != nil {
+		t.Fatalf("pending = %d, failed = %v", len(client.pending), client.failed)
+	}
+	client.mu.Unlock()
+	writeApp(t, serverSide, map[string]any{"id": request.ID, "result": map[string]any{}})
+	writeRaw(t, serverSide, `{"method":"drained","params":{}}`)
+	<-notified
+	client.mu.Lock()
+	if len(client.pending) != 0 || client.failed != nil {
+		t.Fatalf("pending = %d, failed = %v", len(client.pending), client.failed)
+	}
+	client.mu.Unlock()
+	_ = serverSide.Close()
 }
-
-type blockedAppInput struct {
-	start, stop     sync.Once
-	started, closed chan struct{}
-}
-
-func (w *blockedAppInput) Write([]byte) (int, error) {
-	w.start.Do(func() { close(w.started) })
-	<-w.closed
-	return 0, context.Canceled
-}
-func (w *blockedAppInput) Close() error { w.stop.Do(func() { close(w.closed) }); return nil }

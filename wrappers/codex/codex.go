@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -41,19 +42,15 @@ type turn struct {
 	id      string
 	started bool
 	ready   chan error
-	done    chan turnDone
-}
-
-type turnDone struct {
-	result sessionkit.TurnResult
-	err    error
+	done    chan error
 }
 
 type nativeTurn struct {
-	ID     string       `json:"id"`
-	Status string       `json:"status"`
-	Error  *appError    `json:"error"`
-	Items  []nativeItem `json:"items"`
+	ID          string       `json:"id"`
+	Status      string       `json:"status"`
+	Error       *appError    `json:"error"`
+	Items       []nativeItem `json:"items"`
+	CompletedAt *int64       `json:"completedAt"`
 }
 
 type nativeItem struct{ Type, Text, Phase string }
@@ -62,7 +59,12 @@ type nativeThread struct {
 	Status        json.RawMessage
 }
 type threadReply struct {
-	Thread nativeThread `json:"thread"`
+	Thread         nativeThread `json:"thread"`
+	Cwd            string       `json:"cwd"`
+	ApprovalPolicy string       `json:"approvalPolicy"`
+	Sandbox        struct {
+		Type string `json:"type"`
+	} `json:"sandbox"`
 }
 type turnReply struct {
 	Turn nativeTurn `json:"turn"`
@@ -97,6 +99,10 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 	approval, sandbox, err := permission(request.Open.PermissionMode)
 	if err != nil {
 		return sessionkit.OpenResult{}, err
+	}
+	effectiveCwd, err := filepath.Abs(first(request.Open.Cwd, "."))
+	if err != nil {
+		return sessionkit.OpenResult{}, fmt.Errorf("resolve Codex cwd: %w", err)
 	}
 	claim := request.ResumeSessionID
 	if claim == "" {
@@ -161,6 +167,9 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 		if threadID == "" {
 			return cleanup(errors.New("Codex App Server returned an empty thread id"))
 		}
+		if err = p.checkEffective("thread/start", effectiveCwd, started); err != nil {
+			return cleanup(err)
+		}
 		if err = lock.Rename(threadID); err != nil {
 			return cleanup(err)
 		}
@@ -181,10 +190,35 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 	if resumed.Thread.ID != threadID {
 		return cleanup(fmt.Errorf("Codex App Server changed native thread from %q to %q", threadID, resumed.Thread.ID))
 	}
+	if err = p.checkEffective("thread/resume", effectiveCwd, resumed); err != nil {
+		return cleanup(err)
+	}
 	p.mu.Lock()
 	p.id = threadID
 	p.mu.Unlock()
 	return sessionkit.OpenResult{SessionID: threadID}, nil
+}
+
+func (p *Wrapper) checkEffective(method, cwd string, reply threadReply) error {
+	if reply.ApprovalPolicy == "" {
+		return errors.New(method + " did not report its effective approval policy")
+	}
+	if reply.ApprovalPolicy != p.approval {
+		return fmt.Errorf("%s applied approval policy %q, expected %q", method, reply.ApprovalPolicy, p.approval)
+	}
+	if strings.TrimSpace(reply.Cwd) == "" {
+		return errors.New(method + " did not report its effective cwd")
+	}
+	if reply.Cwd != cwd {
+		return fmt.Errorf("%s applied cwd %q, expected %q", method, reply.Cwd, cwd)
+	}
+	if !slices.Contains([]string{"readOnly", "workspaceWrite", "dangerFullAccess"}, reply.Sandbox.Type) {
+		return fmt.Errorf("%s reported unsupported sandbox %q", method, reply.Sandbox.Type)
+	}
+	if p.sandbox != "" && reply.Sandbox.Type != "dangerFullAccess" {
+		return fmt.Errorf("%s applied sandbox %q, expected %q", method, reply.Sandbox.Type, "dangerFullAccess")
+	}
+	return nil
 }
 
 func (p *Wrapper) threadParams(cwd string, config map[string]any) map[string]any {
@@ -220,7 +254,7 @@ func (p *Wrapper) start(ctx context.Context, prompt string) (host.Turn, error) {
 		p.mu.Unlock()
 		return nil, errors.New("Codex lane is not idle")
 	}
-	t := &turn{owner: p, ready: make(chan error, 1), done: make(chan turnDone, 1)}
+	t := &turn{owner: p, ready: make(chan error, 1), done: make(chan error, 1)}
 	p.active = t
 	params := map[string]any{"threadId": p.id, "input": textInput(prompt), "approvalPolicy": p.approval}
 	if p.model != "" {
@@ -265,31 +299,56 @@ func (p *Wrapper) start(ctx context.Context, prompt string) (host.Turn, error) {
 
 func (p *Wrapper) inject(ctx context.Context, prompt string) (bool, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	t := p.active
 	if t == nil || !t.started {
+		p.mu.Unlock()
 		return false, nil
 	}
+	threadID, turnID := p.id, t.id
+	p.mu.Unlock()
 	var result struct {
 		TurnID string `json:"turnId"`
 	}
-	err := p.app.call(ctx, "turn/steer", map[string]any{"threadId": p.id, "expectedTurnId": t.id, "input": textInput(prompt)}, &result)
+	err := p.app.call(ctx, "turn/steer", map[string]any{"threadId": threadID, "expectedTurnId": turnID, "input": textInput(prompt)}, &result)
 	if err != nil {
 		return false, err
 	}
-	if result.TurnID != t.id {
-		return false, fmt.Errorf("Codex App Server steered turn %q, expected %q", result.TurnID, t.id)
+	if result.TurnID != turnID {
+		return false, fmt.Errorf("Codex App Server steered turn %q, expected %q", result.TurnID, turnID)
 	}
-	return true, nil
+	p.mu.Lock()
+	active := p.active == t && t.started
+	p.mu.Unlock()
+	return active, nil
 }
 
 func (t *turn) Wait(ctx context.Context) (sessionkit.TurnResult, error) {
 	select {
 	case <-ctx.Done():
 		return sessionkit.TurnResult{}, ctx.Err()
-	case done := <-t.done:
-		return done.result, done.err
+	case err := <-t.done:
+		if err != nil {
+			return sessionkit.TurnResult{}, err
+		}
+		return t.read(ctx)
 	}
+}
+
+func (t *turn) read(ctx context.Context) (sessionkit.TurnResult, error) {
+	var page struct {
+		Data []nativeTurn `json:"data"`
+	}
+	if err := t.owner.app.call(ctx, "thread/turns/list", map[string]any{
+		"threadId": t.owner.id, "limit": 100, "sortDirection": "desc", "itemsView": "full",
+	}, &page); err != nil {
+		return sessionkit.TurnResult{}, err
+	}
+	for _, candidate := range page.Data {
+		if candidate.ID == t.id {
+			return terminal(candidate)
+		}
+	}
+	return sessionkit.TurnResult{}, fmt.Errorf("Codex turn %s is absent from thread %s", t.id, t.owner.id)
 }
 func (t *turn) Interrupt(ctx context.Context) error {
 	return t.owner.app.call(ctx, "turn/interrupt", map[string]string{"threadId": t.owner.id, "turnId": t.id}, &struct{}{})
@@ -338,13 +397,16 @@ func (p *Wrapper) receive(method string, raw json.RawMessage) {
 				t.ready <- nil
 			}
 			p.active = nil
-			t.done <- turnDone{result: terminal(event.Turn)}
+			t.done <- nil
 		}
 	}
 	p.mu.Unlock()
 }
 
-func terminal(t nativeTurn) sessionkit.TurnResult {
+func terminal(t nativeTurn) (sessionkit.TurnResult, error) {
+	if t.CompletedAt == nil {
+		return sessionkit.TurnResult{}, fmt.Errorf("Codex turn %s is not product-closed", t.ID)
+	}
 	result := sessionkit.TurnResult{Outcome: t.Status, NativeStopReason: t.Status}
 	for _, item := range t.Items {
 		if item.Type == "agentMessage" && item.Phase == "final_answer" {
@@ -354,6 +416,9 @@ func terminal(t nativeTurn) sessionkit.TurnResult {
 	switch t.Status {
 	case "completed":
 		result.Outcome = "completed"
+		if strings.TrimSpace(result.Result) == "" {
+			return sessionkit.TurnResult{}, fmt.Errorf("completed Codex turn %s has no final answer", t.ID)
+		}
 	case "interrupted":
 		result.Outcome = "interrupted"
 	default:
@@ -365,7 +430,7 @@ func terminal(t nativeTurn) sessionkit.TurnResult {
 			result.Result = first(t.Status, "Codex turn failed")
 		}
 	}
-	return result
+	return result, nil
 }
 
 func (p *Wrapper) clear(t *turn) {
@@ -388,7 +453,7 @@ func (p *Wrapper) fail(err error) {
 	}
 	p.mu.Unlock()
 	if t != nil {
-		t.done <- turnDone{err: err}
+		t.done <- err
 	}
 }
 
@@ -420,14 +485,15 @@ func (p *Wrapper) Close(ctx context.Context) error {
 		return nil
 	}
 	if id != "" {
-		_ = app.call(ctx, "thread/archive", map[string]string{"threadId": id}, &struct{}{})
-		_ = app.call(ctx, "thread/unsubscribe", map[string]string{"threadId": id}, &struct{}{})
+		archiveErr := app.call(ctx, "thread/archive", map[string]string{"threadId": id}, &struct{}{})
+		unsubscribeErr := app.call(ctx, "thread/unsubscribe", map[string]string{"threadId": id}, &struct{}{})
+		return errors.Join(archiveErr, unsubscribeErr, child.Close(ctx, func(context.Context) error { return app.close() }))
 	}
 	return child.Close(ctx, func(context.Context) error { return app.close() })
 }
 
 func laneConfig(socket string) map[string]any {
-	return map[string]any{"mcp_servers": map[string]any{"agent_sessions": map[string]any{
+	return map[string]any{"features": map[string]any{"code_mode_host": false}, "mcp_servers": map[string]any{"agent_sessions": map[string]any{
 		"command": Product, "args": []string{"mcp"}, "env": map[string]string{mcp.LaneSocketEnv: socket},
 	}}}
 }

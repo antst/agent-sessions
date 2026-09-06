@@ -1,7 +1,12 @@
 package codex
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -16,6 +21,8 @@ var processRules = []host.ArgumentRule{
 	{Name: "--disable", TakesValue: true},
 	{Name: "--search"},
 }
+
+var peerDaemonCommand = exec.CommandContext
 
 func processArguments(arguments []string) ([]string, error) {
 	return host.BuildArguments(arguments, processRules)
@@ -61,34 +68,54 @@ func namePart(name string) (string, error) {
 }
 
 func InteractivePlan(arguments, environment []string) (host.ExecPlan, error) {
-	name, forwarded, err := peerName(arguments)
+	name, groups, forwarded, err := projectInteractive(arguments)
 	if err != nil {
 		return host.ExecPlan{}, err
 	}
 	if !slices.ContainsFunc(environment, func(value string) bool { return strings.HasPrefix(value, host.SocketEnv+"=") }) {
 		environment = append(environment, host.SocketEnv+"="+sessionkit.Socket())
 	}
-	return host.InteractivePlan("codex", forwarded, environment, host.PeerIdentity{Name: name}, codexOptionTakesValue)
+	groupArgs := make([]string, 0, len(groups)*2)
+	for _, group := range groups {
+		groupArgs = append(groupArgs, "-g", group)
+	}
+	plan, err := host.InteractivePlan("codex", groupArgs, environment, host.PeerIdentity{Name: name}, nil)
+	if err != nil {
+		return host.ExecPlan{}, err
+	}
+	socket, err := appServerSocket()
+	if err != nil {
+		return host.ExecPlan{}, err
+	}
+	plan.Args = append([]string{"--remote", "unix://" + socket}, forwarded...)
+	return plan, nil
 }
 
-func peerName(arguments []string) (string, []string, error) {
+func projectInteractive(arguments []string) (string, []string, []string, error) {
 	forwarded := make([]string, 0, len(arguments))
-	name := ""
+	name, groups := "", []string{}
 	for index := 0; index < len(arguments); index++ {
 		argument := arguments[index]
 		key, value, attached := strings.Cut(argument, "=")
-		if key == "-n" || key == "--peer-name" {
+		if slices.Contains([]string{"--remote", "--remote-auth-token-env", "-i", "--image", "--local-provider", "--add-dir"}, key) {
+			return "", nil, nil, errors.New("unsupported Codex interactive option " + key)
+		}
+		if key == "-n" || key == "--peer-name" || key == "-g" || key == "--group" {
 			if !attached {
 				if index+1 == len(arguments) {
-					return "", nil, errors.New(argument + " requires a value")
+					return "", nil, nil, errors.New(argument + " requires a value")
 				}
 				index++
 				value = arguments[index]
 			}
 			if strings.TrimSpace(value) == "" {
-				return "", nil, errors.New(argument + " requires a value")
+				return "", nil, nil, errors.New(argument + " requires a value")
 			}
-			name = value
+			if key == "-g" || key == "--group" {
+				groups = append(groups, value)
+			} else {
+				name = value
+			}
 			continue
 		}
 		forwarded = append(forwarded, argument)
@@ -101,7 +128,32 @@ func peerName(arguments []string) (string, []string, error) {
 			forwarded = append(forwarded, arguments[index])
 		}
 	}
-	return name, forwarded, nil
+	return name, groups, forwarded, nil
+}
+
+func appServerSocket() (string, error) {
+	home := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if home == "" {
+		user, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		home = filepath.Join(user, ".codex")
+	}
+	return filepath.Join(home, "app-server-control", "app-server-control.sock"), nil
+}
+
+func StartPeerDaemon(ctx context.Context, path string) error {
+	command := peerDaemonCommand(ctx, path, "app-server", "daemon", "start")
+	command.Env = slices.DeleteFunc(os.Environ(), func(value string) bool {
+		key, _, _ := strings.Cut(value, "=")
+		return strings.HasPrefix(key, "AGENTBUS_")
+	})
+	command.Stdout, command.Stderr = os.Stdout, os.Stderr
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("start Codex App Server: %w", err)
+	}
+	return nil
 }
 
 func codexOptionTakesValue(name string) bool {

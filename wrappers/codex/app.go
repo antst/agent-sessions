@@ -31,19 +31,17 @@ type appFrame struct {
 }
 
 type appClient struct {
-	input         io.WriteCloser
-	mu, writeMu   sync.Mutex
-	next          int64
-	pending       map[int64]chan appReply
-	failed        error
-	notify        func(string, json.RawMessage)
-	onFailure     func(error)
-	closed        chan struct{}
-	closeReadOnce sync.Once
+	input       io.WriteCloser
+	mu, writeMu sync.Mutex
+	next        int64
+	pending     map[int64]chan appReply
+	failed      error
+	notify      func(string, json.RawMessage)
+	onFailure   func(error)
 }
 
 func newAppClient(input io.WriteCloser, output io.Reader, notify func(string, json.RawMessage), failure func(error)) *appClient {
-	c := &appClient{input: input, pending: map[int64]chan appReply{}, notify: notify, onFailure: failure, closed: make(chan struct{})}
+	c := &appClient{input: input, pending: map[int64]chan appReply{}, notify: notify, onFailure: failure}
 	go c.read(output)
 	return c
 }
@@ -73,8 +71,6 @@ func (c *appClient) call(ctx context.Context, method string, params, result any)
 	id, reply := c.next, make(chan appReply, 1)
 	c.pending[id] = reply
 	c.mu.Unlock()
-	stop := context.AfterFunc(ctx, func() { c.fail(ctx.Err()) })
-	defer stop()
 	if err := c.write(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
 		c.remove(id)
 		return err
@@ -176,7 +172,6 @@ func (c *appClient) fail(err error) {
 		reply <- appReply{err: err}
 	}
 	_ = c.input.Close()
-	c.closeReadOnce.Do(func() { close(c.closed) })
 	if c.onFailure != nil {
 		c.onFailure(err)
 	}

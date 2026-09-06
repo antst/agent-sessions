@@ -17,6 +17,7 @@
 - The 0.4.0 connector takes Codex identity from MCP `_meta.threadId`, never from tool arguments. — verified: 0.4.0 — source: `cmd/agent-sessions/connector.go:247`
 - The 0.4.0 connector delivers to an active interactive thread with `turn/steer` and wakes an idle thread with `turn/start`. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:479`
 - The 0.4.0 launcher starts `codex app-server daemon` and runs the TUI through `--remote unix://<control-socket>`. — verified: 0.4.0 — source: `internal/launcher/codex_peer.go:129`
+- The Codex interactive option table records value-taking `--remote`, `--remote-auth-token-env`, `-i`/`--image`, `--local-provider`, and `--add-dir`; a wrapper must preserve their value arity when projecting its own flags. — verified: 0.4.0 — source: `internal/launcher/options.go:18`
 - The 0.4.0 lane validates effective approval after `thread/start`, validates effective cwd and approval after `thread/resume`, and applies approval and sandbox through `thread/settings/update`. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:224`
 - The 0.4.0 lane disables `features.code_mode_host` so headless tool calls stay in the App Server. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:713`
 - The 0.4.0 App Server bridge handles `mcpServer/elicitation/request` and `item/tool/call`; it rejects other headless server requests with `-32601`. — verified: 0.4.0 — source: `internal/bridge/dynamic_tools.go:26`
@@ -24,6 +25,6 @@
 - The 0.4.0 resume path avoids a second `thread/resume` while its exact App Server client already owns the loaded thread. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:355`
 - The 0.4.0 recovery path can unarchive a thread, restore loaded subscriptions after reconnect, and resolve a durable active turn with `thread/turns/list`. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:409`
 - The 0.4.0 close path archives the exact thread and unsubscribes so its stdio MCP child is released. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:759`
-- `UNVERIFIED:` A plain current-version `codex-peer` launch, without the old daemon-start and `--remote` steps, provides the control socket used by its resident MCP backend.
+- `UNVERIFIED:` A current-version `codex-peer` launch can start `codex app-server daemon` and attach its TUI through the projected `--remote unix://<control-socket>` path.
 - `UNVERIFIED:` The exact `turn/completed` error object and status emitted by Codex 0.153.x for a failed native turn have not been captured.
 - `UNVERIFIED:` Per-thread stdio `mcp_servers.agent_sessions` deterministically overrides the installed same-name plugin entry in Codex 0.153.x.

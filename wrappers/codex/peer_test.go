@@ -161,6 +161,46 @@ func TestPeerDeliveryActiveAndIdle(t *testing.T) {
 	}
 }
 
+func TestPeerDeliveryRejectsUnverifiedThreadState(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		responses []map[string]any
+		calls     int64
+	}{
+		{"wrong read id", []map[string]any{{"thread": map[string]any{"id": "thread-2", "status": map[string]string{"type": "idle"}}}}, 1},
+		{"malformed status", []map[string]any{{"thread": map[string]any{"id": "thread-1", "status": map[string]string{"type": "mystery"}}}}, 1},
+		{"wrong resume id", []map[string]any{
+			{"thread": map[string]any{"id": "thread-1", "status": map[string]string{"type": "notLoaded"}}},
+			{"thread": map[string]any{"id": "thread-2", "status": map[string]string{"type": "idle"}}},
+		}, 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b, app := testPeer(t)
+			b.identity.SessionID = "thread-1"
+			go func() {
+				decoder := json.NewDecoder(app)
+				for _, response := range test.responses {
+					var request appRequest
+					if decoder.Decode(&request) != nil {
+						return
+					}
+					writeApp(t, app, map[string]any{"id": request.ID, "result": response})
+				}
+			}()
+			_, err := b.deliver(context.Background(), sessionkit.DeliveryRequest{MessageID: "message-1", From: sessionkit.DeliverySource{SessionID: "sender", Product: "example", Groups: []string{}}, Body: "hello"})
+			if err == nil {
+				t.Fatal("delivery succeeded")
+			}
+			b.app.mu.Lock()
+			calls := b.app.next
+			b.app.mu.Unlock()
+			if calls != test.calls {
+				t.Fatalf("calls = %d", calls)
+			}
+		})
+	}
+}
+
 func testPeer(t *testing.T) (*PeerBackend, net.Conn) {
 	client, server := net.Pipe()
 	b := &PeerBackend{groups: []string{}}
