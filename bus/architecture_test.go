@@ -136,7 +136,11 @@ func TestFormerBrandGuardAllowsOnlyHistoricalPaths(t *testing.T) {
 		{"agent" + "_sessions", true},
 		{"agent" + "-sessions", true},
 		{"ff81565:cmd/" + "agent" + "-sessions/main.go", true},
-		{"`ff81565:cmd/" + "agent" + "-sessions/main.go`", false},
+		{"`ff81565:cmd/" + "agent" + "-sessions/main.go:12`", false},
+		{"`ff81565:" + "agent" + "-sessions prose`", true},
+		{"`ff81565:AGENT" + "BUS_SOCKET`", true},
+		{"`ff81565:docs/" + "agent" + "-sessions.md\u00a0prose`", true},
+		{"`ff81565:docs/../" + "agent" + "-sessions.md`", true},
 		{"`/home/antst/" + "agent" + "bus-evidence/run/frame.json`", false},
 	} {
 		if got := containsFormerBrandReferences([]byte(test.value)); got != test.want {
@@ -188,7 +192,42 @@ func commitQualified(value []byte) bool {
 			}
 		}
 	}
-	return true
+	path := value[colon+1:]
+	if line := bytes.LastIndexByte(path, ':'); line >= 0 {
+		if !sourceLine(path[line+1:]) {
+			return false
+		}
+		path = path[:line]
+	}
+	if len(path) == 0 {
+		return false
+	}
+	for _, segment := range bytes.Split(path, []byte{'/'}) {
+		if len(segment) == 0 || bytes.Equal(segment, []byte("..")) {
+			return false
+		}
+		for _, character := range segment {
+			if !(character >= 'A' && character <= 'Z') && !(character >= 'a' && character <= 'z') &&
+				!(character >= '0' && character <= '9') && character != '_' && character != '.' && character != '-' {
+				return false
+			}
+		}
+	}
+	return bytes.ContainsRune(path, '/') || bytes.ContainsRune(path, '.')
+}
+
+func sourceLine(value []byte) bool {
+	hyphens := 0
+	for index, character := range value {
+		if character >= '0' && character <= '9' {
+			continue
+		}
+		hyphens++
+		if character != '-' || hyphens > 1 || index == 0 || index == len(value)-1 {
+			return false
+		}
+	}
+	return len(value) > 0
 }
 
 func checkGoImports(t *testing.T, root string, check func(string, string)) {
