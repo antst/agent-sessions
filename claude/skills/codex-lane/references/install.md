@@ -8,7 +8,7 @@ runtime that provides `codex-peer-lane`.
 Run these commands yourself in a host terminal, outside any Codex turn:
 
 ```bash
-git clone https://github.com/antst/agent-sessions.git
+git clone https://github.com/antst/sessionbus.git
 cd agent-sessions
 make test-race
 codex app-server daemon stop
@@ -25,7 +25,7 @@ already has a compatible runtime, use `make install-claude`.
 ## Install the Claude plugin from its marketplace
 
 ```bash
-claude plugin marketplace add https://github.com/antst/agent-sessions.git
+claude plugin marketplace add https://github.com/antst/sessionbus.git
 claude plugin install agent-sessions@agent-sessions
 ```
 

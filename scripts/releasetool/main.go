@@ -7,8 +7,8 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/antst/agent-sessions/internal/releaseevidence"
-	"github.com/antst/agent-sessions/internal/releasepkg"
+	"github.com/antst/sessionbus/internal/releaseevidence"
+	"github.com/antst/sessionbus/internal/releasepkg"
 )
 
 func main() {

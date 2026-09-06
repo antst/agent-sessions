@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
 )
 
 func TestRendererMatchesC5Fixture(t *testing.T) {

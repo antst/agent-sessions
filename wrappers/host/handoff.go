@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
 )
 
 const (

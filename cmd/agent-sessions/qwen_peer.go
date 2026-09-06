@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/launcher"
-	"github.com/antst/agent-sessions/internal/livepresence"
-	"github.com/antst/agent-sessions/internal/sessiontools"
+	"github.com/antst/sessionbus/internal/launcher"
+	"github.com/antst/sessionbus/internal/livepresence"
+	"github.com/antst/sessionbus/internal/sessiontools"
 )
 
 const qwenPeerReadyTimeout = 45 * time.Second

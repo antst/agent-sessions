@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/sessionbus/internal/procinfo"
 )
 
 const (

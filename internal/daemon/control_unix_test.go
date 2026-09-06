@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/pathidentity"
+	"github.com/antst/sessionbus/internal/pathidentity"
 )
 
 func TestBlockingControlCallDiesWithItsCaller(t *testing.T) {

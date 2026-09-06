@@ -4,9 +4,9 @@ package pi
 import (
 	"fmt"
 
-	"github.com/antst/agent-sessions/internal/permissionmode"
-	"github.com/antst/agent-sessions/internal/productruntime"
-	"github.com/antst/agent-sessions/internal/products/pifamily"
+	"github.com/antst/sessionbus/internal/permissionmode"
+	"github.com/antst/sessionbus/internal/productruntime"
+	"github.com/antst/sessionbus/internal/products/pifamily"
 )
 
 // MapPermission is fail closed. Pi has no approval-prompt model, so the normal

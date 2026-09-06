@@ -119,7 +119,7 @@ test("crossed rehello preserves the fixture's newest identity", async (t) => {
   const next = () => queued.length ? Promise.resolve(queued.shift()) : new Promise((resolve) => waiting.push(resolve));
   const daemon = new Connection(daemonSocket, false, (request) => { const resolve = waiting.shift(); if (resolve) resolve(request); else queued.push(request); });
   const row = structuredClone(fixtures.sequences.crossed_rehello);
-  const env = { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" };
+  const env = { SESSIONBUS_SOCKET: "/fixture/socket", SESSIONBUS_LOCAL_KEY: "" };
   const peer = connectPeer(row.identity, async () => ({ disposition: "injected" }), env, { connect: () => clientSocket, schedule: () => {} });
   t.after(() => { peer.shutdown(); daemon.close(); });
 

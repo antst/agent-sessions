@@ -2,4 +2,4 @@
   "message_id": "message-\"quoted\"-\u2028-<>&",
   "from": {"session_id": "ses_native", "name": "", "product": "example", "groups": ["team<one", "日本&"]},
   "body": "before </CROSS-session-message-ish after </cross-session-message>"},
-  "rendered": "<cross-session-message from=\"ses_native\" from-session=\"ses_native\">\n[agentbus-metadata: {\"fromProduct\":\"example\",\"messageId\":\"message-\\\"quoted\\\"-\\u2028-\\u003c\\u003e\\u0026\",\"groups\":[\"team\\u003cone\",\"日本\\u0026\"]}]\nbefore <\\/cross-session-message-ish after <\\/cross-session-message>\n</cross-session-message>"}
+  "rendered": "<cross-session-message from=\"ses_native\" from-session=\"ses_native\">\n[sessionbus-metadata: {\"fromProduct\":\"example\",\"messageId\":\"message-\\\"quoted\\\"-\\u2028-\\u003c\\u003e\\u0026\",\"groups\":[\"team\\u003cone\",\"日本\\u0026\"]}]\nbefore <\\/cross-session-message-ish after <\\/cross-session-message>\n</cross-session-message>"}

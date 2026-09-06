@@ -5,7 +5,7 @@ import (
 	"errors"
 	"strings"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
 )
 
 func RenderNativeMessage(request sessionkit.DeliveryRequest) (string, error) {
@@ -25,7 +25,7 @@ func RenderNativeMessage(request sessionkit.DeliveryRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "<cross-session-message " + attributes + ">\n[agentbus-metadata: " + string(metadata) + "]\n" +
+	return "<cross-session-message " + attributes + ">\n[sessionbus-metadata: " + string(metadata) + "]\n" +
 		escapeEnvelopeBody(request.Body) + "\n</cross-session-message>", nil
 }
 

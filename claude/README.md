@@ -22,7 +22,7 @@ skills/codex-lane/scripts/     portable POSIX preflight included with the skill
 Install it from the repository marketplace with:
 
 ```bash
-claude plugin marketplace add https://github.com/antst/agent-sessions.git
+claude plugin marketplace add https://github.com/antst/sessionbus.git
 claude plugin install agent-sessions@agent-sessions
 ```
 

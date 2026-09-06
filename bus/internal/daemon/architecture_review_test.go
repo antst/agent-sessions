@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/bus/internal/conn"
-	"github.com/antst/agent-sessions/bus/internal/protocol"
-	"github.com/antst/agent-sessions/bus/internal/structuredprocess"
+	"github.com/antst/sessionbus/bus/internal/conn"
+	"github.com/antst/sessionbus/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/structuredprocess"
 )
 
 func reviewSession(t *testing.T) (*Daemon, *session, net.Conn) {

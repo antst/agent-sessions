@@ -15,9 +15,9 @@ import (
 	"strings"
 	"testing"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
-	"github.com/antst/agent-sessions/wrappers/mcp"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
+	"github.com/antst/sessionbus/wrappers/mcp"
 )
 
 const fixtureID = "00000000-0000-4000-8000-000000000123"
@@ -64,7 +64,7 @@ func fakeChild(mode string) {
 }
 
 func TestLaunchArgumentsTable(t *testing.T) {
-	mcp := `{"mcpServers":{"agent_sessions":{"args":["mcp"],"command":"claude-peer","env":{"AGENTBUS_LANE_SOCKET":"/tmp/lane.sock"}}}}`
+	mcp := `{"mcpServers":{"agent_sessions":{"args":["mcp"],"command":"claude-peer","env":{"SESSIONBUS_LANE_SOCKET":"/tmp/lane.sock"}}}}`
 	base := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages"}
 	for _, test := range []struct {
 		name    string

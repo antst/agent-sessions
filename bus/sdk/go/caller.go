@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/antst/agent-sessions/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/protocol"
 )
 
 const unavailableReason = "result unavailable, lane resumable"

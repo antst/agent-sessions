@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
 )
 
 func TestActiveSessionRequiresOneParentMatch(t *testing.T) {
@@ -60,7 +60,7 @@ func TestPeerDeliveryUsesCanonicalEnvelope(t *testing.T) {
 	check(t, receipt.Disposition == "injected", "receipt = %#v", receipt)
 	frame := <-received
 	message := frame["message"].(map[string]any)["content"].(string)
-	check(t, frame["from"] == "agentbus" && strings.Contains(message, "[agentbus-metadata:") && strings.Contains(message, "hello"), "frame = %#v", frame)
+	check(t, frame["from"] == "sessionbus" && strings.Contains(message, "[sessionbus-metadata:") && strings.Contains(message, "hello"), "frame = %#v", frame)
 }
 
 func TestPeerDeliveryCancelStopsBlockedWrite(t *testing.T) {

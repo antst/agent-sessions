@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/productcatalog"
 )
 
 const (

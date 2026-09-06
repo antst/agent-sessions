@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/clihelp"
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/servicecontrol"
+	"github.com/antst/sessionbus/internal/clihelp"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
+	"github.com/antst/sessionbus/internal/servicecontrol"
 )
 
 type recordingServiceManager struct{ actions []string }

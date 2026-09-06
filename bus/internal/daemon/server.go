@@ -8,7 +8,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/antst/agent-sessions/bus/internal/conn"
+	"github.com/antst/sessionbus/bus/internal/conn"
 )
 
 type Config struct {
@@ -35,7 +35,7 @@ func Start(config Config) (*Daemon, error) {
 		config.Host = "local"
 	}
 	if !validHost(config.Host) {
-		return nil, errors.New("invalid agentbus host")
+		return nil, errors.New("invalid sessionbus host")
 	}
 	seen := map[string]bool{}
 	for _, product := range config.Products {

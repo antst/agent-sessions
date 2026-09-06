@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/antst/agent-sessions/bus/internal/protocol"
-	"github.com/antst/agent-sessions/bus/internal/rpc"
+	"github.com/antst/sessionbus/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/rpc"
 )
 
 type fakeProduct struct {
@@ -34,7 +34,7 @@ type fakeProduct struct {
 
 func (p *fakeProduct) Hello(context.Context) (HelloDescription, error) {
 	atomic.AddInt32(&p.calls[0], 1)
-	if os.Getenv("AGENTBUS_LAUNCH_TOKEN") != "" || os.Getenv("AGENTBUS_LOCAL_KEY") != "" || os.Getenv("AGENTBUS_SOCKET") != "" {
+	if os.Getenv("SESSIONBUS_LAUNCH_TOKEN") != "" || os.Getenv("SESSIONBUS_LOCAL_KEY") != "" || os.Getenv("SESSIONBUS_SOCKET") != "" {
 		panic("worker environment reached Hello")
 	}
 	return HelloDescription{Product: "example-peer", SupportedOpenFields: []string{}, ExtraArguments: []ExtraArgument{}}, nil
@@ -276,8 +276,8 @@ func TestWorkerLifecycleTable(t *testing.T) {
 	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
 		counts[line]++
 	}
-	interrupt := `agentbus: product interrupt: "first failure\nsecond failure"`
-	closeLine := `agentbus: product close: "first failure\nsecond failure"`
+	interrupt := `sessionbus: product interrupt: "first failure\nsecond failure"`
+	closeLine := `sessionbus: product close: "first failure\nsecond failure"`
 	check(t, len(counts) == 2 && counts[interrupt] == 2 && counts[closeLine] == 2, "callback stderr = %q", raw)
 }
 
@@ -356,7 +356,7 @@ func runCase(t *testing.T, name string) [6]int32 {
 	case "environment":
 		setEnvironment(t, "token", "key")
 		err := NewWorker(p).Serve(context.Background())
-		check(t, err != nil && err.Error() == "local key transport not implemented in this build" && os.Getenv("AGENTBUS_LAUNCH_TOKEN") == "" && os.Getenv("AGENTBUS_LOCAL_KEY") == "" && os.Getenv("AGENTBUS_SOCKET") == "", "key error or uncleared environment: %v", err)
+		check(t, err != nil && err.Error() == "local key transport not implemented in this build" && os.Getenv("SESSIONBUS_LAUNCH_TOKEN") == "" && os.Getenv("SESSIONBUS_LOCAL_KEY") == "" && os.Getenv("SESSIONBUS_SOCKET") == "", "key error or uncleared environment: %v", err)
 	case "shutdown":
 		startHarness(t, p, true, false)
 		p.worker.Shutdown()
@@ -441,7 +441,7 @@ func checkDelivery(t *testing.T, h *rpc.Conn, disposition string) {
 }
 
 func setEnvironment(t *testing.T, token, key string) {
-	for name, value := range map[string]string{"AGENTBUS_LAUNCH_TOKEN": token, "AGENTBUS_LOCAL_KEY": key, "AGENTBUS_SOCKET": "/fixture/socket"} {
+	for name, value := range map[string]string{"SESSIONBUS_LAUNCH_TOKEN": token, "SESSIONBUS_LOCAL_KEY": key, "SESSIONBUS_SOCKET": "/fixture/socket"} {
 		t.Setenv(name, value)
 	}
 }

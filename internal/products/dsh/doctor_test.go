@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/sessionbus/internal/productruntime"
 )
 
 type testCommandProbe struct{ cli, pnpm string }

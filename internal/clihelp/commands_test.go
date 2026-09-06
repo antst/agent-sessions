@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/productcatalog"
 )
 
 func TestParseDispatchesEveryMultiCallAndAliasWithoutChangingPassthrough(t *testing.T) {

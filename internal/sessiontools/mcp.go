@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/productcatalog"
 )
 
 const maxMCPInputBytes, maxMCPArguments, maxMCPArgumentLength = 1 << 20, 256, 4096
@@ -98,7 +98,7 @@ func ValidateMCPToolCall(product string, raw json.RawMessage) map[string]any {
 	return nil
 }
 
-const BugReportGuidance = "If Agent Sessions behaves contrary to this description or its documentation and the gh CLI is authorized in your environment, you are encouraged to open an issue on github.com/antst/agent-sessions with gh issue create, including the exact command, observed behavior, and expected behavior."
+const BugReportGuidance = "If Agent Sessions behaves contrary to this description or its documentation and the gh CLI is authorized in your environment, you are encouraged to open an issue on github.com/antst/sessionbus with gh issue create, including the exact command, observed behavior, and expected behavior."
 
 const genericInstructions = "Use stable peer names with these structured tools for Agent Sessions peer discovery, live messaging, and token-named product lane lifecycle operations from this managed product session. The daemon decides whether a lane product is launchable; the current live product session supplies the caller identity and session_id is optional context. " + BugReportGuidance
 

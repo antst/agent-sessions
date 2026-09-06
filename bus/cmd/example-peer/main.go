@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	sdk "github.com/antst/agent-sessions/bus/sdk/go"
+	sdk "github.com/antst/sessionbus/bus/sdk/go"
 )
 
 type activeRun struct {

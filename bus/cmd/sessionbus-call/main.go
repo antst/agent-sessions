@@ -13,18 +13,18 @@ import (
 	"strings"
 	"sync"
 
-	sdk "github.com/antst/agent-sessions/bus/sdk/go"
+	sdk "github.com/antst/sessionbus/bus/sdk/go"
 )
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(arguments []string, stdout, stderr io.Writer) int {
-	set := flag.NewFlagSet("agentbus-call", flag.ContinueOnError)
+	set := flag.NewFlagSet("sessionbus-call", flag.ContinueOnError)
 	set.SetOutput(stderr)
-	name, groups, socket := "agentbus-call", "", os.Getenv("AGENTBUS_SOCKET")
+	name, groups, socket := "sessionbus-call", "", os.Getenv("SESSIONBUS_SOCKET")
 	set.StringVar(&name, "name", name, "peer name")
 	set.StringVar(&groups, "g", groups, "comma-separated groups")
-	set.StringVar(&socket, "socket", socket, "agentbus unix socket")
+	set.StringVar(&socket, "socket", socket, "sessionbus unix socket")
 	if set.Parse(arguments) != nil || set.NArg() < 1 || set.NArg() > 2 {
 		return 2
 	}
@@ -36,7 +36,7 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "params-json is not valid JSON")
 		return 2
 	}
-	if err := os.Setenv("AGENTBUS_SOCKET", socket); err != nil {
+	if err := os.Setenv("SESSIONBUS_SOCKET", socket); err != nil {
 		writeError(stdout, err)
 		return 1
 	}
@@ -45,7 +45,7 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 		writeError(stdout, err)
 		return 1
 	}
-	identity := sdk.PeerIdentity{Product: "agentbus-call", SessionID: id, Name: name, Groups: splitGroups(groups), Info: map[string]any{}}
+	identity := sdk.PeerIdentity{Product: "sessionbus-call", SessionID: id, Name: name, Groups: splitGroups(groups), Info: map[string]any{}}
 	var outputMu sync.Mutex
 	peer, err := sdk.ConnectPeer(identity, func(_ context.Context, _ sdk.PeerIdentity, request sdk.DeliveryRequest) (sdk.DeliveryReceipt, error) {
 		outputMu.Lock()

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	federator "github.com/antst/agent-sessions/internal/federation"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
+	federator "github.com/antst/sessionbus/internal/federation"
 )
 
 func TestDaemonSettingUsesEnvironmentThenCrossPlatformServiceFile(t *testing.T) {

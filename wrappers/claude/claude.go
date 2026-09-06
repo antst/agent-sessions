@@ -13,14 +13,14 @@ import (
 	"strings"
 	"sync"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
-	"github.com/antst/agent-sessions/wrappers/mcp"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
+	"github.com/antst/sessionbus/wrappers/mcp"
 )
 
 const (
 	Product       = "claude-peer"
-	LaneSocketEnv = "AGENTBUS_LANE_SOCKET"
+	LaneSocketEnv = "SESSIONBUS_LANE_SOCKET"
 )
 
 type Wrapper struct {
@@ -107,7 +107,7 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 		return sessionkit.OpenResult{}, closeLaunch(lock, endpoint, err)
 	}
 	if p.backend == nil {
-		return sessionkit.OpenResult{}, closeLaunch(lock, endpoint, errors.New("Agentbus lane backend is unavailable"))
+		return sessionkit.OpenResult{}, closeLaunch(lock, endpoint, errors.New("Sessionbus lane backend is unavailable"))
 	}
 	go func() { _ = mcp.ServeLane(ctx, endpoint, p.backend) }()
 	command := exec.Command("claude", arguments...)
@@ -192,7 +192,7 @@ func (p *Wrapper) write(prompt string) error {
 		return errors.New("Claude lane prompt is empty")
 	}
 	if strings.HasPrefix(strings.TrimSpace(prompt), "<cross-session-message ") {
-		prompt = "The following Agent Sessions peer message is the current user turn. Act on its enclosed content and preserve its sender metadata.\n\n" + prompt
+		prompt = "The following Sessionbus peer message is the current user turn. Act on its enclosed content and preserve its sender metadata.\n\n" + prompt
 	}
 	body := map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": []map[string]string{{"type": "text", "text": prompt}}}}
 	if err := p.encoder.Encode(body); err != nil {
@@ -479,8 +479,8 @@ func launchArguments(request sessionkit.OpenRequest, id, socket string) ([]strin
 	if request.Open.ReasoningEffort != "" {
 		arguments = append(arguments, "--effort", request.Open.ReasoningEffort)
 	}
-	mcp, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"agent_sessions": map[string]any{"command": Product, "args": []string{"mcp"}, "env": map[string]string{LaneSocketEnv: socket}}}})
-	arguments = append(arguments, "--mcp-config", string(mcp), "--allowedTools", "mcp__agent_sessions__*")
+	mcp, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"sessionbus": map[string]any{"command": Product, "args": []string{"mcp"}, "env": map[string]string{LaneSocketEnv: socket}}}})
+	arguments = append(arguments, "--mcp-config", string(mcp), "--allowedTools", "mcp__sessionbus__*")
 	return append(arguments, extra...), nil
 }
 

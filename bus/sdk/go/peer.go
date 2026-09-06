@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/antst/agent-sessions/bus/internal/protocol"
-	"github.com/antst/agent-sessions/bus/internal/rpc"
+	"github.com/antst/sessionbus/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/rpc"
 )
 
 const defaultPeerReconnectInterval = 2 * time.Second
