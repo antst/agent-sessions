@@ -151,6 +151,11 @@ func (b *PeerBackend) connect(ctx context.Context, identity sessionkit.PeerIdent
 		peer.Shutdown()
 		return ctx.Err()
 	case <-peer.Ready():
+	case <-peer.Closed():
+		if err = peer.Err(); err != nil {
+			return err
+		}
+		return errors.New("Codex peer closed before ready")
 	}
 	b.mu.Lock()
 	b.peer, b.identity = peer, identity

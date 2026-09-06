@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -46,8 +47,8 @@ func TestPeerPrepareUsesMetadataAndRefreshesTitle(t *testing.T) {
 	go servePeerBus(listener, events)
 	b, app := testPeer(t)
 	titles := make(chan string, 2)
-	titles <- "first"
-	titles <- "second"
+	titles <- "first title"
+	titles <- "second title"
 	go func() {
 		decoder := json.NewDecoder(app)
 		for {
@@ -68,14 +69,14 @@ func TestPeerPrepareUsesMetadataAndRefreshesTitle(t *testing.T) {
 		t.Fatalf("hello = %#v", hello)
 	}
 	params := hello["params"].(map[string]any)
-	if params["session_id"] != "thread-1" || params["name"] != "first" || len(params["groups"].([]any)) != 0 {
+	if params["session_id"] != "thread-1" || params["name"] != "first title" || len(params["groups"].([]any)) != 0 {
 		t.Fatalf("identity = %#v", params)
 	}
 	if err = b.Prepare(context.Background(), meta); err != nil {
 		t.Fatal(err)
 	}
 	rehello := <-events
-	if rehello["method"] != "session.hello" || rehello["params"].(map[string]any)["name"] != "second" {
+	if rehello["method"] != "session.hello" || rehello["params"].(map[string]any)["name"] != "second title" {
 		t.Fatalf("rehello = %#v", rehello)
 	}
 	if _, err = b.Call(context.Background(), "session.list", sessionkit.SessionListRequest{}); err != nil {
@@ -85,6 +86,38 @@ func TestPeerPrepareUsesMetadataAndRefreshesTitle(t *testing.T) {
 		t.Fatalf("call = %#v", call)
 	}
 	b.Shutdown()
+}
+
+func TestPeerPrepareSurfacesRejectedHello(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bus.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	t.Setenv(host.SocketEnv, path)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer connection.Close()
+		reader := bufio.NewScanner(connection)
+		if reader.Scan() {
+			_, _ = fmt.Fprintln(connection, `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid_hello"}}`)
+		}
+	}()
+	b, app := testPeer(t)
+	go func() {
+		var request appRequest
+		_ = json.NewDecoder(app).Decode(&request)
+		writeApp(t, app, map[string]any{"id": request.ID, "result": map[string]any{"thread": map[string]any{"id": "thread-1", "name": "sentence title", "cwd": "/work"}}})
+	}()
+	err = b.Prepare(context.Background(), json.RawMessage(`{"threadId":"thread-1"}`))
+	var failure *sessionkit.ProtocolError
+	if !errors.As(err, &failure) || failure.Code != -32602 || failure.Message != "invalid_hello" {
+		t.Fatalf("prepare error = %v", err)
+	}
 }
 
 func TestPeerPrepareRejectsMissingOrFixedIdentityChange(t *testing.T) {
