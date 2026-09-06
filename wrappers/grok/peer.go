@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -35,17 +36,18 @@ type PeerBackend struct {
 	peer     *sessionkit.Peer
 	observer *acpClient
 	process  *nativeProcess
+	leader   *nativeProcess
 	identity sessionkit.PeerIdentity
 	failed   chan error
 }
 
-func newPeerBackend(ctx context.Context, identity sessionkit.PeerIdentity) (*PeerBackend, error) {
+func newPeerBackend(ctx context.Context, identity sessionkit.PeerIdentity, leaderPath, cwd string, leader *nativeProcess) (*PeerBackend, error) {
 	id := identity.SessionID
 	if identity.Groups == nil {
 		identity.Groups = []string{}
 	}
-	cmd := command("grok", "--no-auto-update", "agent", "--leader", "stdio")
-	cmd.Env, cmd.Stderr, cmd.SysProcAttr = nativeEnvironment(), os.Stderr, &syscall.SysProcAttr{Setpgid: true}
+	cmd := command("grok", "--no-auto-update", "--permission-mode", "default", "--leader-socket", leaderPath, "agent", "--leader", "stdio")
+	cmd.Dir, cmd.Env, cmd.Stderr, cmd.SysProcAttr = cwd, nativeEnvironment(), os.Stderr, &syscall.SysProcAttr{Setpgid: true}
 	input, _ := cmd.StdinPipe()
 	output, _ := cmd.StdoutPipe()
 	process, err := startNative(cmd)
@@ -64,12 +66,12 @@ func newPeerBackend(ctx context.Context, identity sessionkit.PeerIdentity) (*Pee
 	stop := func(err error) (*PeerBackend, error) {
 		observer.close()
 		stopPeerProcess(process)
-		return nil, err
+		return nil, errors.Join(err, closeNative("leader", leader))
 	}
 	if err = initializeACP(ctx, observer); err != nil {
 		return stop(err)
 	}
-	b := &PeerBackend{observer: observer, process: process, failed: make(chan error, 1)}
+	b := &PeerBackend{observer: observer, process: process, leader: leader, failed: make(chan error, 1)}
 	wanted := identity.Name
 	var row peerSession
 	for {
@@ -131,16 +133,31 @@ func RunInteractive(ctx context.Context, plan host.ExecPlan) error {
 	if err != nil {
 		return err
 	}
-	endpoint, err := host.ListenPrivate(socket, host.LaunchTokenDigest(identity.SessionID))
+	key := host.LaunchTokenDigest(identity.SessionID)
+	endpoint, err := host.ListenPrivate(socket, key)
 	if err != nil {
 		return err
 	}
+	cwd, err := interactiveCwd(plan.Args)
+	if err != nil {
+		_ = endpoint.Close()
+		return err
+	}
+	leaderPath := leaderSocket(socket, key)
+	defer os.Remove(leaderPath)
+	defer os.Remove(strings.TrimSuffix(leaderPath, ".sock") + ".lock")
+	leader, err := startLeader(socket, key, cwd, interactivePermission(plan.Args), setEnvironment(nativeEnvironment(), mcp.LaneSocketEnv, endpoint.Path))
+	if err != nil {
+		_ = endpoint.Close()
+		return err
+	}
 	plan.Env = setEnvironment(plan.Env, mcp.LaneSocketEnv, endpoint.Path)
+	plan.Args = insertBeforeSeparator(plan.Args, "--leader-socket", leaderPath)
 	child := command(plan.Path, plan.Args...)
 	child.Env, child.Stdin, child.Stdout, child.Stderr = plan.Env, os.Stdin, os.Stdout, os.Stderr
 	if err = child.Start(); err != nil {
 		_ = endpoint.Close()
-		return err
+		return errors.Join(err, closeNative("leader", leader))
 	}
 	childCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -150,7 +167,7 @@ func RunInteractive(ctx context.Context, plan host.ExecPlan) error {
 		close(childDone)
 		cancel()
 	}()
-	backend, err := newPeerBackend(childCtx, identity)
+	backend, err := newPeerBackend(childCtx, identity, leaderPath, cwd, leader)
 	if err != nil {
 		select {
 		case childErr := <-childDone:
@@ -417,8 +434,8 @@ func observedRoster(sessions []peerSession, id string) (peerSession, error) {
 
 func (b *PeerBackend) Shutdown() {
 	b.mu.Lock()
-	peer, observer, process := b.peer, b.observer, b.process
-	b.peer, b.observer, b.process = nil, nil, nil
+	peer, observer, process, leader := b.peer, b.observer, b.process, b.leader
+	b.peer, b.observer, b.process, b.leader = nil, nil, nil, nil
 	b.mu.Unlock()
 	if peer != nil {
 		peer.Shutdown()
@@ -429,6 +446,7 @@ func (b *PeerBackend) Shutdown() {
 	if process != nil {
 		stopPeerProcess(process)
 	}
+	_ = closeNative("leader", leader)
 }
 
 func stopPeerProcess(process *nativeProcess) {
@@ -439,6 +457,9 @@ func stopPeerProcess(process *nativeProcess) {
 func InteractivePlan(arguments, environment []string) (host.ExecPlan, error) {
 	if grokPassthrough(arguments) {
 		return host.ExecPlan{Path: "grok", Args: slices.Clone(arguments), Env: slices.Clone(environment)}, nil
+	}
+	if argument := grokHeadless(arguments); argument != "" {
+		return host.ExecPlan{}, fmt.Errorf("%s is headless; use an Agentbus Grok lane", argument)
 	}
 	id, err := interactiveIdentity(arguments)
 	if err != nil {
@@ -460,6 +481,75 @@ func InteractivePlan(arguments, environment []string) (host.ExecPlan, error) {
 		environment = append(environment, host.SocketEnv+"="+sessionkit.Socket())
 	}
 	return host.InteractivePlan("grok", arguments, environment, host.PeerIdentity{SessionID: id, Name: id}, grokOptionTakesValue)
+}
+
+func interactiveCwd(arguments []string) (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if value := nativeOption(arguments, "--cwd"); value != "" {
+		cwd, err = filepath.Abs(value)
+	}
+	return cwd, err
+}
+
+func interactivePermission(arguments []string) string {
+	if nativeOption(arguments, "--always-approve") != "" {
+		return "bypassPermissions"
+	}
+	return first(nativeOption(arguments, "--permission-mode"), "default")
+}
+
+func insertBeforeSeparator(arguments []string, values ...string) []string {
+	result := slices.Clone(arguments)
+	index := slices.Index(result, "--")
+	if index < 0 {
+		index = len(result)
+	}
+	return slices.Insert(result, index, values...)
+}
+
+func nativeOption(arguments []string, target string) string {
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		if argument == "--" {
+			break
+		}
+		name, value, attached := strings.Cut(argument, "=")
+		if name == target {
+			if target == "--always-approve" {
+				return "true"
+			}
+			if attached {
+				return value
+			}
+			if index+1 < len(arguments) {
+				return arguments[index+1]
+			}
+		}
+		if !attached && grokOptionTakesValue(argument) {
+			index++
+		}
+	}
+	return ""
+}
+
+func grokHeadless(arguments []string) string {
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		if argument == "--" {
+			break
+		}
+		name, _, attached := strings.Cut(argument, "=")
+		if slices.Contains([]string{"-p", "--single", "--prompt-file", "--prompt-json", "--output-format", "--json-schema", "--max-turns", "--include-partial-messages"}, name) || strings.HasPrefix(argument, "-p") && !strings.HasPrefix(argument, "--") {
+			return name
+		}
+		if !attached && grokOptionTakesValue(argument) {
+			index++
+		}
+	}
+	return ""
 }
 
 func interactiveIdentity(arguments []string) (string, error) {

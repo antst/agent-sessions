@@ -50,6 +50,9 @@ func fakeGrok() {
 		_ = os.WriteFile(path, []byte("started"), 0o600)
 	}
 	if slices.Contains(arguments, "leader") && !slices.Contains(arguments, "stdio") {
+		if pidPath := os.Getenv("GROK_TEST_LEADER_PID"); pidPath != "" {
+			_ = os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0o600)
+		}
 		path := option(arguments, "--leader-socket")
 		listener, err := net.Listen("unix", path)
 		if err != nil {

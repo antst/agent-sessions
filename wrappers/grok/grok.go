@@ -178,7 +178,11 @@ func (p *Wrapper) openSession(ctx context.Context, primary *acpClient, request s
 }
 
 func (p *Wrapper) startLeader(cwd, permission string) (*nativeProcess, error) {
-	path := leaderSocket(p.socket, p.key)
+	return startLeader(p.socket, p.key, cwd, permission, nativeEnvironment())
+}
+
+func startLeader(socket, key, cwd, permission string, environment []string) (*nativeProcess, error) {
+	path := leaderSocket(socket, key)
 	_ = os.Remove(path)
 	arguments := []string{"--permission-mode", first(permission, "default")}
 	if permission == "" || permission == "default" {
@@ -186,7 +190,7 @@ func (p *Wrapper) startLeader(cwd, permission string) (*nativeProcess, error) {
 	}
 	arguments = append(arguments, "agent", "leader", "--leader-socket", path, "--relay-on-demand", "--no-auto-update")
 	cmd := command("grok", arguments...)
-	cmd.Dir, cmd.Env, cmd.Stdout, cmd.Stderr = cwd, nativeEnvironment(), os.Stderr, os.Stderr
+	cmd.Dir, cmd.Env, cmd.Stdout, cmd.Stderr = cwd, environment, os.Stderr, os.Stderr
 	process, err := startNative(cmd)
 	if err != nil {
 		return nil, err
@@ -200,7 +204,8 @@ func (p *Wrapper) startLeader(cwd, permission string) (*nativeProcess, error) {
 		case err := <-process.done:
 			return nil, fmt.Errorf("Grok leader exited: %v", err)
 		case <-deadline.C:
-			p.stopAux(process)
+			_ = process.cmd.Process.Signal(syscall.SIGKILL)
+			<-process.done
 			return nil, errors.New("Grok leader socket was not ready")
 		case <-tick.C:
 			if grokSocketReady(path) {

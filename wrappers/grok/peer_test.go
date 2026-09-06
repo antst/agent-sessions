@@ -43,6 +43,10 @@ func TestInteractivePlan(t *testing.T) {
 		_, err = InteractivePlan(arguments, nil)
 		check(t, err != nil, "unsupported managed surface accepted: %#v", arguments)
 	}
+	for _, arguments := range [][]string{{"--single", "prompt"}, {"-pprompt"}, {"--prompt-file", "prompt.txt"}, {"--prompt-json", `[]`}, {"--output-format", "json"}, {"--json-schema", `{}`}, {"--max-turns", "1"}, {"--include-partial-messages"}} {
+		_, err = InteractivePlan(arguments, nil)
+		check(t, err != nil && strings.Contains(err.Error(), "Agentbus Grok lane"), "headless surface accepted: %#v / %v", arguments, err)
+	}
 	plan, err = InteractivePlan([]string{"sessions", "list"}, []string{"PATH=/bin"})
 	must(t, err)
 	check(t, slices.Equal(plan.Args, []string{"sessions", "list"}) && environment(plan.Env, host.SessionIDEnv) == "", "native command was wrapped: %#v", plan)
@@ -76,7 +80,7 @@ func TestPeerMCPUsesRosterTitleAndDefaultLeader(t *testing.T) {
 		err     error
 	}, 1)
 	go func() {
-		backend, err := newPeerBackend(context.Background(), sessionkit.PeerIdentity{Product: "grok", SessionID: testSessionID, Name: testSessionID, Groups: []string{"peer-group"}})
+		backend, err := newPeerBackend(context.Background(), sessionkit.PeerIdentity{Product: "grok", SessionID: testSessionID, Name: testSessionID, Groups: []string{"peer-group"}}, filepath.Join(root, "leader.sock"), root, nil)
 		opened <- struct {
 			backend *PeerBackend
 			err     error
@@ -115,7 +119,9 @@ func TestInteractiveLauncherOwnsPeerAndLocalAction(t *testing.T) {
 	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
 	t.Setenv("GROK_TEST_RECORD", recordPath)
 	started := filepath.Join(root, "interactive-started")
+	leaderPID := filepath.Join(root, "leader.pid")
 	t.Setenv("GROK_TEST_INTERACTIVE_STARTED", started)
+	t.Setenv("GROK_TEST_LEADER_PID", leaderPID)
 	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
 	must(t, err)
 	ctx, cancel := context.WithCancelCause(context.Background())
@@ -124,6 +130,8 @@ func TestInteractiveLauncherOwnsPeerAndLocalAction(t *testing.T) {
 	hello := <-hellos
 	check(t, hello.SessionID == testSessionID, "hello = %#v", hello)
 	hello.ack <- true
+	leaderPidfd := interactivePidfd(t, leaderPID)
+	defer unix.Close(leaderPidfd)
 	path := filepath.Join(root, "lanes", host.LaunchTokenDigest(testSessionID)+".sock")
 	t.Setenv(mcp.LaneSocketEnv, path)
 	client, err := mcp.NewLaneBackend()
@@ -136,9 +144,13 @@ func TestInteractiveLauncherOwnsPeerAndLocalAction(t *testing.T) {
 	var exited *exec.ExitError
 	err = <-done
 	check(t, errors.As(err, &exited) && exited.ProcessState.Sys().(syscall.WaitStatus).Signal() == syscall.SIGINT, "signalled Grok child = %v", err)
+	check(t, !processRunning(t, leaderPidfd), "private leader survived interactive shutdown")
 	check(t, !exists(path), "peer endpoint remains")
 	frames := records(t, recordPath)
-	check(t, containsStart(frames, "--leader", testSessionID), "managed child absent")
+	leaderPath := filepath.Join(root, "grok-"+host.LaunchTokenDigest(testSessionID)+".sock")
+	check(t, containsStart(frames, "--leader", "--session-id", testSessionID, leaderPath), "managed child did not use the private leader")
+	check(t, containsStart(frames, "agent", "leader", "--relay-on-demand", leaderPath, path), "private leader or local action endpoint absent")
+	check(t, containsStart(frames, "agent", "stdio", leaderPath), "private observer absent")
 	check(t, containsStart(frames, path), "child did not inherit local endpoint")
 }
 
@@ -245,7 +257,7 @@ func TestPrepareSerializesAndCommitsAcknowledgedTitles(t *testing.T) {
 		err     error
 	}, 1)
 	go func() {
-		backend, err := newPeerBackend(context.Background(), sessionkit.PeerIdentity{Product: "grok", SessionID: testSessionID, Name: testSessionID})
+		backend, err := newPeerBackend(context.Background(), sessionkit.PeerIdentity{Product: "grok", SessionID: testSessionID, Name: testSessionID}, filepath.Join(root, "leader.sock"), root, nil)
 		opened <- struct {
 			backend *PeerBackend
 			err     error
@@ -296,7 +308,7 @@ func TestRosterIdentityChangeReplacesPeerAndSettlesOldRun(t *testing.T) {
 		err     error
 	}, 1)
 	go func() {
-		backend, err := newPeerBackend(context.Background(), sessionkit.PeerIdentity{Product: "grok", SessionID: testSessionID, Name: testSessionID, Groups: []string{"peer-group"}})
+		backend, err := newPeerBackend(context.Background(), sessionkit.PeerIdentity{Product: "grok", SessionID: testSessionID, Name: testSessionID, Groups: []string{"peer-group"}}, filepath.Join(root, "leader.sock"), root, nil)
 		opened <- struct {
 			backend *PeerBackend
 			err     error
@@ -359,7 +371,7 @@ func TestPeerShutdownKillsItsProcessGroup(t *testing.T) {
 		err     error
 	}, 1)
 	go func() {
-		backend, err := newPeerBackend(context.Background(), sessionkit.PeerIdentity{Product: "grok", SessionID: testSessionID, Name: testSessionID})
+		backend, err := newPeerBackend(context.Background(), sessionkit.PeerIdentity{Product: "grok", SessionID: testSessionID, Name: testSessionID}, filepath.Join(root, "leader.sock"), root, nil)
 		opened <- struct {
 			backend *PeerBackend
 			err     error
