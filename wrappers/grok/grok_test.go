@@ -305,6 +305,27 @@ func TestCloseReturnsNativeErrorAfterCleanup(t *testing.T) {
 	check(t, !exists(filepath.Join(root, "lanes", p.key+".sock")), "endpoint survived failed native close")
 }
 
+func TestCancelledCloseJoinsNativeProcesses(t *testing.T) {
+	root := t.TempDir()
+	p := New(filepath.Join(root, "agentbus.sock"), "cancelled-close")
+	p.SetCall(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
+	_, err := p.Open(context.Background(), sessionkit.OpenRequest{Name: "lane@local", Open: sessionkit.OpenOptions{Cwd: root}})
+	must(t, err)
+	p.mu.Lock()
+	watcher, leader := p.watcher, p.leader
+	p.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	check(t, p.Close(ctx) != nil, "cancelled native close lost its diagnostic")
+	for _, process := range []*nativeProcess{watcher, leader} {
+		select {
+		case <-process.done:
+		default:
+			t.Fatal("Close returned before a native process was reaped")
+		}
+	}
+}
+
 func TestKitRunTokenCrossings(t *testing.T) {
 	root, recordPath := t.TempDir(), filepath.Join(t.TempDir(), "record")
 	t.Setenv("GROK_TEST_RECORD", recordPath)

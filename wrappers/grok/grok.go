@@ -440,7 +440,7 @@ func (p *Wrapper) closeProcesses(ctx context.Context) error {
 	if observer != nil {
 		observer.close()
 	}
-	failures = append(failures, closeNative(ctx, "observer", watcher), closeNative(ctx, "leader", leader))
+	failures = append(failures, closeNative("observer", watcher), closeNative("leader", leader))
 	if child != nil {
 		if err := child.Close(ctx, func(context.Context) error { return nil }); err != nil {
 			failures = append(failures, err)
@@ -476,23 +476,19 @@ func (p *Wrapper) stopAux(process *nativeProcess) {
 	<-process.done
 }
 
-func stopNative(ctx context.Context, process *nativeProcess) error {
+func stopNative(process *nativeProcess) error {
 	if err := process.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return err
 	}
-	select {
-	case <-process.done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	<-process.done
+	return nil
 }
 
-func closeNative(ctx context.Context, role string, process *nativeProcess) error {
+func closeNative(role string, process *nativeProcess) error {
 	if process == nil {
 		return nil
 	}
-	if err := stopNative(ctx, process); err != nil {
+	if err := stopNative(process); err != nil {
 		return fmt.Errorf("close Grok %s: %w", role, err)
 	}
 	return nil
