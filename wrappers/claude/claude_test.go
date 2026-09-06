@@ -64,16 +64,16 @@ func fakeChild(mode string) {
 }
 
 func TestLaunchArgumentsTable(t *testing.T) {
-	mcp := `{"mcpServers":{"agent_sessions":{"args":["mcp"],"command":"claude-peer","env":{"SESSIONBUS_LANE_SOCKET":"/tmp/lane.sock"}}}}`
+	mcp := `{"mcpServers":{"sessionbus":{"args":["mcp"],"command":"claude-peer","env":{"SESSIONBUS_LANE_SOCKET":"/tmp/lane.sock"}}}}`
 	base := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages"}
 	for _, test := range []struct {
 		name    string
 		request sessionkit.OpenRequest
 		want    []string
 	}{
-		{"fresh typed", sessionkit.OpenRequest{Name: "parent/leaf@local", Open: sessionkit.OpenOptions{Model: "sonnet", ReasoningEffort: "high", Arguments: []string{"--agent", "reviewer"}}}, append(append([]string{}, base...), "--session-id", fixtureID, "--name", "parent/leaf", "--permission-mode", "dontAsk", "--model", "sonnet", "--effort", "high", "--mcp-config", mcp, "--allowedTools", "mcp__agent_sessions__*", "--agent", "reviewer")},
-		{"resume bypass", sessionkit.OpenRequest{Name: "ignored@local", ResumeSessionID: fixtureID, Open: sessionkit.OpenOptions{PermissionMode: "bypassPermissions"}}, append(append([]string{}, base...), "--resume", fixtureID, "--dangerously-skip-permissions", "--mcp-config", mcp, "--allowedTools", "mcp__agent_sessions__*")},
-		{"native permission", sessionkit.OpenRequest{Name: "leaf@local", Open: sessionkit.OpenOptions{PermissionMode: "acceptEdits"}}, append(append([]string{}, base...), "--session-id", fixtureID, "--name", "leaf", "--permission-mode", "acceptEdits", "--mcp-config", mcp, "--allowedTools", "mcp__agent_sessions__*")},
+		{"fresh typed", sessionkit.OpenRequest{Name: "parent/leaf@local", Open: sessionkit.OpenOptions{Model: "sonnet", ReasoningEffort: "high", Arguments: []string{"--agent", "reviewer"}}}, append(append([]string{}, base...), "--session-id", fixtureID, "--name", "parent/leaf", "--permission-mode", "dontAsk", "--model", "sonnet", "--effort", "high", "--mcp-config", mcp, "--allowedTools", "mcp__sessionbus__*", "--agent", "reviewer")},
+		{"resume bypass", sessionkit.OpenRequest{Name: "ignored@local", ResumeSessionID: fixtureID, Open: sessionkit.OpenOptions{PermissionMode: "bypassPermissions"}}, append(append([]string{}, base...), "--resume", fixtureID, "--dangerously-skip-permissions", "--mcp-config", mcp, "--allowedTools", "mcp__sessionbus__*")},
+		{"native permission", sessionkit.OpenRequest{Name: "leaf@local", Open: sessionkit.OpenOptions{PermissionMode: "acceptEdits"}}, append(append([]string{}, base...), "--session-id", fixtureID, "--name", "leaf", "--permission-mode", "acceptEdits", "--mcp-config", mcp, "--allowedTools", "mcp__sessionbus__*")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := launchArguments(test.request, fixtureID, "/tmp/lane.sock")
@@ -158,7 +158,7 @@ func TestStreamRunDeliveryAndInterrupt(t *testing.T) {
 	preserved := <-writes.wrote
 	check(t, string(preserved) == `{"message":{"content":[{"text":"  preserved \n","type":"text"}],"role":"user"},"type":"user"}`, "user frame = %s", preserved)
 	p.writes, p.replays = 0, 0
-	receipt, err := p.Deliver(context.Background(), delivery("queued"))
+	receipt, err := p.Deliver(context.Background(), delivery("queued"), nil)
 	must(t, err)
 	check(t, receipt.Disposition == "queued_for_next_turn", "idle receipt = %#v", receipt)
 	done := make(chan sessionkit.TurnResult, 1)
@@ -175,7 +175,7 @@ func TestStreamRunDeliveryAndInterrupt(t *testing.T) {
 	native, err := p.start(context.Background(), "next")
 	must(t, err)
 	<-writes.wrote
-	receipt, err = p.Deliver(context.Background(), delivery("steer"))
+	receipt, err = p.Deliver(context.Background(), delivery("steer"), nil)
 	must(t, err)
 	check(t, receipt.Disposition == "injected" && strings.Contains(prompt(<-writes.wrote), "steer"), "active receipt = %#v", receipt)
 	p.receive(frame{Type: "user", IsReplay: true})
@@ -183,7 +183,7 @@ func TestStreamRunDeliveryAndInterrupt(t *testing.T) {
 	p.receive(frame{Type: "result", Subtype: "success", SessionID: fixtureID})
 	_, err = native.Wait(context.Background())
 	must(t, err)
-	receipt, err = p.Deliver(context.Background(), delivery("after"))
+	receipt, err = p.Deliver(context.Background(), delivery("after"), nil)
 	must(t, err)
 	check(t, receipt.Disposition == "queued_for_next_turn", "terminal receipt = %#v", receipt)
 
@@ -211,7 +211,7 @@ func TestPreReplayResultIsIgnored(t *testing.T) {
 	must(t, err)
 	<-writes.wrote
 	p.receive(frame{Type: "user", IsReplay: true})
-	receipt, err := p.Deliver(context.Background(), delivery("injected"))
+	receipt, err := p.Deliver(context.Background(), delivery("injected"), nil)
 	must(t, err)
 	check(t, receipt.Disposition == "injected", "receipt = %#v", receipt)
 	<-writes.wrote
