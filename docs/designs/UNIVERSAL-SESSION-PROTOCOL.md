@@ -63,14 +63,19 @@ every federated host. The product owns the ID part because it owns the session
 primitive that can address it; the daemon mints no session IDs. A caller may
 use a bare ID or bare name as shorthand for its own daemon's host.
 Resolution splits a qualified name on its last `@`. Name parts are 1–128
-printable characters with no whitespace or control character; `/` and `@` are
-allowed. The last `@` is always the canonical host boundary. Host parts match
+printable Unicode characters, including spaces, with control characters excluded;
+`/` and `@` are allowed. Name values are preserved exactly: no trimming,
+whitespace collapse, tokenization on whitespace, or Unicode normalization. The
+128-character limit counts Unicode code points. ID parts remain 1–128 printable
+characters with no whitespace or control character. The last `@` is always the
+canonical host boundary. Host parts match
 `^[a-z0-9][a-z0-9-]{0,31}$`. For identity input, no `@` means a bare local part:
 the daemon appends the caller's host, then tries exact ID before exact name. An
 input containing `@` is always split at the last one, and an unknown right part
-is `unknown_host` rather than a bare name. These grammars
-are daemon checks because the shared schema deliberately has no `pattern`
-keyword.
+is `unknown_host` rather than a bare name. The schema carries the printable-name
+pattern and code-point bounds; the daemon separately checks name, ID, product,
+and host grammar so changing one does not loosen another. Overlong or
+control-bearing product titles are rejected visibly and are never rewritten.
 The wire has no generic tool frame: after hello, a peer or committed worker
 originates the ordinary client-to-daemon methods in this section. Product-facing
 start/wait/status/interrupt/list/send tools are caller-kit sugar over them.
@@ -1208,7 +1213,10 @@ ordinary daemon EOF detaches the dead connection and retries the same asserted
 peer identity every fixed `peerReconnectInterval = 2s`, with no backoff,
 jitter, or attempt cap. A call made while disconnected fails `not_connected`
 and is never replayed. `session.superseded` tombstones that identity instance
-and stops retries permanently.
+and stops retries permanently. A correlated `invalid_hello` response is also
+terminal for that identity: the kit surfaces it after `closed` and never turns
+the following EOF into a reconnect. The Go peer exposes that terminal value as
+`Err()`; a plain `Shutdown()` leaves it nil.
 The peer kit keeps one JSON-round-trip snapshot as the desired identity. After
 each hello response it compares what it sent with that desired value and sends
 the current value immediately until they match; a change crossed with connect
@@ -1550,13 +1558,13 @@ optional local key, and launch token; canonical lane identity arrives later in
 | Ledger item | Decision | Source-backed reason |
 | --- | --- | --- |
 | Resident wrapper | `grok-peer` with a launch token owns one private leader, one authenticated ACP primary, and one observer for the exact lane session. Without a token, `grok-peer` execs `grok --leader --session-id <uuid>`; it does not create a private leader. Grok spawns our stdio MCP server, which owns the peer connection and reaches the product through Grok's default leader socket. A hand-started Grok with no launcher identity never hellos. | Grok Build 1.0.13 exposes the ACP agent through `grok agent stdio` / `leader` and acts as an MCP client. The default leader socket is a product-internal hop, not another bus connection. |
-| Open and resume | The resident wrapper receives `session.open` before it starts the private leader. Fresh mints a UUID, starts Grok with `--session-id <id>`, applies the composed title through the observer rename primitive, attaches with ACP `session/load`, and returns that product ID; resume starts with `--resume <resume_session_id>` and loads the same ID. It never calls `session/new`. It puts `--permission-mode`, `--reasoning-effort`, `-m`, and ordered `arguments` on that command line, with `cwd` as the child working directory. | Grok rejects a fresh `--session-id` that already exists, preserving product-owned uniqueness. ACP `_meta` exposes only `yoloMode` / `autoMode`; it is not an open-field transport. All five fields and the title are applied after open. The existing 15-second startup hold remains inside `spawnTransactionTimeout = 60s`. |
-| Run | Call ACP `session/prompt`, consume matching update notifications, and return its stop reason and accumulated output. | `grok_native_session.go:270-308` is the resident prompt primitive. |
-| Tools | In lane mode the wrapper publishes a private endpoint and `grok/scripts/native-entry` is a local stdio MCP relay to it. In peer mode Grok, an MCP client, spawns the installed stdio MCP entry; that entry owns the direct peer connection and delivers through the default leader socket. Without a live leader, delivery is rejected as `no_leader`. | ACP is the wrapper-to-Grok control protocol; MCP is the product-facing Agent Sessions tool boundary. The two must not be conflated. |
-| Deliver | While running, observer interjection reports `injected` only after the actor acknowledges it. While idle, Grok acknowledges retention on its native held-prompt queue and the wrapper reports `queued_for_next_turn`. | Both dispositions describe acknowledged product-owned behavior; the wrapper adds no FIFO and the daemon learns no Grok condition. |
-| Interrupt and close | Interrupt sends one ACP `session/cancel` notification; `{}` means the notification was sent, not that the run has stopped. Close sends cancel and awaits a terminal for at most 6 seconds, then closes observer, primary, and leader concurrently for at most 3 seconds; at 9 seconds it kills the wrapper-owned process group. | The product-specific 6+3-second schedule fits inside the daemon's single 10-second `closeBound`, leaves one second for wrapper EOF/reap, and cannot create another daemon clock. |
-| Exception ledger | Section 1 code exceptions: **0**. Declared unsupported open fields: **none**. Wrapper-only queue: **none**; Grok's idle prompt queue is native state. | Grok exposes running interjection, native idle queuing, and all typed open controls; no limitation leaks outward. |
-| Size cap | **750 production / 700 test logical lines**, including ACP framing and leader bootstrap but excluding the shared wrapper host. | Grok's private leader is product-specific and must not escape its ledger or recreate daemon attachment/generation state. |
+| Open and resume | The resident wrapper receives `session.open` before it starts the private leader. For a fresh lane it holds `locks/grok/<launch-token-digest>`, uses the same digest for the private lane-socket path, starts Grok without `--session-id`, and calls ACP `session/new`; Grok's returned ID becomes the session ID, then the wrapper renames the lock to `locks/grok/<session_id>` without replacing an existing lock and applies the composed title through the observer rename primitive. Resume starts with `--resume <resume_session_id>`, locks `locks/grok/<resume_session_id>` directly, and calls `session/load` for the same ID. It puts `--permission-mode`, `--reasoning-effort`, `-m`, and ordered `arguments` on the process command line, with `cwd` as the child working directory. | Grok Build 1.0.13 ignores a fresh `--session-id` in this ACP entry; `session/new` returns the product-owned ID and `session/load` accepts it on resume. ACP `_meta` exposes only `yoloMode` / `autoMode`; it is not an open-field transport. All five fields and the title are applied at open. The existing 15-second startup hold remains inside `spawnTransactionTimeout = 60s`. |
+| Run | Call ACP `session/prompt`, consume only update notifications carrying that prompt's ID, and return its stop reason and accumulated output. Notifications from any other product turn are ignored. | One Agentbus run owns one native prompt; an unrelated product turn cannot become its result. `grok_native_session.go:270-308` is the resident prompt primitive. |
+| Tools | In lane mode the wrapper publishes `lanes/<launch-token-digest>.sock` and `grok/scripts/native-entry` is a local stdio MCP relay to it. In peer mode Grok, an MCP client, spawns the installed stdio MCP entry; that entry owns the direct peer connection and delivers through the default leader socket. Without the exact live session in that leader's roster, delivery is rejected as `no_leader`. | ACP is the wrapper-to-Grok control protocol; MCP is the product-facing Agent Sessions tool boundary. The token-derived path is renamed nowhere and disappears with the wrapper. |
+| Deliver | While a wrapper-owned prompt is active, observer interjection reports `injected` only after the actor acknowledges it. While idle, delivery enters the shared bounded wrapper FIFO, reports `queued_for_next_turn`, and is prepended to the wrapper's next `session/prompt`. | Grok's idle interject starts its own `interject-fallback` turn, so it cannot implement lane-idle delivery: a lane never starts an unrequested turn. |
+| Interrupt and close | Interrupt sends one ACP `session/cancel` notification; `{}` means the notification was sent, not that the run has stopped. The worker kit's universal close path interrupts an active run and waits for its terminal before invoking Grok's `close`, which releases the primary, observer, leader, private socket, and lock. | Grok adds no close timer: the daemon's single 10-second `closeBound` closes the worker and kills its process group if product cleanup stalls. Grok's close callback never receives an active run. |
+| Exception ledger | Section 1 code exceptions: **0**. Declared unsupported open fields: **none**. Wrapper-only state: the shared bounded idle-delivery FIFO. | Grok exposes active interjection and all typed open controls; only idle delivery lacks a native append primitive and stays wrapper-local. |
+| Size cap | **850 production / 700 test logical lines**, including ACP framing and leader bootstrap but excluding the shared wrapper host. | Grok's private leader is product-specific and must not escape its ledger or recreate daemon attachment/generation state. |
 | Deletion inventory | Delete all `internal/products/grok` (2 files / 637 lines), `internal/launcher/{grok_peer.go,grok_peer_test.go}` (2 / 1,183), `cmd/agent-sessions/grok_peer.go` (1 / 213), and all 11 `internal/bridge/grok*.go` files (1,883). `internal/launcher/lane_grok_test.go` is counted once in the shared row. Rewrite `grok/.mcp.json` and `grok/scripts/native-entry` as dual-entry peer/direct or lane/local assets. Total: **16 files / 3,916 lines**. | The wrapper receives copied, product-owned ACP/leader/observer slices rather than retaining a cross-product bridge package; the thin peer exec plan is rehomed without wrapping the TUI. |
 
 ### 4.5 Qwen Code
@@ -1746,7 +1754,7 @@ check.
 | DSH | Profile composition, global Cordis patch/package resolution, app-ready timing, one connection per root, title/append/steer/terminal reason, and bounded supervisor exposure around `whenIdle`. |
 | Claude | `system/init` timing relative to the first stream input, `--mcp-config` precedence, session-ID/title flags, permission `dontAsk`, active injection, private Unix MCP, and `/clear` followed by same-socket different-ID re-hello with only the new titled peer visible. |
 | Codex | Deferred `_meta.threadId` peer identity, per-thread `mcp_servers.<id>.url`, thread naming, approval/sandbox mappings, steer, interrupt, resume, and `/clear` followed by first-call different-ID re-hello with only the new titled peer visible and no `inactive` state. |
-| Grok | Private leader startup/load without `session/new`, observer rename/interjection/held queue acknowledgements, default-leader peer delivery, and the 6+3-second close schedule. |
+| Grok | Private leader startup, product-ID allocation through `session/new`, exact `session/load` resume, provisional-lock rename, observer rename/interjection/held-queue acknowledgements, default-leader peer delivery, and cleanup under the daemon's `closeBound`. |
 | Qwen | ACP resume and `_meta["qwen-code/sessionId"]`, rename, permission vocabulary, `craft/drainMidTurnQueue` including undrained recovery and its 2-second/three-strike/`-32601`/30-second bounds, and private Unix MCP. |
 | OpenCode | v2 SDK directory/model/title/prompt/abort/delivery primitives before hello, plus the installed SDK/CLI version pair. |
 | Kilo | The same v2 SDK probe as OpenCode; runtime support remains explicitly unproven until Kilo is installed on `umka-dev1`. |
