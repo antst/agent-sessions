@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const { Caller, connectPeer, Connection, ProtocolError } = require("./index.js");
+const { ACTIONS, Caller, connectPeer, Connection, ProtocolError } = require("./index.js");
 const { pair, deferred } = require("./test-support.js");
 
 const fixtures = JSON.parse(fs.readFileSync(path.join(__dirname, "../../internal/protocol/caller-sugar.fixtures.json"), "utf8"));
@@ -38,6 +38,22 @@ test("caller maps operations to closed wire requests", async (t) => {
     [() => caller.close({ session_id: "lane@local", forget: true }), "session.close", { session_id: "lane@local", forget: true }],
   ];
   for (const [call, method, params] of table) { await call(); assert.deepEqual(seen.shift(), [method, params]); }
+
+  const actions = [
+    ["list", {}, "session.list", {}],
+    ["send", { target: "lane", message: "hello" }, "message.send", { target: "lane", message: "hello" }],
+    ["spawn", { name: "child", product: "example-peer", open: {} }, "lane.spawn", { name: "child", product: "example-peer", open: {} }],
+    ["describe", { product: "example-peer" }, "lane.describe", { product: "example-peer" }],
+    ["run", { session_id: "lane@local", input: "work" }, "turn.run", { session_id: "lane@local", input: "work" }],
+    ["interrupt", { session_id: "lane@local" }, "turn.interrupt", { session_id: "lane@local" }],
+    ["close", { session_id: "lane@local" }, "session.close", { session_id: "lane@local" }],
+    ["forget", { session_id: "lane@local" }, "session.close", { session_id: "lane@local", forget: true }],
+  ];
+  for (const [action, args, method, params] of actions) { await caller.action(action, args); assert.deepEqual(seen.shift(), [method, params]); }
+  assert.deepEqual(ACTIONS, ["list", "send", "spawn", "describe", "run", "start", "wait", "status", "interrupt", "close", "forget"]);
+  await assert.rejects(caller.action("unknown", {}), /unknown action/);
+  await assert.rejects(caller.action("list", { extra: true }), /invalid SessionListRequest/);
+  await assert.rejects(caller.action("status", { turn_id: "missing", extra: true }), /invalid status request/);
 });
 
 test("caller sugar matches the shared shapes and sequences", async (t) => {
@@ -49,22 +65,23 @@ test("caller sugar matches the shared shapes and sequences", async (t) => {
   const caller = new Caller(connection, { schedule: (call, milliseconds) => { const timer = { call, milliseconds, stopped: false }; timers.push(timer); return () => { timer.stopped = true; }; } });
   t.after(() => { connection.close(); daemon.close(); });
 
-  const first = caller.start(fixtures.shapes.start.request);
+  const first = await caller.action("start", fixtures.shapes.start.request);
   assert.deepEqual(first, fixtures.shapes.start.result);
   await arrived.get(sequence.first_input).promise;
-  assert.throws(() => caller.start(fixtures.shapes.start.request), (error) => error instanceof ProtocolError && error.code === -32003);
-  assert.deepEqual(caller.status({ turn_id: first.turn_id }), fixtures.shapes.running.result);
+  await assert.rejects(caller.action("start", fixtures.shapes.start.request), (error) => error instanceof ProtocolError && error.code === -32003);
+  assert.deepEqual(await caller.action("status", { turn_id: first.turn_id }), fixtures.shapes.running.result);
   assert.throws(() => caller.status({ turn_id: first.turn_id, extra: true }), /invalid status request/);
   await assert.rejects(caller.wait({ turn_id: first.turn_id, timeout_ms: 1.5 }), /invalid wait request/);
-  const timed = caller.wait({ turn_id: first.turn_id, timeout_ms: 25 });
+  const timed = caller.action("wait", { turn_id: first.turn_id, timeout_ms: 25 });
+  await Promise.resolve();
   assert.equal(timers[0].milliseconds, 25);
   timers[0].call();
   assert.deepEqual(await timed, fixtures.shapes.running.result);
   await daemon.result(pending.get(sequence.first_input), fixtures.shapes.done.terminal);
   await caller.runs.get(first.turn_id).settled;
-  const second = caller.start({ session_id: sequence.session_id, input: sequence.second_input });
+  const second = await caller.action("start", { session_id: sequence.session_id, input: sequence.second_input });
   assert.deepEqual([first.turn_id, second.turn_id], [sequence.first_turn_id, sequence.second_turn_id]);
-  assert.deepEqual(caller.status({ turn_id: first.turn_id }), fixtures.shapes.done.result);
+  assert.deepEqual(await caller.action("status", { turn_id: first.turn_id }), fixtures.shapes.done.result);
   assert.throws(() => caller.status({ turn_id: first.turn_id }), /unknown_turn/);
   for (const row of fixtures.sequences.invalid_local_requests) {
     const call = () => caller[row.operation](row.request);
@@ -72,7 +89,7 @@ test("caller sugar matches the shared shapes and sequences", async (t) => {
   }
   await arrived.get(sequence.second_input).promise;
   await daemon.result(pending.get(sequence.second_input), fixtures.shapes.done.terminal);
-  assert.deepEqual(await caller.wait({ turn_id: second.turn_id }), { ...fixtures.shapes.done.result, turn_id: second.turn_id });
+  assert.deepEqual(await caller.action("wait", { turn_id: second.turn_id }), { ...fixtures.shapes.done.result, turn_id: second.turn_id });
 });
 
 test("connection loss removes local runs and reports a resumable lane", async () => {

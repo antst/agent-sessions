@@ -64,6 +64,27 @@ test("one chunk is admitted before its first callback", async (t) => {
   worker.connection._data(Buffer.from(frame(2, "admission") + frame(3, "again"))); await product.started.promise;
 });
 
+test("peer replace settles old runs and reconnects with the new identity", async (t) => {
+  const first = peerEndpoint(), second = peerEndpoint(), clients = [first.client, second.client], scheduled = [], scheduledReady = deferred();
+  const identity = { product: "native-product", session_id: "old", name: "old", groups: ["old"], info: {} };
+  const peer = connectPeer(identity, async () => ({ disposition: "injected" }), { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }, { connect: () => clients.shift(), schedule: (call) => { scheduled.push(call); scheduledReady.resolve(); } });
+  t.after(() => { peer.shutdown(); first.daemon.close(); second.daemon.close(); });
+  await first.daemon.result(await first.next(), {}); await peer.ready;
+  const before = structuredClone(peer.identity);
+  await assert.rejects(peer.replace({ ...before, name: "same" }), /invalid replace identity/); assert.deepEqual(peer.identity, before);
+  const started = peer.caller.start({ session_id: "lane@local", input: "block" }), run = await first.next();
+  const replacementIdentity = { product: "native-product", session_id: "new", name: "new", groups: ["new"], info: { revision: 1 } };
+  const replaced = peer.replace(replacementIdentity), replacement = await first.next(); replacementIdentity.groups.push("mutated"); replacementIdentity.info.revision = 9;
+  assert.deepEqual(await peer.caller.wait({ turn_id: started.turn_id }), { turn_id: "t-1", session_id: "lane@local", state: "unavailable", reason: "-32002 not_connected" });
+  await assert.rejects(peer.call("session.list", {}), /not connected/);
+  const update = { name: "retitled", info: { revision: 2 } }; await assert.rejects(peer.rehello(update), /not connected/); update.info.revision = 9;
+  await first.daemon.error(run, -32002); await first.daemon.result(replacement, {});
+  const corrective = await first.next(); assert.deepEqual(corrective.params, { protocol: 1, product: "native-product", session_id: "new", name: "retitled", groups: ["new"], info: { revision: 2 } });
+  await first.daemon.result(corrective, {}); await replaced;
+  first.daemon.close(); await scheduledReady.promise; scheduled.shift()();
+  const reconnect = await second.next(); assert.deepEqual(reconnect.params, corrective.params); await second.daemon.result(reconnect, {}); await peer.ready;
+});
+
 async function harness(t, product, options = {}) {
   const [workerSocket, daemonSocket] = pair(); const hello = deferred(); const env = { AGENTBUS_LAUNCH_TOKEN: "token", AGENTBUS_LOCAL_KEY: "", AGENTBUS_SOCKET: "/fixture/socket" }; product.env = env;
   const worker = new Worker(product, env, { connect: (socket) => { assert.equal(socket, "/fixture/socket"); return workerSocket; } }); product.worker = worker;
@@ -75,6 +96,12 @@ async function harness(t, product, options = {}) {
   t.after(async () => { worker.shutdown(); daemon.close(); await serving; });
   if (options.open !== false && options.acknowledge !== false) assert.deepEqual(await daemon.call("session.open", openRequest), { session_id: "product-session" });
   return { worker, daemon, workerSocket, serving };
+}
+
+function peerEndpoint() {
+  const [client, socket] = pair(), queued = [], waiting = [];
+  const daemon = new Connection(socket, false, (request) => { const resolve = waiting.shift(); if (resolve) resolve(request); else queued.push(request); });
+  return { client, daemon, next: () => queued.length ? Promise.resolve(queued.shift()) : new Promise((resolve) => waiting.push(resolve)) };
 }
 
 for (const row of rows) test(`lifecycle: ${row.name}`, async (t) => {
@@ -144,4 +171,5 @@ async function peerLifetime() {
   assert.equal(currentIdentity.name, "crossed title"); assert.deepEqual(currentIdentity.info, { phase: "new" });
   const beforeTerminal = structuredClone(peer.identity); await connections[2].call("session.superseded", {}); await peer.closed;
   await assert.rejects(peer.rehello({ name: "too late", info: {} }), /superseded/); assert.deepEqual(peer.identity, beforeTerminal); assert.equal(scheduled.length, 0);
+  await assert.rejects(peer.replace({ ...beforeTerminal, session_id: "too-late" }), /superseded/); assert.deepEqual(peer.identity, beforeTerminal);
 }

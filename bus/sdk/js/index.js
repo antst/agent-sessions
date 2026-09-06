@@ -1,7 +1,7 @@
 "use strict";
 
 const net = require("node:net");
-const { Caller } = require("./caller.js");
+const { ACTIONS, Caller } = require("./caller.js");
 const { Connection, ProtocolError } = require("./connection.js");
 const { schema, validate } = require("./schema.js");
 
@@ -105,25 +105,29 @@ class Peer {
     this.caller = new Caller(this, options.caller);
   }
   call(method, params, signal) { if (!this.connection) return Promise.reject(new Error("not connected")); return this.connection.call(method, params, signal); }
-  async rehello(update) {
+  rehello(identity) { return this._change(identity, false); }
+  replace(identity) { return this._change(identity, true); }
+  async _change(update, replacement) {
     if (this.terminal) throw new Error("superseded");
-    if (!update || typeof update !== "object" || Array.isArray(update) || Object.keys(update).length !== 2 || !Object.hasOwn(update, "name") || !Object.hasOwn(update, "info")) throw new Error("invalid rehello identity");
-    const desired = { ...this.identity, name: update.name, info: update.info };
-    if (!validate("SessionHelloRequest", { protocol: 1, ...desired })) throw new Error("invalid rehello identity");
-    this.identity = snapshot(desired);
+    const object = update && typeof update === "object" && !Array.isArray(update), desired = replacement ? update : { ...this.identity, name: update?.name, info: update?.info };
+    if (!object || !replacement && (Object.keys(update).length !== 2 || !Object.hasOwn(update, "name") || !Object.hasOwn(update, "info")) || !validate("SessionHelloRequest", { protocol: 1, ...desired }) || replacement && update.session_id === this.identity.session_id) throw new Error(`invalid ${replacement ? "replace" : "rehello"} identity`);
     const connection = this.connection;
+    this.identity = snapshot(desired);
+    const identity = this.identity;
+    if (replacement) { this.connection = null; this.caller.disconnected(); }
     if (!connection || connection.signal.aborted) throw new Error("not connected");
-    try { return await this._hello(connection, this.identity); }
-    catch (error) { if (connection.signal.aborted) throw new Error("not connected"); throw error; }
+    try { const result = await this._hello(connection, identity); if (replacement && (this.wire !== connection || connection.signal.aborted)) throw new Error("not connected"); if (replacement) this.connection = connection; return result; }
+    catch (error) { if (connection.signal.aborted) throw new Error("not connected"); if (replacement) connection.close(); throw error; }
   }
-  shutdown() { this.terminal = true; this.connection?.close(); this.finish(); }
+  shutdown() { this.terminal = true; this.wire?.close(); this.finish(); }
   async _open() {
-    if (this.terminal) return; let connection; try { connection = new Connection(this.connect(this.socket), true, (request) => this._handle(request, connection)); } catch { this.schedule(() => { this.ready = this._open(); }, 2000); return; } this.connection = connection;
+    if (this.terminal) return; let connection; try { connection = new Connection(this.connect(this.socket), true, (request) => this._handle(request, connection)); } catch { this.schedule(() => { this.ready = this._open(); }, 2000); return; } this.wire = connection;
     try { await this._hello(connection); } catch { connection.close(); }
+    if (!connection.signal.aborted && this.wire === connection) this.connection = connection;
     if (!connection.signal.aborted) void connection.done.then(() => this._lost(connection)); else this._lost(connection);
   }
   async _hello(connection, identity = this.identity) { for (;;) { const result = await connection.call("session.hello", { protocol: 1, ...identity }); if (identity === this.identity) return result; identity = this.identity; } }
-  _lost(connection) { if (this.connection !== connection || this.terminal) return; this.connection = null; this.schedule(() => { this.ready = this._open(); }, 2000); }
+  _lost(connection) { if (this.wire !== connection || this.terminal) return; this.wire = null; this.connection = null; this.schedule(() => { this.ready = this._open(); }, 2000); }
   _handle(request, connection) {
     if (request.method === "session.superseded") { this.terminal = true; void connection.result(request, {}).finally(() => { connection.close(); this.finish(); }); return; }
     if (request.method === "message.deliver") void Promise.resolve().then(() => this.deliver(connection.signal, request.params)).then((result) => connection.result(request, result), (error) => connection.result(request, { disposition: "rejected", reason: clean(error) })).catch(() => connection.close());
@@ -137,4 +141,4 @@ function environment(env, worker) { const values = Object.fromEntries(ENV.map((n
 function terminal(result = {}) { if (!result || typeof result !== "object") return result; if (!Object.hasOwn(result, "result")) result = { ...result, result: "" }; if (typeof result.result !== "string") return result; const characters = [...result.result]; return { ...result, result: characters.slice(0, 262144).join(""), ...(characters.length > 262144 ? { truncated: true } : {}) }; }
 function clean(error) { return String(error?.message || error || "product callback failed"); }
 
-module.exports = { Caller, connectPeer, Connection, ENV, Peer, ProtocolError, Run, serveWorker, Worker, schema, validate };
+module.exports = { ACTIONS, Caller, connectPeer, Connection, ENV, Peer, ProtocolError, Run, serveWorker, Worker, schema, validate };

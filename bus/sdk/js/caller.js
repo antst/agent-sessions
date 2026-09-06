@@ -3,6 +3,9 @@
 const { ProtocolError } = require("./connection.js");
 const { validate } = require("./schema.js");
 
+const ACTIONS = Object.freeze(["list", "send", "spawn", "describe", "run", "start", "wait", "status", "interrupt", "close", "forget"]);
+const ACTION_METHODS = Object.freeze({ list: "session.list", send: "message.send", spawn: "lane.spawn", describe: "lane.describe", run: "turn.run", interrupt: "turn.interrupt", close: "session.close", forget: "session.close" });
+
 class Caller {
   constructor(connection, options = {}) {
     this.connection = connection;
@@ -23,6 +26,13 @@ class Caller {
   run(request, cancel) { return this.connection.call("turn.run", request, cancel); }
   interrupt(request, cancel) { return this.connection.call("turn.interrupt", request, cancel); }
   close(request, cancel) { return this.connection.call("session.close", request, cancel); }
+
+  action(name, args = {}, cancel) {
+    const method = ACTION_METHODS[name];
+    if (method) return this.connection.call(method, name === "forget" ? { ...args, forget: true } : args, cancel);
+    if (name === "start" || name === "status" || name === "wait") return Promise.resolve().then(() => this[name](args));
+    return Promise.reject(new Error("unknown action"));
+  }
 
   start(request) {
     if (!validate("TurnRunRequest", request)) throw new Error("invalid session value");
@@ -64,11 +74,14 @@ class Caller {
   }
 
   _settle(run, state, result) {
+    if (run.state !== "running") return;
     run.state = state;
     run.result = result;
     if (this.targets.get(run.session_id) === run) this.targets.delete(run.session_id);
     run.finish();
   }
+
+  disconnected() { for (const run of [...this.targets.values()]) this._settle(run, "unavailable", "-32002 not_connected"); }
 
   _view(run) {
     const value = { turn_id: run.id, session_id: run.session_id, state: run.state };
@@ -84,4 +97,4 @@ function localRequest(value, timeout) {
   return keys.every((key) => key === "turn_id" || timeout && key === "timeout_ms") && keys.length <= (timeout ? 2 : 1) && (value.timeout_ms === undefined || Number.isSafeInteger(value.timeout_ms) && value.timeout_ms >= 0);
 }
 
-module.exports = { Caller };
+module.exports = { ACTIONS, Caller };
