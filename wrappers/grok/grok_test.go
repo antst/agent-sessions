@@ -119,7 +119,16 @@ func fakeGrok() {
 				title = titles[titleIndex]
 			}
 			session := first(os.Getenv("GROK_TEST_SESSION_ID"), testSessionID)
+			if ids := strings.Split(os.Getenv("GROK_TEST_SESSION_IDS"), ","); len(ids) > 0 && ids[0] != "" {
+				session = ids[min(rosterCalls-1, len(ids)-1)]
+			}
 			reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"result": map[string]any{"sessions": []map[string]any{{"sessionId": session, "title": title, "cwd": os.TempDir(), "activity": "working", "resident": true, "yolo": true}}}}})
+			if path := os.Getenv("GROK_TEST_ROSTER_CHANGE"); path != "" && rosterCalls == 1 {
+				go func() {
+					<-fileReady(path)
+					reply(map[string]any{"jsonrpc": "2.0", "method": "_x.ai/sessions/changed", "params": map[string]any{}})
+				}()
+			}
 			if os.Getenv("GROK_TEST_OBSERVER_EXIT") != "" && slices.Contains(arguments, "stdio") {
 				return
 			}

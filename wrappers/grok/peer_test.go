@@ -281,6 +281,50 @@ func TestPrepareSerializesAndCommitsAcknowledgedTitles(t *testing.T) {
 	backend.Shutdown()
 }
 
+func TestRosterIdentityChangeReplacesPeerAndSettlesOldRun(t *testing.T) {
+	root := t.TempDir()
+	server, hellos := fakeDaemon(t, filepath.Join(root, "agentbus.sock"))
+	defer server.Close()
+	t.Setenv(host.SocketEnv, filepath.Join(root, "agentbus.sock"))
+	t.Setenv(host.SessionIDEnv, testSessionID)
+	t.Setenv("GROK_TEST_SESSION_IDS", testSessionID+",new-session")
+	change := filepath.Join(root, "roster-change")
+	t.Setenv("GROK_TEST_ROSTER_CHANGE", change)
+	t.Setenv("GROK_TEST_HOLD_RUN", "1")
+	opened := make(chan struct {
+		backend *PeerBackend
+		err     error
+	}, 1)
+	go func() {
+		backend, err := newPeerBackend(context.Background(), sessionkit.PeerIdentity{Product: "grok", SessionID: testSessionID, Name: testSessionID, Groups: []string{"peer-group"}})
+		opened <- struct {
+			backend *PeerBackend
+			err     error
+		}{backend, err}
+	}()
+	first := <-hellos
+	first.ack <- true
+	result := <-opened
+	must(t, result.err)
+	backend := result.backend
+	caller := backend.Caller()
+	turn, err := caller.Start(sessionkit.TurnRunRequest{SessionID: "lane@local", Input: "hold"})
+	must(t, err)
+	must(t, os.WriteFile(change, []byte("change"), 0o600))
+	replacement := <-hellos
+	check(t, replacement.SessionID == "new-session", "replacement = %#v", replacement)
+	state, err := caller.Status(sessionkit.StatusRequest{TurnID: turn.TurnID})
+	must(t, err)
+	check(t, state.State == "unavailable", "old run before replacement ack = %#v", state)
+	replacement.ack <- true
+	must(t, backend.Prepare(context.Background(), nil))
+	backend.mu.Lock()
+	identity := backend.identity
+	backend.mu.Unlock()
+	check(t, identity.SessionID == "new-session", "current identity = %#v", identity)
+	backend.Shutdown()
+}
+
 func TestExactRosterAuthority(t *testing.T) {
 	yolo, resident := true, true
 	live := peerSession{SessionID: testSessionID, Resident: &resident, Activity: "idle", Yolo: &yolo}
@@ -408,6 +452,9 @@ func fakeDaemonTerminal(t *testing.T, path string, terminal <-chan struct{}) (ne
 				continue
 			}
 			if frame.Method == "" {
+				continue
+			}
+			if frame.Method == "turn.run" && os.Getenv("GROK_TEST_HOLD_RUN") != "" {
 				continue
 			}
 			write.Lock()

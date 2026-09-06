@@ -28,6 +28,7 @@ type peerSession struct {
 }
 
 var errNoLeader = errors.New("no_leader")
+var errRosterActorGone = errors.New("Grok roster actor is not live")
 
 type PeerBackend struct {
 	mu       sync.Mutex
@@ -35,6 +36,7 @@ type PeerBackend struct {
 	observer *acpClient
 	process  *nativeProcess
 	identity sessionkit.PeerIdentity
+	failed   chan error
 }
 
 func newPeerBackend(ctx context.Context, identity sessionkit.PeerIdentity) (*PeerBackend, error) {
@@ -67,7 +69,7 @@ func newPeerBackend(ctx context.Context, identity sessionkit.PeerIdentity) (*Pee
 	if err = initializeACP(ctx, observer); err != nil {
 		return stop(err)
 	}
-	b := &PeerBackend{observer: observer, process: process}
+	b := &PeerBackend{observer: observer, process: process, failed: make(chan error, 1)}
 	wanted := identity.Name
 	var row peerSession
 	for {
@@ -113,6 +115,7 @@ func newPeerBackend(ctx context.Context, identity sessionkit.PeerIdentity) (*Pee
 		peer.Shutdown()
 		return stop(ctx.Err())
 	}
+	go b.watchRoster(ctx, observer, changed)
 	return b, nil
 }
 
@@ -178,6 +181,8 @@ func RunInteractive(ctx context.Context, plan host.ExecPlan) error {
 		}
 	case <-observer.done:
 		dependencyErr, stop = fmt.Errorf("Grok observer closed: %w", observer.err), syscall.SIGTERM
+	case dependencyErr = <-backend.failed:
+		stop = syscall.SIGTERM
 	}
 	if stop != nil {
 		childErr = finishInteractiveChild(child, childDone, stop)
@@ -256,23 +261,56 @@ func (b *PeerBackend) Caller() *sessionkit.Caller {
 }
 
 func (b *PeerBackend) Prepare(ctx context.Context, _ json.RawMessage) error {
+	return b.prepare(ctx)
+}
+
+func (b *PeerBackend) prepare(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	id, old, observer, peer := b.identity.SessionID, b.identity, b.observer, b.peer
-	row, err := roster(ctx, observer, id)
+	rows, err := rosterRows(ctx, observer)
 	if err != nil {
 		return err
 	}
-	name := first(row.Title, id)
-	if name == old.Name && row.Cwd == old.Info["cwd"] {
-		return nil
-	}
-	info := map[string]any{"cwd": row.Cwd}
-	if err := peer.Rehello(name, info); err != nil {
+	row, err := observedRoster(rows, id)
+	if err != nil {
 		return err
 	}
-	b.identity.Name, b.identity.Info = name, info
+	name := first(row.Title, row.SessionID)
+	info := map[string]any{"cwd": row.Cwd}
+	if row.SessionID == id && name == old.Name && row.Cwd == old.Info["cwd"] {
+		return nil
+	}
+	next := sessionkit.PeerIdentity{Product: "grok", SessionID: row.SessionID, Name: name, Groups: old.Groups, Info: info}
+	if row.SessionID != id {
+		err = peer.Replace(ctx, next)
+	} else {
+		err = peer.Rehello(name, info)
+	}
+	if err != nil {
+		return err
+	}
+	b.identity = next
 	return nil
+}
+
+func (b *PeerBackend) watchRoster(ctx context.Context, observer *acpClient, changed <-chan struct{}) {
+	for {
+		select {
+		case <-changed:
+			if err := b.prepare(ctx); err != nil {
+				select {
+				case b.failed <- err:
+				default:
+				}
+				return
+			}
+		case <-observer.done:
+			return
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (b *PeerBackend) deliver(ctx context.Context, identity sessionkit.PeerIdentity, request sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
@@ -300,8 +338,16 @@ func (b *PeerBackend) deliver(ctx context.Context, identity sessionkit.PeerIdent
 }
 
 func roster(ctx context.Context, observer *acpClient, id string) (peerSession, error) {
+	sessions, err := rosterRows(ctx, observer)
+	if err != nil {
+		return peerSession{}, err
+	}
+	return exactRoster(sessions, id)
+}
+
+func rosterRows(ctx context.Context, observer *acpClient) ([]peerSession, error) {
 	if observer == nil {
-		return peerSession{}, errors.New("Grok observer is unavailable")
+		return nil, errors.New("Grok observer is unavailable")
 	}
 	var reply struct {
 		Result struct {
@@ -309,9 +355,9 @@ func roster(ctx context.Context, observer *acpClient, id string) (peerSession, e
 		} `json:"result"`
 	}
 	if err := observer.request(ctx, "_x.ai/sessions/list", map[string]any{}, &reply); err != nil {
-		return peerSession{}, err
+		return nil, err
 	}
-	return exactRoster(reply.Result.Sessions, id)
+	return reply.Result.Sessions, nil
 }
 
 func exactRoster(sessions []peerSession, id string) (peerSession, error) {
@@ -333,7 +379,7 @@ func exactRoster(sessions []peerSession, id string) (peerSession, error) {
 		return peerSession{}, errors.New("exact Grok session roster row has no resident state")
 	}
 	if !*found.Resident || slices.Contains([]string{"completed", "dormant", "dead"}, found.Activity) {
-		return peerSession{}, fmt.Errorf("Grok session %s is not live", id)
+		return peerSession{}, fmt.Errorf("%w: %s", errRosterActorGone, id)
 	}
 	if found.Yolo == nil {
 		return peerSession{}, errors.New("live Grok roster row has no yolo state")
@@ -342,6 +388,31 @@ func exactRoster(sessions []peerSession, id string) (peerSession, error) {
 		return peerSession{}, fmt.Errorf("live Grok roster row has unsupported activity %q", found.Activity)
 	}
 	return found, nil
+}
+
+func observedRoster(sessions []peerSession, id string) (peerSession, error) {
+	current, currentErr := exactRoster(sessions, id)
+	if currentErr == nil {
+		return current, nil
+	}
+	if !errors.Is(currentErr, errNoLeader) && !errors.Is(currentErr, errRosterActorGone) {
+		return peerSession{}, currentErr
+	}
+	var next []peerSession
+	seen := map[string]bool{id: true}
+	for _, session := range sessions {
+		if session.SessionID == "" || seen[session.SessionID] {
+			continue
+		}
+		seen[session.SessionID] = true
+		if candidate, err := exactRoster(sessions, session.SessionID); err == nil {
+			next = append(next, candidate)
+		}
+	}
+	if len(next) != 1 {
+		return peerSession{}, currentErr
+	}
+	return next[0], nil
 }
 
 func (b *PeerBackend) Shutdown() {
