@@ -2,6 +2,8 @@ package host
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -20,6 +22,11 @@ const (
 
 func LaneMode() bool { _, present := os.LookupEnv(TokenEnv); return present }
 
+func LaunchTokenDigest(token string) string {
+	digest := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(digest[:16])
+}
+
 type PeerIdentity struct{ SessionID, Name string }
 
 type ExecPlan struct {
@@ -36,20 +43,37 @@ type Child struct {
 	err      error
 }
 
-func StartChild(command *exec.Cmd, lock *SessionLock, endpoint *PrivateEndpoint) (*Child, error) {
+func StartChild(command *exec.Cmd, lock *SessionLock, endpoint *PrivateEndpoint) (*Child, *os.File, *os.File, error) {
 	if command.Env == nil {
 		command.Env = os.Environ()
 	}
 	for _, name := range []string{SocketEnv, LocalKeyEnv, TokenEnv, SessionIDEnv, NameEnv, GroupsEnv} {
 		command.Env = replaceEnv(command.Env, name, "")
 	}
+	stdin, input, err := os.Pipe()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	output, stdout, err := os.Pipe()
+	if err != nil {
+		_ = stdin.Close()
+		_ = input.Close()
+		return nil, nil, nil, err
+	}
+	command.Stdin, command.Stdout = stdin, stdout
 	command.ExtraFiles = append(command.ExtraFiles, lock.File())
 	if err := command.Start(); err != nil {
-		return nil, err
+		_ = stdin.Close()
+		_ = input.Close()
+		_ = output.Close()
+		_ = stdout.Close()
+		return nil, nil, nil, err
 	}
+	_ = stdin.Close()
+	_ = stdout.Close()
 	child := &Child{command: command, lock: lock, endpoint: endpoint, done: make(chan struct{})}
 	go func() { child.err = command.Wait(); close(child.done) }()
-	return child, nil
+	return child, input, output, nil
 }
 
 func (c *Child) Done() <-chan struct{} { return c.done }
@@ -63,10 +87,20 @@ func (c *Child) Close(ctx context.Context, stop func(context.Context) error) err
 // InteractivePlan removes only wrapper-owned group flags. Native option arity
 // protects a following value that happens to look like a group flag.
 func InteractivePlan(path string, args, environment []string, identity PeerIdentity, consumesValue func(string) bool) (ExecPlan, error) {
+	plan, _, err := ClassifiedInteractivePlan(path, args, environment, identity, consumesValue, nil)
+	return plan, err
+}
+
+// ClassifiedInteractivePlan defers wrapper flag errors until the product has
+// classified the invocation. A passthrough keeps the original argv and env.
+func ClassifiedInteractivePlan(path string, args, environment []string, identity PeerIdentity, consumesValue, passthrough func(string) bool) (ExecPlan, bool, error) {
 	if path == "" {
-		return ExecPlan{}, errors.New("product executable is required")
+		return ExecPlan{}, false, errors.New("product executable is required")
 	}
+	originalArgs, originalEnvironment := args, environment
 	forwarded, groups := make([]string, 0, len(args)), []string{}
+	var projectionError error
+	native := false
 	for index := 0; index < len(args); index++ {
 		argument := args[index]
 		if argument == "--" {
@@ -75,7 +109,8 @@ func InteractivePlan(path string, args, environment []string, identity PeerIdent
 		}
 		if argument == "-g" || argument == "--group" {
 			if index+1 == len(args) || strings.TrimSpace(args[index+1]) == "" {
-				return ExecPlan{}, errors.New("-g/--group requires a non-empty value")
+				projectionError = errors.New("-g/--group requires a non-empty value")
+				continue
 			}
 			groups, index = append(groups, args[index+1]), index+1
 			continue
@@ -83,22 +118,48 @@ func InteractivePlan(path string, args, environment []string, identity PeerIdent
 		if strings.HasPrefix(argument, "-g=") || strings.HasPrefix(argument, "--group=") {
 			_, group, _ := strings.Cut(argument, "=")
 			if strings.TrimSpace(group) == "" {
-				return ExecPlan{}, errors.New("-g/--group requires a non-empty value")
+				projectionError = errors.New("-g/--group requires a non-empty value")
+				continue
 			}
 			groups = append(groups, group)
 			continue
 		}
+		if argument == "-n" || argument == "--peer-name" {
+			if index+1 == len(args) || strings.TrimSpace(args[index+1]) == "" {
+				projectionError = errors.New("-n/--peer-name requires a non-empty value")
+				continue
+			}
+			identity.Name, index = args[index+1], index+1
+			continue
+		}
+		if strings.HasPrefix(argument, "-n=") || strings.HasPrefix(argument, "--peer-name=") {
+			_, identity.Name, _ = strings.Cut(argument, "=")
+			if strings.TrimSpace(identity.Name) == "" {
+				projectionError = errors.New("-n/--peer-name requires a non-empty value")
+				continue
+			}
+			continue
+		}
 		forwarded = append(forwarded, argument)
+		if passthrough != nil && passthrough(argument) {
+			native = true
+		}
 		if consumesValue != nil && consumesValue(argument) && index+1 < len(args) {
 			index++
 			forwarded = append(forwarded, args[index])
 		}
 	}
+	if native {
+		return ExecPlan{Path: path, Args: originalArgs, Env: originalEnvironment}, true, nil
+	}
+	if projectionError != nil {
+		return ExecPlan{}, false, projectionError
+	}
 	encoded, _ := json.Marshal(groups)
 	environment = replaceEnv(environment, GroupsEnv, string(encoded))
 	environment = replaceEnv(environment, SessionIDEnv, identity.SessionID)
 	environment = replaceEnv(environment, NameEnv, identity.Name)
-	return ExecPlan{Path: path, Args: forwarded, Env: environment}, nil
+	return ExecPlan{Path: path, Args: forwarded, Env: environment}, false, nil
 }
 
 type ArgumentRule struct {
