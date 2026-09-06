@@ -6,7 +6,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/diagnostics"
+	"github.com/antst/sessionbus/internal/diagnostics"
 )
 
 func (r *Runtime) runtimeStatus(ctx context.Context, operation string) (json.RawMessage, error) {

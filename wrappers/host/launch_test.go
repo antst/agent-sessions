@@ -26,7 +26,7 @@ func TestInteractivePlan(t *testing.T) {
 	wantArgs := []string{"--model", "-g", "--", "-g", "literal"}
 	check(t, reflect.DeepEqual(plan.Args, wantArgs), "args = %q", plan.Args)
 	joined := "\n" + strings.Join(plan.Env, "\n") + "\n"
-	for _, want := range []string{"\nAGENTBUS_SESSION_ID=id\n", "\nAGENTBUS_SESSION_NAME=name\n", "\nAGENTBUS_GROUPS=[\"project\",\"review\"]\n"} {
+	for _, want := range []string{"\nSESSIONBUS_SESSION_ID=id\n", "\nSESSIONBUS_SESSION_NAME=name\n", "\nSESSIONBUS_GROUPS=[\"project\",\"review\"]\n"} {
 		check(t, strings.Contains(joined, want), "environment missing %q: %s", want, joined)
 	}
 }

@@ -19,11 +19,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/bus/internal/conn"
-	"github.com/antst/agent-sessions/bus/internal/protocol"
-	"github.com/antst/agent-sessions/bus/internal/rpc"
-	"github.com/antst/agent-sessions/bus/internal/structuredprocess"
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
+	"github.com/antst/sessionbus/bus/internal/conn"
+	"github.com/antst/sessionbus/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/rpc"
+	"github.com/antst/sessionbus/bus/internal/structuredprocess"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
 )
 
 func TestMain(m *testing.M) {
@@ -84,7 +84,7 @@ func TestMain(m *testing.M) {
 }
 
 func runOrderedWorker(product string) error {
-	fd, err := net.Dial("unix", os.Getenv("AGENTBUS_SOCKET"))
+	fd, err := net.Dial("unix", os.Getenv("SESSIONBUS_SOCKET"))
 	if err != nil {
 		return err
 	}
@@ -108,7 +108,7 @@ func runOrderedWorker(product string) error {
 			proof <- wire.Call(context.Background(), "message.send", protocol.MessageSendRequest{Target: "parent", Message: "after-commit"}, &sent)
 		}()
 	})
-	hello := protocol.WorkerHello{Protocol: 1, LaunchToken: os.Getenv("AGENTBUS_LAUNCH_TOKEN"), HelloDescription: protocol.HelloDescription{Product: product, SupportedOpenFields: []string{}, ExtraArguments: []protocol.ExtraArgument{}}}
+	hello := protocol.WorkerHello{Protocol: 1, LaunchToken: os.Getenv("SESSIONBUS_LAUNCH_TOKEN"), HelloDescription: protocol.HelloDescription{Product: product, SupportedOpenFields: []string{}, ExtraArguments: []protocol.ExtraArgument{}}}
 	if err := wire.Call(context.Background(), "session.hello", hello, &struct{}{}); err != nil {
 		return err
 	}
@@ -118,7 +118,7 @@ func runOrderedWorker(product string) error {
 }
 
 func runSequenceWorker(product string) error {
-	fd, err := net.Dial("unix", os.Getenv("AGENTBUS_SOCKET"))
+	fd, err := net.Dial("unix", os.Getenv("SESSIONBUS_SOCKET"))
 	if err != nil {
 		return err
 	}
@@ -139,7 +139,7 @@ func runSequenceWorker(product string) error {
 			_ = wire.Close()
 		}
 	})
-	hello := protocol.WorkerHello{Protocol: 1, LaunchToken: os.Getenv("AGENTBUS_LAUNCH_TOKEN"), HelloDescription: protocol.HelloDescription{Product: product, SupportedOpenFields: []string{}, ExtraArguments: []protocol.ExtraArgument{}}}
+	hello := protocol.WorkerHello{Protocol: 1, LaunchToken: os.Getenv("SESSIONBUS_LAUNCH_TOKEN"), HelloDescription: protocol.HelloDescription{Product: product, SupportedOpenFields: []string{}, ExtraArguments: []protocol.ExtraArgument{}}}
 	if err := wire.Call(context.Background(), "session.hello", hello, &struct{}{}); err != nil {
 		return err
 	}
@@ -148,12 +148,12 @@ func runSequenceWorker(product string) error {
 }
 
 func runRehelloWorker(product string) error {
-	fd, err := net.Dial("unix", os.Getenv("AGENTBUS_SOCKET"))
+	fd, err := net.Dial("unix", os.Getenv("SESSIONBUS_SOCKET"))
 	if err != nil {
 		return err
 	}
 	wire := rpc.New(fd, true, func(context.Context, *rpc.Request) {})
-	hello := protocol.WorkerHello{Protocol: 1, LaunchToken: os.Getenv("AGENTBUS_LAUNCH_TOKEN"), HelloDescription: protocol.HelloDescription{Product: product, SupportedOpenFields: []string{}, ExtraArguments: []protocol.ExtraArgument{}}}
+	hello := protocol.WorkerHello{Protocol: 1, LaunchToken: os.Getenv("SESSIONBUS_LAUNCH_TOKEN"), HelloDescription: protocol.HelloDescription{Product: product, SupportedOpenFields: []string{}, ExtraArguments: []protocol.ExtraArgument{}}}
 	if err = wire.Call(context.Background(), "session.hello", hello, &struct{}{}); err != nil {
 		return err
 	}
@@ -165,7 +165,7 @@ func runRehelloWorker(product string) error {
 }
 
 func runRacingWorker(product string) error {
-	fd, err := net.Dial("unix", os.Getenv("AGENTBUS_SOCKET"))
+	fd, err := net.Dial("unix", os.Getenv("SESSIONBUS_SOCKET"))
 	if err != nil {
 		return err
 	}
@@ -186,7 +186,7 @@ func runRacingWorker(product string) error {
 			_ = wire.Close()
 		}
 	})
-	hello := protocol.WorkerHello{Protocol: 1, LaunchToken: os.Getenv("AGENTBUS_LAUNCH_TOKEN"), HelloDescription: protocol.HelloDescription{Product: product, SupportedOpenFields: []string{}, ExtraArguments: []protocol.ExtraArgument{}}}
+	hello := protocol.WorkerHello{Protocol: 1, LaunchToken: os.Getenv("SESSIONBUS_LAUNCH_TOKEN"), HelloDescription: protocol.HelloDescription{Product: product, SupportedOpenFields: []string{}, ExtraArguments: []protocol.ExtraArgument{}}}
 	if err = wire.Call(context.Background(), "session.hello", hello, &struct{}{}); err != nil {
 		return err
 	}
@@ -434,7 +434,7 @@ func TestDaemonCloseEndsRawAndActiveSpawnConnections(t *testing.T) {
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
 	ready := filepath.Join(directory, "ready")
 	t.Setenv("NO_HELLO_READY", ready)
-	socket := filepath.Join(directory, "agentbus.sock")
+	socket := filepath.Join(directory, "sessionbus.sock")
 	d, err := Start(Config{SocketPath: socket, TablePath: filepath.Join(directory, "sessions.json")})
 	must(t, err)
 	raw, err := net.Dial("unix", socket)
@@ -601,7 +601,7 @@ func TestSpawnRunCloseResumeForgetAndRestart(t *testing.T) {
 	installFixture(t, directory, "fixture-worker")
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("OPEN_LOG", filepath.Join(directory, "open.log"))
-	tablePath, socket := filepath.Join(directory, "sessions.json"), filepath.Join(directory, "agentbus.sock")
+	tablePath, socket := filepath.Join(directory, "sessions.json"), filepath.Join(directory, "sessionbus.sock")
 	d, err := Start(Config{SocketPath: socket, TablePath: tablePath, Products: []string{"fixture-worker"}})
 	must(t, err)
 	parent := connectPeer(t, socket, "parent", "parent", "team")
@@ -1015,7 +1015,7 @@ func TestMessageSendReturnsOneOrderedReceiptPerResolvedLabel(t *testing.T) {
 func startDaemon(t *testing.T) (*Daemon, string) {
 	t.Helper()
 	directory := t.TempDir()
-	socket := filepath.Join(directory, "agentbus.sock")
+	socket := filepath.Join(directory, "sessionbus.sock")
 	d, err := Start(Config{SocketPath: socket, TablePath: filepath.Join(directory, "sessions.json")})
 	must(t, err)
 	t.Cleanup(func() { _ = d.Close() })

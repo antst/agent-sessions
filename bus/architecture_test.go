@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-const modulePath = "github.com/antst/agent-sessions"
+const modulePath = "github.com/antst/sessionbus"
 
 func TestBusAndWrappersKeepTheSplitReadyBoundary(t *testing.T) {
 	repository := filepath.Clean("..")
@@ -82,6 +82,31 @@ func TestBusSourceContainsNoProductNames(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBusAndWrappersContainNoFormerBrand(t *testing.T) {
+	repository := filepath.Clean("..")
+	former := []byte("agent" + "bus")
+	for _, root := range []string{filepath.Join(repository, "bus"), filepath.Join(repository, "wrappers")} {
+		if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return err
+			}
+			if bytes.Contains(bytes.ToLower([]byte(path)), former) {
+				t.Errorf("former brand remains in path %s", path)
+			}
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if bytes.Contains(bytes.ToLower(contents), former) {
+				t.Errorf("former brand remains in %s", path)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

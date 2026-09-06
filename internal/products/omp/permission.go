@@ -4,9 +4,9 @@ package omp
 import (
 	"fmt"
 
-	"github.com/antst/agent-sessions/internal/permissionmode"
-	"github.com/antst/agent-sessions/internal/productruntime"
-	"github.com/antst/agent-sessions/internal/products/pifamily"
+	"github.com/antst/sessionbus/internal/permissionmode"
+	"github.com/antst/sessionbus/internal/productruntime"
+	"github.com/antst/sessionbus/internal/products/pifamily"
 )
 
 // MapPermission fails closed when the requested shared mode cannot run

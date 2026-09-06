@@ -5,7 +5,7 @@ const { ACTIONS, Caller } = require("./caller.js");
 const { Connection, ProtocolError } = require("./connection.js");
 const { schema, validate } = require("./schema.js");
 
-const ENV = ["AGENTBUS_LAUNCH_TOKEN", "AGENTBUS_LOCAL_KEY", "AGENTBUS_SOCKET"];
+const ENV = ["SESSIONBUS_LAUNCH_TOKEN", "SESSIONBUS_LOCAL_KEY", "SESSIONBUS_SOCKET"];
 const never = new Promise(() => {});
 
 class Run {
@@ -149,9 +149,9 @@ class Peer {
 function connectPeer(identity, deliver, env = process.env, options = {}) { return new Peer(identity, deliver, env, options); }
 function serveWorker(callbacks, env = process.env, options = {}) { const worker = new Worker(callbacks, env, options); worker.serving = worker.serve().catch((error) => error); return worker; }
 function snapshot(identity) { return { ...identity, groups: [...identity.groups], info: structuredClone(identity.info) }; }
-function environment(env, worker) { const values = Object.fromEntries(ENV.map((name) => [name, env[name]])); for (const name of ENV) delete env[name]; if (!values.AGENTBUS_SOCKET) throw new Error("agentbus socket is required"); if (values.AGENTBUS_LOCAL_KEY) throw new Error("local key transport not implemented in this build"); if (worker && !values.AGENTBUS_LAUNCH_TOKEN) throw new Error("launch token is required"); return { socket: values.AGENTBUS_SOCKET, token: values.AGENTBUS_LAUNCH_TOKEN }; }
+function environment(env, worker) { const values = Object.fromEntries(ENV.map((name) => [name, env[name]])); for (const name of ENV) delete env[name]; if (!values.SESSIONBUS_SOCKET) throw new Error("sessionbus socket is required"); if (values.SESSIONBUS_LOCAL_KEY) throw new Error("local key transport not implemented in this build"); if (worker && !values.SESSIONBUS_LAUNCH_TOKEN) throw new Error("launch token is required"); return { socket: values.SESSIONBUS_SOCKET, token: values.SESSIONBUS_LAUNCH_TOKEN }; }
 function terminal(result = {}) { if (!result || typeof result !== "object") return result; if (!Object.hasOwn(result, "result")) result = { ...result, result: "" }; if (typeof result.result !== "string") return result; const characters = [...result.result]; return { ...result, result: characters.slice(0, 262144).join(""), ...(characters.length > 262144 ? { truncated: true } : {}) }; }
 function clean(error) { return String(error?.message || error || "product callback failed"); }
-function callbackError(callback, error) { if (error) process.stderr.write(`agentbus: product ${callback}: ${JSON.stringify(clean(error))}\n`); }
+function callbackError(callback, error) { if (error) process.stderr.write(`sessionbus: product ${callback}: ${JSON.stringify(clean(error))}\n`); }
 
 module.exports = { ACTIONS, Caller, connectPeer, Connection, ENV, Peer, ProtocolError, Run, serveWorker, Worker, schema, validate };

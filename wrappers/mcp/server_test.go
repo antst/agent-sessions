@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
 )
 
 type fakeBackend struct {
@@ -58,12 +58,12 @@ func TestServerMethods(t *testing.T) {
 			schema := tool["inputSchema"].(map[string]any)["properties"].(map[string]any)
 			check(t, tool["name"] == ToolName && reflect.DeepEqual(stringsOf(schema["action"].(map[string]any)["enum"]), sessionkit.Actions), "tool = %#v", tool)
 		}},
-		{"tools call", `{"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"send","arguments":{"target":"peer","message":"hello"}}}}`, &fakeBackend{result: json.RawMessage(`{"message_id":"message","deliveries":[]}`)}, 0, func(t *testing.T, response map[string]any, backend *fakeBackend) {
+		{"tools call", `{"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"sessionbus","arguments":{"action":"send","arguments":{"target":"peer","message":"hello"}}}}`, &fakeBackend{result: json.RawMessage(`{"message_id":"message","deliveries":[]}`)}, 0, func(t *testing.T, response map[string]any, backend *fakeBackend) {
 			result := response["result"].(map[string]any)
 			check(t, backend.method == "message.send" && backend.params == `{"target":"peer","message":"hello"}` && result["structuredContent"].(map[string]any)["message_id"] == "message", "call = %#v / %#v", backend, result)
 		}},
-		{"protocol error", `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"list"}}}`, &fakeBackend{err: &sessionkit.ProtocolError{Code: -32004, Message: "not_running"}}, -32004, nil},
-		{"invalid action", `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"unknown"}}}`, &fakeBackend{}, -32602, nil},
+		{"protocol error", `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"sessionbus","arguments":{"action":"list"}}}`, &fakeBackend{err: &sessionkit.ProtocolError{Code: -32004, Message: "not_running"}}, -32004, nil},
+		{"invalid action", `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"sessionbus","arguments":{"action":"unknown"}}}`, &fakeBackend{}, -32602, nil},
 		{"unknown method", `{"jsonrpc":"2.0","id":6,"method":"unknown"}`, &fakeBackend{}, -32601, nil},
 		{"parse error", `{`, &fakeBackend{}, -32700, nil},
 	}
@@ -104,7 +104,7 @@ func TestToolArgumentsMustBeObject(t *testing.T) {
 	for _, arguments := range []string{"null", `[]`, `"scalar"`} {
 		t.Run(arguments, func(t *testing.T) {
 			backend := &fakeBackend{}
-			input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"send","arguments":` + arguments + `}}}`
+			input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sessionbus","arguments":{"action":"send","arguments":` + arguments + `}}}`
 			response, err := serveOne(&Server{Backend: backend}, input)
 			check(t, err == nil, "serve: %v", err)
 			failed := response["error"].(map[string]any)
@@ -122,15 +122,15 @@ func TestServerUsesBackendCallerAfterPrepare(t *testing.T) {
 		return json.RawMessage(`{"outcome":"completed","result":"done"}`), nil
 	})}
 	server := &Server{Backend: backend}
-	response, _ := serveOne(server, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_sessions","_meta":{"threadId":"native"},"arguments":{"action":"start","arguments":{"session_id":"lane@local","input":"work"}}}}`)
+	response, _ := serveOne(server, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sessionbus","_meta":{"threadId":"native"},"arguments":{"action":"start","arguments":{"session_id":"lane@local","input":"work"}}}}`)
 	encoded, _ := json.Marshal(response)
 	check(t, strings.Contains(string(encoded), `\"turn_id\":\"t-1\"`), "start = %s", encoded)
 	<-started
-	response, _ = serveOne(server, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"status","arguments":{"turn_id":"t-1"}}}}`)
+	response, _ = serveOne(server, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sessionbus","arguments":{"action":"status","arguments":{"turn_id":"t-1"}}}}`)
 	encoded, _ = json.Marshal(response)
 	check(t, strings.Contains(string(encoded), `\"state\":\"running\"`), "status = %s", encoded)
 	close(release)
-	response, _ = serveOne(server, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"wait","arguments":{"turn_id":"t-1"}}}}`)
+	response, _ = serveOne(server, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sessionbus","arguments":{"action":"wait","arguments":{"turn_id":"t-1"}}}}`)
 	encoded, _ = json.Marshal(response)
 	check(t, strings.Contains(string(encoded), `\"state\":\"done\"`) && strings.Contains(string(encoded), `\"result\":\"done\"`) && reflect.DeepEqual(backend.meta, []string{`{"threadId":"native"}`, "", ""}), "wait = %s, meta = %#v", encoded, backend.meta)
 }

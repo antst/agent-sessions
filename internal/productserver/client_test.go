@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/sessionbus/internal/productruntime"
 )
 
 func TestClientSendsAuthenticatedProductRequest(t *testing.T) {

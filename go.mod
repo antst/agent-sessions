@@ -1,4 +1,4 @@
-module github.com/antst/agent-sessions
+module github.com/antst/sessionbus
 
 go 1.24
 

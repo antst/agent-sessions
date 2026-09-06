@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/sessionidentity"
+	"github.com/antst/sessionbus/internal/sessionidentity"
 )
 
 var ErrUnknownTarget = errors.New("unknown session or target")

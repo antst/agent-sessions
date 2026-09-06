@@ -35,7 +35,7 @@ class Connection {
   }
   result(request, value) { return this._send({ jsonrpc: "2.0", id: request.id, result: JSON.parse(encode(METHODS[request.method][1], value)) }); }
   error(request, code, data) { const value = { code, message: MESSAGES[code], ...(data === undefined ? {} : { data }) }; encode("RPCError", value); return this._send({ jsonrpc: "2.0", id: request.id, error: value }); }
-  close(cause = new Error("agentbus connection closed")) {
+  close(cause = new Error("sessionbus connection closed")) {
     if (this.controller.signal.aborted) return; this.controller.abort(cause); this.stream.destroy?.();
     for (const pending of this.pending.values()) pending.reject(cause); this.pending.clear(); this.finish(cause);
   }

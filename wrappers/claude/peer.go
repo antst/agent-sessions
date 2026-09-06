@@ -10,9 +10,9 @@ import (
 	"strings"
 	"sync"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
-	"github.com/antst/agent-sessions/wrappers/mcp"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
+	"github.com/antst/sessionbus/wrappers/mcp"
 )
 
 const messagingSocketEnv = "CLAUDE_CODE_MESSAGING_SOCKET"
@@ -37,7 +37,7 @@ var _ mcp.Backend = (*PeerBackend)(nil)
 func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
 	groups := []string{}
 	if raw := os.Getenv(host.GroupsEnv); raw != "" && json.Unmarshal([]byte(raw), &groups) != nil {
-		return nil, errors.New("AGENTBUS_GROUPS must be a JSON array")
+		return nil, errors.New("SESSIONBUS_GROUPS must be a JSON array")
 	}
 	b := &PeerBackend{groups: groups, parent: os.Getppid()}
 	id := strings.TrimSpace(os.Getenv(host.SessionIDEnv))
@@ -163,7 +163,7 @@ func (b *PeerBackend) deliver(ctx context.Context, admitted sessionkit.PeerIdent
 	defer connection.Close()
 	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
 	defer stop()
-	body := map[string]any{"msgV": 1, "msg_id": request.MessageID, "type": "user", "priority": "next", "from": "agentbus", "message": map[string]any{"role": "user", "content": message}}
+	body := map[string]any{"msgV": 1, "msg_id": request.MessageID, "type": "user", "priority": "next", "from": "sessionbus", "message": map[string]any{"role": "user", "content": message}}
 	err = json.NewEncoder(connection).Encode(body)
 	return sessionkit.DeliveryReceipt{Disposition: "injected"}, err
 }

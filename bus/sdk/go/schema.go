@@ -1,7 +1,7 @@
 package sessionkit
 
 import (
-	"github.com/antst/agent-sessions/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/protocol"
 )
 
 type (

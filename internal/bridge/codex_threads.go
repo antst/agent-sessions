@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/pathidentity"
+	"github.com/antst/sessionbus/internal/pathidentity"
 )
 
 var exactLaunchThreadIDRE = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)

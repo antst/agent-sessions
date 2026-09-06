@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/pathidentity"
+	"github.com/antst/sessionbus/internal/pathidentity"
 )
 
 // CodexNativeConfig selects the user's real Codex profile and product-owned

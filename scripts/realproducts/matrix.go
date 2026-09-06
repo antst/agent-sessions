@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/livepresence"
-	"github.com/antst/agent-sessions/internal/pathidentity"
+	"github.com/antst/sessionbus/internal/livepresence"
+	"github.com/antst/sessionbus/internal/pathidentity"
 )
 
 const (

@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/livepresence"
+	"github.com/antst/sessionbus/internal/livepresence"
 )
 
 func TestMatrixRawV1ClientHandlesBusyDeliveryAndRecordsEvidence(t *testing.T) {

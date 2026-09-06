@@ -11,9 +11,9 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/antst/agent-sessions/internal/clihelp"
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	federationpkg "github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/sessionbus/internal/clihelp"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
+	federationpkg "github.com/antst/sessionbus/internal/federation"
 )
 
 const operatorRosterSchema = "agent-sessions.roster.v1"

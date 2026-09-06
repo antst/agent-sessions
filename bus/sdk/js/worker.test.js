@@ -18,7 +18,7 @@ function errorCode(promise, code) { return assert.rejects(promise, (error) => er
 class FakeProduct {
   constructor() { this.calls = [0, 0, 0, 0, 0, 0]; }
   hello(_cancel) {
-    this.calls[0]++; assert.equal(this.env.AGENTBUS_LAUNCH_TOKEN, undefined); assert.equal(this.env.AGENTBUS_LOCAL_KEY, undefined); assert.equal(this.env.AGENTBUS_SOCKET, undefined);
+    this.calls[0]++; assert.equal(this.env.SESSIONBUS_LAUNCH_TOKEN, undefined); assert.equal(this.env.SESSIONBUS_LOCAL_KEY, undefined); assert.equal(this.env.SESSIONBUS_SOCKET, undefined);
     return { product: "example-peer", supported_open_fields: [], extra_arguments: [] };
   }
   open(_cancel, request) { this.calls[1]++; assert.deepEqual(request, openRequest); return { session_id: "product-session" }; }
@@ -94,7 +94,7 @@ test("unmatched response closes the connection", async () => {
 
 test("worker closed resolves when product close rejects", async (t) => {
   const product = new FakeProduct(); product.closeError = new Error("close failed"); const stderr = captureStderr(t); const { worker, daemon, serving } = await harness(t, product); daemon.close();
-  await worker.closed; await serving; assert.equal(product.calls[5], 1); assert.equal(stderr(), 'agentbus: product close: "close failed"\n');
+  await worker.closed; await serving; assert.equal(product.calls[5], 1); assert.equal(stderr(), 'sessionbus: product close: "close failed"\n');
 });
 
 test("worker waits for orderly product close across EOF", async (t) => {
@@ -113,7 +113,7 @@ test("one chunk is admitted before its first callback", async (t) => {
 test("peer replace settles old runs and reconnects with the new identity", async (t) => {
   const first = peerEndpoint(), second = peerEndpoint(), clients = [first.client, second.client], scheduled = [], scheduledReady = deferred();
   const identity = { product: "native-product", session_id: "old", name: "old", groups: ["old"], info: {} };
-  const peer = connectPeer(identity, async () => ({ disposition: "injected" }), { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }, { connect: () => clients.shift(), schedule: (call) => { scheduled.push(call); scheduledReady.resolve(); } });
+  const peer = connectPeer(identity, async () => ({ disposition: "injected" }), { SESSIONBUS_SOCKET: "/fixture/socket", SESSIONBUS_LOCAL_KEY: "" }, { connect: () => clients.shift(), schedule: (call) => { scheduled.push(call); scheduledReady.resolve(); } });
   t.after(() => { peer.shutdown(); first.daemon.close(); second.daemon.close(); });
   await first.daemon.result(await first.next(), {}); await peer.ready;
   const before = structuredClone(peer.identity);
@@ -137,7 +137,7 @@ test("peer delivery keeps its admission identity across replace", async (t) => {
   const peer = connectPeer(identity, async (signal, _request, admitted) => {
     const seen = structuredClone(admitted); admitted.groups[0] = "mutated"; admitted.info.nested.value = "mutated"; entered.resolve({ seen, signal }); await aborted(signal);
     return { disposition: "rejected", reason: "closing" };
-  }, { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
+  }, { SESSIONBUS_SOCKET: "/fixture/socket", SESSIONBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
   t.after(() => { peer.shutdown(); endpoint.daemon.close(); });
   await endpoint.daemon.result(await endpoint.next(), {}); await peer.ready;
   const delivering = endpoint.daemon.call("message.deliver", delivery), admission = await entered.promise;
@@ -150,7 +150,7 @@ test("peer delivery keeps its admission identity across replace", async (t) => {
 test("peer installs delivery identity before reading the next frame", async (t) => {
   const endpoint = peerEndpoint(), called = deferred();
   const identity = { product: "native-product", session_id: "session", name: "peer", groups: [], info: {} };
-  const peer = connectPeer(identity, async (signal, _request, admitted) => { called.resolve({ identity: admitted, signal }); return { disposition: "injected" }; }, { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
+  const peer = connectPeer(identity, async (signal, _request, admitted) => { called.resolve({ identity: admitted, signal }); return { disposition: "injected" }; }, { SESSIONBUS_SOCKET: "/fixture/socket", SESSIONBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
   t.after(() => { peer.shutdown(); endpoint.daemon.close(); });
   const hello = await endpoint.next(), response = { jsonrpc: "2.0", id: hello.id, result: {} }, request = { jsonrpc: "2.0", id: 1, method: "message.deliver", params: delivery };
   endpoint.daemon.stream.write(`${JSON.stringify(response)}\n${JSON.stringify(request)}\n`); await peer.ready;
@@ -159,20 +159,20 @@ test("peer installs delivery identity before reading the next frame", async (t) 
 
 test("peer delivery context aborts on EOF", async (t) => {
   const endpoint = peerEndpoint(), entered = deferred(), finished = deferred();
-  const peer = connectPeer({ product: "native-product", session_id: "session", name: "peer", groups: [], info: {} }, async (signal) => { entered.resolve(signal); await aborted(signal); finished.resolve(); return { disposition: "rejected", reason: "closing" }; }, { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
+  const peer = connectPeer({ product: "native-product", session_id: "session", name: "peer", groups: [], info: {} }, async (signal) => { entered.resolve(signal); await aborted(signal); finished.resolve(); return { disposition: "rejected", reason: "closing" }; }, { SESSIONBUS_SOCKET: "/fixture/socket", SESSIONBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
   t.after(() => peer.shutdown()); await endpoint.daemon.result(await endpoint.next(), {}); await peer.ready;
   void endpoint.daemon.call("message.deliver", delivery).catch(() => {}); const signal = await entered.promise; endpoint.daemon.close(); await finished.promise; assert.equal(signal.aborted, true);
 });
 
 test("peer shutdown closes a held replacement hello", async (t) => {
-  const endpoint = peerEndpoint(), peer = connectPeer({ product: "native-product", session_id: "old", name: "old", groups: [], info: {} }, async () => ({ disposition: "injected" }), { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
+  const endpoint = peerEndpoint(), peer = connectPeer({ product: "native-product", session_id: "old", name: "old", groups: [], info: {} }, async () => ({ disposition: "injected" }), { SESSIONBUS_SOCKET: "/fixture/socket", SESSIONBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
   t.after(() => endpoint.daemon.close()); await endpoint.daemon.result(await endpoint.next(), {}); await peer.ready;
   const replacing = peer.replace({ product: "native-product", session_id: "new", name: "new", groups: [], info: {} }); await endpoint.next(); peer.shutdown(); await assert.rejects(replacing, /not connected|closed/); await peer.closed; assert.equal(peer.error, null);
 });
 
 test("peer rejected hello is terminal", async (t) => {
   const endpoint = peerEndpoint(), scheduled = [];
-  const peer = connectPeer({ product: "native-product", session_id: "session", name: "sentence title", groups: [], info: {} }, async () => ({ disposition: "injected" }), { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: (call) => scheduled.push(call) });
+  const peer = connectPeer({ product: "native-product", session_id: "session", name: "sentence title", groups: [], info: {} }, async () => ({ disposition: "injected" }), { SESSIONBUS_SOCKET: "/fixture/socket", SESSIONBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: (call) => scheduled.push(call) });
   t.after(() => endpoint.daemon.close());
   const hello = await endpoint.next(); assert.equal(hello.params.name, "sentence title"); await endpoint.daemon.error(hello, -32602); await peer.closed;
   assert.equal(peer.error instanceof ProtocolError, true); assert.equal(peer.error.code, -32602); assert.equal(scheduled.length, 0);
@@ -181,7 +181,7 @@ test("peer rejected hello is terminal", async (t) => {
 
 for (const replacement of [false, true]) test(`peer rejected ${replacement ? "replace" : "live rehello"} is terminal`, async (t) => {
   const endpoint = peerEndpoint(), scheduled = [];
-  const peer = connectPeer({ product: "native-product", session_id: "session", name: "old title", groups: [], info: {} }, async () => ({ disposition: "injected" }), { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: (call) => scheduled.push(call) });
+  const peer = connectPeer({ product: "native-product", session_id: "session", name: "old title", groups: [], info: {} }, async () => ({ disposition: "injected" }), { SESSIONBUS_SOCKET: "/fixture/socket", SESSIONBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: (call) => scheduled.push(call) });
   t.after(() => endpoint.daemon.close()); const hello = await endpoint.next(); await endpoint.daemon.result(hello, {}); await peer.ready;
   const changed = replacement ? peer.replace({ product: "native-product", session_id: "next", name: "next title", groups: [], info: {} }) : peer.rehello({ name: "next title", info: {} });
   const rejected = await endpoint.next(); await endpoint.daemon.error(rejected, -32602); await assert.rejects(changed, (error) => error instanceof ProtocolError && error.code === -32602); await peer.closed;
@@ -189,7 +189,7 @@ for (const replacement of [false, true]) test(`peer rejected ${replacement ? "re
 });
 
 async function harness(t, product, options = {}) {
-  const [workerSocket, daemonSocket] = pair(); const hello = deferred(); const env = { AGENTBUS_LAUNCH_TOKEN: "token", AGENTBUS_LOCAL_KEY: "", AGENTBUS_SOCKET: "/fixture/socket" }; product.env = env;
+  const [workerSocket, daemonSocket] = pair(); const hello = deferred(); const env = { SESSIONBUS_LAUNCH_TOKEN: "token", SESSIONBUS_LOCAL_KEY: "", SESSIONBUS_SOCKET: "/fixture/socket" }; product.env = env;
   const worker = new Worker(product, env, { connect: (socket) => { assert.equal(socket, "/fixture/socket"); return workerSocket; } }); product.worker = worker;
   const daemon = new Connection(daemonSocket, false, (request) => {
     if (request.method === "session.hello") { if (options.acknowledge === false) daemon.close(); else void daemon.result(request, {}); hello.resolve(); }
@@ -222,16 +222,16 @@ for (const row of rows) test(`lifecycle: ${row.name}`, async (t) => {
       product.started = deferred(); product.release = deferred(); const { daemon } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "block" }); const run = await product.started.promise;
       if (row.name === "one-run") await errorCode(daemon.call("turn.run", { ...target, input: "again" }), -32003);
       if (row.name === "one-interrupt") { product.interrupted = deferred(); await Promise.all([daemon.call("turn.interrupt", target), daemon.call("turn.interrupt", target)]); await product.interrupted.promise; }
-      if (row.name === "interrupt-error") { product.interruptError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); await daemon.call("turn.interrupt", target); assert.equal(stderr(), 'agentbus: product interrupt: "first failure\\nsecond failure"\n'); }
+      if (row.name === "interrupt-error") { product.interruptError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); await daemon.call("turn.interrupt", target); assert.equal(stderr(), 'sessionbus: product interrupt: "first failure\\nsecond failure"\n'); }
       if (row.name === "full-duplex" || row.name === "callback-originated-method") { product.outbound = true; assert.equal((await daemon.call("message.deliver", delivery)).disposition, "injected"); }
       if (row.name === "run-done") { let done = false; run.Done.then(() => { done = true; }); await Promise.resolve(); assert.equal(done, false); }
       if (row.name === "close-during-run") {
-        const stderr = captureStderr(t); product.interrupted = deferred(); product.closeStart = deferred(); product.closeEnd = deferred(); product.hangInterrupt = true; product.interruptError = new Error("first failure\nsecond failure"); const closing = daemon.call("session.close", target); await product.interrupted.promise; await daemon.call("turn.interrupt", target); product.release.resolve(); await running; await product.closeStart.promise; product.closeEnd.resolve(); await closing; assert.equal(stderr(), 'agentbus: product interrupt: "first failure\\nsecond failure"\n'); break;
+        const stderr = captureStderr(t); product.interrupted = deferred(); product.closeStart = deferred(); product.closeEnd = deferred(); product.hangInterrupt = true; product.interruptError = new Error("first failure\nsecond failure"); const closing = daemon.call("session.close", target); await product.interrupted.promise; await daemon.call("turn.interrupt", target); product.release.resolve(); await running; await product.closeStart.promise; product.closeEnd.resolve(); await closing; assert.equal(stderr(), 'sessionbus: product interrupt: "first failure\\nsecond failure"\n'); break;
       }
       product.release.resolve(); result = await running; await run.Done; if (row.name === "one-interrupt") assert.equal(run.Native, null); break;
     }
     case "eof-during-run": {
-      product.closeError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); product.started = deferred(); const { daemon, worker, serving } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "eof" }); const run = await product.started.promise; daemon.close(); await serving; await assert.rejects(running); await run.Done; assert.equal(worker.controller.signal.aborted, true); assert.equal(product.closeAborted, true); assert.deepEqual(product.closeRequest, {}); assert.equal(stderr(), 'agentbus: product close: "first failure\\nsecond failure"\n'); break;
+      product.closeError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); product.started = deferred(); const { daemon, worker, serving } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "eof" }); const run = await product.started.promise; daemon.close(); await serving; await assert.rejects(running); await run.Done; assert.equal(worker.controller.signal.aborted, true); assert.equal(product.closeAborted, true); assert.deepEqual(product.closeRequest, {}); assert.equal(stderr(), 'sessionbus: product close: "first failure\\nsecond failure"\n'); break;
     }
     case "peer-lifetime": { await peerLifetime(); const { daemon, serving } = await harness(t, product, { open: false }); await daemon.call("session.superseded", {}); await serving; break; }
     case "wrong-direction-request": { const { daemon, serving } = await harness(t, product, { open: false }); await errorCode(daemon.call("session.hello", { protocol: 1, product: "example-peer", launch_token: "again", supported_open_fields: [], extra_arguments: [] }), -32602); await serving; break; }
@@ -243,15 +243,15 @@ for (const row of rows) test(`lifecycle: ${row.name}`, async (t) => {
       product.deliverStart = deferred(); product.closeStart = deferred(); product.closeEnd = deferred(); const { daemon } = await harness(t, product); const delivering = daemon.call("message.deliver", delivery); await product.deliverStart.promise; const closing = daemon.call("session.close", target); await product.closeStart.promise; assert.equal((await daemon.call("message.deliver", delivery)).reason, "closing"); await delivering; product.closeEnd.resolve(); await closing; break;
     }
     case "environment": {
-      const reads = {}, env = new Proxy({ AGENTBUS_LAUNCH_TOKEN: "token", AGENTBUS_LOCAL_KEY: "key", AGENTBUS_SOCKET: "/fixture/socket" }, { get(object, name) { reads[name] = (reads[name] || 0) + 1; return object[name]; } }); product.env = env;
-      const worker = new Worker(product, env); await assert.rejects(worker.serve(), /local key/); assert.deepEqual(reads, { AGENTBUS_LAUNCH_TOKEN: 1, AGENTBUS_LOCAL_KEY: 1, AGENTBUS_SOCKET: 1 }); assert.deepEqual(env, {}); break;
+      const reads = {}, env = new Proxy({ SESSIONBUS_LAUNCH_TOKEN: "token", SESSIONBUS_LOCAL_KEY: "key", SESSIONBUS_SOCKET: "/fixture/socket" }, { get(object, name) { reads[name] = (reads[name] || 0) + 1; return object[name]; } }); product.env = env;
+      const worker = new Worker(product, env); await assert.rejects(worker.serve(), /local key/); assert.deepEqual(reads, { SESSIONBUS_LAUNCH_TOKEN: 1, SESSIONBUS_LOCAL_KEY: 1, SESSIONBUS_SOCKET: 1 }); assert.deepEqual(env, {}); break;
     }
     case "shutdown": { const { worker, serving } = await harness(t, product, { open: false }); worker.shutdown(); worker.shutdown(); await serving; break; }
     case "run-done-write-failure": {
       product.started = deferred(); product.release = deferred(); const { daemon, workerSocket, serving } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "block" }); const run = await product.started.promise; workerSocket.failNext = true; product.release.resolve(); await serving; await assert.rejects(running); await run.Done; break;
     }
     case "close-error": {
-      product.closeError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); const { daemon } = await harness(t, product); assert.deepEqual(await daemon.call("session.close", target), {}); assert.equal(product.closeAborted, false); assert.deepEqual(product.closeRequest, target); assert.equal(stderr(), 'agentbus: product close: "first failure\\nsecond failure"\n'); break;
+      product.closeError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); const { daemon } = await harness(t, product); assert.deepEqual(await daemon.call("session.close", target), {}); assert.equal(product.closeAborted, false); assert.deepEqual(product.closeRequest, target); assert.equal(stderr(), 'sessionbus: product close: "first failure\\nsecond failure"\n'); break;
     }
     case "close-forget": {
       product.started = deferred(); product.release = deferred(); product.interrupted = deferred(); const { worker, daemon, serving } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "block" }).catch((error) => error); await product.started.promise;
@@ -267,7 +267,7 @@ function captureStderr(t) {
 }
 
 async function peerLifetime() {
-  const connections = [], scheduled = []; let scheduledReady = deferred(), holdHello; const env = { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }; let currentIdentity, deliveries = 0;
+  const connections = [], scheduled = []; let scheduledReady = deferred(), holdHello; const env = { SESSIONBUS_SOCKET: "/fixture/socket", SESSIONBUS_LOCAL_KEY: "" }; let currentIdentity, deliveries = 0;
   const identity = { product: "native-product", session_id: "session-1", name: "peer", groups: ["shared"], info: {} };
   const peer = connectPeer(identity, async () => { deliveries++; return { disposition: "injected" }; }, env, { connect: () => { const [client, server] = pair(); const daemon = new Connection(server, false, (request) => {
     if (request.method === "session.hello") { if (holdHello) holdHello.resolve(); else if (currentIdentity?.session_id === request.params.session_id && JSON.stringify(currentIdentity.groups) !== JSON.stringify(request.params.groups)) void daemon.error(request, -32602); else { currentIdentity = request.params; void daemon.result(request, {}); } }

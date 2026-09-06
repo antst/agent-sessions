@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/sessionbus/internal/productruntime"
 )
 
 func TestProductSurfacesFailLoudAndReturnIsolatedSchemas(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/sessionbus/internal/federation"
 )
 
 func TestRouteDeliveryUsesOnlyLiveDestinationAcceptance(t *testing.T) {

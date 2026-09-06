@@ -17,9 +17,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/acceptance"
-	"github.com/antst/agent-sessions/internal/pathidentity"
-	"github.com/antst/agent-sessions/internal/releaseevidence"
+	"github.com/antst/sessionbus/internal/acceptance"
+	"github.com/antst/sessionbus/internal/pathidentity"
+	"github.com/antst/sessionbus/internal/releaseevidence"
 )
 
 const maxCellResultBytes = 1 << 20

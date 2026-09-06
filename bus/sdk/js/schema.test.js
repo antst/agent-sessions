@@ -19,6 +19,6 @@ for (const fixture of fixtures.cases) test(`schema: ${fixture.name}`, () => {
 });
 
 test("schema export is the authoritative document", () => {
-  assert.equal(schema.$id, "urn:agentbus:session:v1");
+  assert.equal(schema.$id, "urn:sessionbus:session:v1");
   assert.deepEqual(Object.keys(schema).sort(), ["$defs", "$id", "$schema"]);
 });

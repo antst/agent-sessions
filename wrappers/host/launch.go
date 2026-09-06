@@ -10,12 +10,12 @@ import (
 )
 
 const (
-	SocketEnv    = "AGENTBUS_SOCKET"
-	LocalKeyEnv  = "AGENTBUS_LOCAL_KEY"
-	TokenEnv     = "AGENTBUS_LAUNCH_TOKEN"
-	SessionIDEnv = "AGENTBUS_SESSION_ID"
-	NameEnv      = "AGENTBUS_SESSION_NAME"
-	GroupsEnv    = "AGENTBUS_GROUPS"
+	SocketEnv    = "SESSIONBUS_SOCKET"
+	LocalKeyEnv  = "SESSIONBUS_LOCAL_KEY"
+	TokenEnv     = "SESSIONBUS_LAUNCH_TOKEN"
+	SessionIDEnv = "SESSIONBUS_SESSION_ID"
+	NameEnv      = "SESSIONBUS_SESSION_NAME"
+	GroupsEnv    = "SESSIONBUS_GROUPS"
 )
 
 func LaneMode() bool { _, present := os.LookupEnv(TokenEnv); return present }

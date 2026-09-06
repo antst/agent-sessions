@@ -28,7 +28,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/antst/agent-sessions.git",
+    "url": "git+https://github.com/antst/sessionbus.git",
     "directory": "integrations/dsh/comms"
   },
   "peerDependencies": {

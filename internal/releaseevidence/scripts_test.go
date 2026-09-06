@@ -48,7 +48,7 @@ func TestReleaseGateManifestFindsManagedGrokOutsidePATH(t *testing.T) {
 		t.Fatal(err)
 	}
 	command := exec.Command(script, "--os", "linux",
-		"--job-url", "https://github.com/antst/agent-sessions/actions/runs/1/job/2",
+		"--job-url", "https://github.com/antst/sessionbus/actions/runs/1/job/2",
 		"--evidence-dir", evidence, "--output", manifest)
 	command.Dir = root
 	command.Env = append(os.Environ(),
@@ -213,7 +213,7 @@ func TestReleaseTagVerifyParsesTrailersBeforeSignatureBlock(t *testing.T) {
 	message := strings.Join([]string{
 		"Agent Sessions v0.2.4",
 		"",
-		"Agent-Sessions-Evidence-Run: https://github.com/antst/agent-sessions/actions/runs/123",
+		"Agent-Sessions-Evidence-Run: https://github.com/antst/sessionbus/actions/runs/123",
 		"Agent-Sessions-Evidence-Artifact: agent-sessions-v0.2.4-release-evidence-" + commit,
 		"Agent-Sessions-Evidence-SHA256: " + strings.Repeat("a", 64),
 		"-----BEGIN SSH SIGNATURE-----",

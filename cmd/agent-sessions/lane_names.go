@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
 )
 
 func (c *hostCoordinator) ensureActiveLaneNames(

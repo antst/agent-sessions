@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/procinfo"
-	"github.com/antst/agent-sessions/internal/sessiontools"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
+	"github.com/antst/sessionbus/internal/procinfo"
+	"github.com/antst/sessionbus/internal/sessiontools"
 )
 
 // StdioMCPThreadID extracts the Codex-owned thread identity from native MCP

@@ -1,4 +1,4 @@
-// Package conn owns the socket reader and writer used by an Agentbus session.
+// Package conn owns the socket reader and writer used by an Sessionbus session.
 package conn
 
 import (
@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/antst/agent-sessions/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/protocol"
 )
 
 const OutboxSize = 256

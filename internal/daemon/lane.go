@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/antst/agent-sessions/internal/statestore"
+	"github.com/antst/sessionbus/internal/statestore"
 )
 
 const laneMutationAttempts = 32

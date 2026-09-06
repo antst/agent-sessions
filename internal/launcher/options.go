@@ -3,7 +3,7 @@ package launcher
 import (
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/productcatalog"
 )
 
 // productOptionTable contains native value arity only. It never assigns

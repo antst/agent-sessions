@@ -1,4 +1,4 @@
-// Package sessionkit is the product-agnostic Go implementation of Agentbus.
+// Package sessionkit is the product-agnostic Go implementation of Sessionbus.
 package sessionkit
 
 import (
@@ -11,8 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/antst/agent-sessions/bus/internal/protocol"
-	"github.com/antst/agent-sessions/bus/internal/rpc"
+	"github.com/antst/sessionbus/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/rpc"
 )
 
 type WorkerCallbacks interface {
@@ -257,7 +257,7 @@ func (w *Worker) closeProduct(ctx context.Context) {
 
 func callbackError(callback string, err error) {
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentbus: product %s: %q\n", callback, err.Error())
+		fmt.Fprintf(os.Stderr, "sessionbus: product %s: %q\n", callback, err.Error())
 	}
 }
 
@@ -268,16 +268,16 @@ func (w *Worker) reply(err error) {
 }
 
 func sessionEnvironment(worker bool) (string, string, error) {
-	token, ok := os.LookupEnv("AGENTBUS_LAUNCH_TOKEN")
-	key, endpoint := os.Getenv("AGENTBUS_LOCAL_KEY"), Socket()
-	for _, name := range []string{"AGENTBUS_LAUNCH_TOKEN", "AGENTBUS_LOCAL_KEY", "AGENTBUS_SOCKET"} {
+	token, ok := os.LookupEnv("SESSIONBUS_LAUNCH_TOKEN")
+	key, endpoint := os.Getenv("SESSIONBUS_LOCAL_KEY"), Socket()
+	for _, name := range []string{"SESSIONBUS_LAUNCH_TOKEN", "SESSIONBUS_LOCAL_KEY", "SESSIONBUS_SOCKET"} {
 		_ = os.Unsetenv(name)
 	}
 	if worker && (!ok || token == "") {
 		return "", "", errors.New("launch token is required")
 	}
 	if endpoint == "" {
-		return "", "", errors.New("agentbus socket is required")
+		return "", "", errors.New("sessionbus socket is required")
 	}
 	if key != "" {
 		return "", "", errors.New("local key transport not implemented in this build")
