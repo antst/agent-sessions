@@ -177,7 +177,7 @@ func TestWorkerLifecycleTable(t *testing.T) {
 	check(t, stderrWriter.Close() == nil, "close stderr writer")
 	raw, err = io.ReadAll(stderrReader)
 	check(t, err == nil, "read stderr: %v", err)
-	want := "agentbus: product close: \"first failure\\nsecond failure\"\nagentbus: product interrupt: \"first failure\\nsecond failure\"\n"
+	want := "agentbus: product interrupt: \"first failure\\nsecond failure\"\nagentbus: product close: \"first failure\\nsecond failure\"\nagentbus: product close: \"first failure\\nsecond failure\"\nagentbus: product interrupt: \"first failure\\nsecond failure\"\n"
 	check(t, string(raw) == want, "callback stderr = %q", raw)
 }
 
@@ -209,6 +209,9 @@ func runCase(t *testing.T, name string) [6]int32 {
 	case "one-run", "one-interrupt", "interrupt-error", "full-duplex", "close-during-run", "callback-originated-method", "run-done":
 		blockingCase(t, name, p)
 	case "eof-during-run", "run-done-write-failure":
+		if name == "eof-during-run" {
+			p.closeErr = errors.New("first failure\nsecond failure")
+		}
 		h := startHarness(t, p, true, true)
 		p.started = make(chan *Run)
 		run := async(h, "turn.run", protocol.TurnRunRequest{SessionID: "product-session@local", Input: "eof"}, &TurnResult{})
@@ -281,6 +284,7 @@ func blockingCase(t *testing.T, name string, p *fakeProduct) {
 		checkDelivery(t, h, "injected")
 	case "close-during-run":
 		p.interrupted, p.closeStart, p.closeEnd, p.hangInterrupt = make(chan struct{}), make(chan struct{}), make(chan struct{}), true
+		p.interruptErr = errors.New("first failure\nsecond failure")
 		closed := async(h, "session.close", target, &struct{}{})
 		<-p.interrupted
 		check(t, h.Call(context.Background(), "turn.interrupt", target, &struct{}{}) == nil, "coalesced interrupt failed")
