@@ -59,7 +59,7 @@ func (p *Peer) Err() error {
 	return p.terminal
 }
 
-func (p *Peer) Rehello(name string, info map[string]any) error {
+func (p *Peer) Rehello(ctx context.Context, name string, info map[string]any) error {
 	next, wire, generation, err := p.desire(Identity{Name: name, Info: info}, false)
 	if err != nil {
 		return err
@@ -67,14 +67,32 @@ func (p *Peer) Rehello(name string, info map[string]any) error {
 	if wire == nil {
 		return errNotConnected
 	}
-	err = p.hello(p.ctx, wire, next, generation)
-	if p.failHello(err) {
+	done, acknowledged := make(chan error, 1), make(chan struct{})
+	go func() {
+		helloErr := p.helloObserved(p.ctx, wire, next, generation, func() { close(acknowledged) })
+		if !p.failHello(helloErr) && helloErr != nil && wire.Context().Err() != nil {
+			helloErr = errNotConnected
+		}
+		done <- helloErr
+	}()
+	select {
+	case err = <-done:
 		return err
+	default:
 	}
-	if err != nil && wire.Context().Err() != nil {
-		return errNotConnected
+	select {
+	case err = <-done:
+		return err
+	case <-ctx.Done():
+		select {
+		case <-acknowledged:
+			return <-done
+		case err = <-done:
+			return err
+		default:
+			return ctx.Err()
+		}
 	}
-	return err
 }
 
 func (p *Peer) Replace(ctx context.Context, identity Identity) error {
@@ -210,6 +228,10 @@ func (p *Peer) failHello(err error) bool {
 }
 
 func (p *Peer) hello(ctx context.Context, wire *rpc.Conn, identity PeerIdentity, generation uint64) error {
+	return p.helloObserved(ctx, wire, identity, generation, nil)
+}
+
+func (p *Peer) helloObserved(ctx context.Context, wire *rpc.Conn, identity PeerIdentity, generation uint64, acknowledged func()) error {
 	for {
 		installed := false
 		err := wire.CallObserved(ctx, "session.hello", identity, &struct{}{}, func() error {
@@ -232,6 +254,9 @@ func (p *Peer) hello(ctx context.Context, wire *rpc.Conn, identity PeerIdentity,
 			return err
 		}
 		if installed {
+			if acknowledged != nil {
+				acknowledged()
+			}
 			return nil
 		}
 	}

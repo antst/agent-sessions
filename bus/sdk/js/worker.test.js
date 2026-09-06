@@ -123,7 +123,7 @@ test("peer replace settles old runs and reconnects with the new identity", async
   const replaced = peer.replace(replacementIdentity), replacement = await first.next(); replacementIdentity.groups.push("mutated"); replacementIdentity.info.revision = 9;
   assert.deepEqual(await peer.caller.wait({ turn_id: started.turn_id }), { turn_id: "t-1", session_id: "lane@local", state: "unavailable", reason: "-32002 not_connected" });
   await assert.rejects(peer.call("session.list", {}), /not connected/);
-  const update = { name: "retitled", info: { revision: 2 } }; await assert.rejects(peer.rehello(update), /not connected/); update.info.revision = 9;
+  const update = { name: "retitled", info: { revision: 2 } }; await assert.rejects(peer.rehello(undefined, update.name, update.info), /not connected/); update.info.revision = 9;
   await first.daemon.error(run, -32002); await first.daemon.result(replacement, {});
   const corrective = await first.next(); assert.deepEqual(corrective.params, { protocol: 1, product: "native-product", session_id: "new", name: "retitled", groups: ["new"], info: { revision: 2 } });
   await first.daemon.result(corrective, {}); await replaced;
@@ -164,6 +164,16 @@ test("peer delivery context aborts on EOF", async (t) => {
   void endpoint.daemon.call("message.deliver", delivery).catch(() => {}); const signal = await entered.promise; endpoint.daemon.close(); await finished.promise; assert.equal(signal.aborted, true);
 });
 
+test("peer rehello cancellation keeps its late acknowledgement owned", async (t) => {
+  const endpoint = peerEndpoint(), admitted = deferred();
+  const peer = connectPeer({ product: "native-product", session_id: "session", name: "old", groups: [], info: {} }, async (_signal, _request, identity) => { admitted.resolve(identity); return { disposition: "injected" }; }, { SESSIONBUS_SOCKET: "/fixture/socket", SESSIONBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
+  t.after(() => { peer.shutdown(); endpoint.daemon.close(); }); await endpoint.daemon.result(await endpoint.next(), {}); await peer.ready;
+  const controller = new AbortController(), changed = peer.rehello(controller.signal, "renamed", { revision: 2 }), hello = await endpoint.next(); controller.abort(new Error("caller cancelled"));
+  await assert.rejects(changed, /caller cancelled/); await endpoint.daemon.result(hello, {});
+  const delivered = endpoint.daemon.call("message.deliver", delivery); assert.deepEqual(await admitted.promise, { product: "native-product", session_id: "session", name: "renamed", groups: [], info: { revision: 2 } });
+  assert.deepEqual(await delivered, { disposition: "injected" });
+});
+
 test("peer shutdown closes a held replacement hello", async (t) => {
   const endpoint = peerEndpoint(), peer = connectPeer({ product: "native-product", session_id: "old", name: "old", groups: [], info: {} }, async () => ({ disposition: "injected" }), { SESSIONBUS_SOCKET: "/fixture/socket", SESSIONBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
   t.after(() => endpoint.daemon.close()); await endpoint.daemon.result(await endpoint.next(), {}); await peer.ready;
@@ -183,7 +193,7 @@ for (const replacement of [false, true]) test(`peer rejected ${replacement ? "re
   const endpoint = peerEndpoint(), scheduled = [];
   const peer = connectPeer({ product: "native-product", session_id: "session", name: "old title", groups: [], info: {} }, async () => ({ disposition: "injected" }), { SESSIONBUS_SOCKET: "/fixture/socket", SESSIONBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: (call) => scheduled.push(call) });
   t.after(() => endpoint.daemon.close()); const hello = await endpoint.next(); await endpoint.daemon.result(hello, {}); await peer.ready;
-  const changed = replacement ? peer.replace({ product: "native-product", session_id: "next", name: "next title", groups: [], info: {} }) : peer.rehello({ name: "next title", info: {} });
+  const changed = replacement ? peer.replace({ product: "native-product", session_id: "next", name: "next title", groups: [], info: {} }) : peer.rehello(undefined, "next title", {});
   const rejected = await endpoint.next(); await endpoint.daemon.error(rejected, -32602); await assert.rejects(changed, (error) => error instanceof ProtocolError && error.code === -32602); await peer.closed;
   assert.equal(peer.error.code, -32602); assert.equal(scheduled.length, 0); await assert.rejects(peer.call("session.list", {}), /not connected/);
 });
@@ -274,18 +284,18 @@ async function peerLifetime() {
   }); connections.push(daemon); return client; }, schedule: (call, milliseconds) => { scheduled.push({ call, milliseconds }); scheduledReady.resolve(); } });
   await peer.ready; assert.deepEqual(env, {}); identity.groups.push("mutated"); identity.info.changed = true;
   connections[0].close(); await scheduledReady.promise; await assert.rejects(peer.call("session.list", {}), /not connected/); assert.equal(scheduled[0].milliseconds, 2000);
-  const offline = { name: "offline title", info: { phase: "stored" } }; await assert.rejects(peer.rehello(offline), /not connected/); offline.info.phase = "mutated";
+  const offline = { name: "offline title", info: { phase: "stored" } }; await assert.rejects(peer.rehello(undefined, offline.name, offline.info), /not connected/); offline.info.phase = "mutated";
   scheduledReady = deferred(); scheduled.shift().call(); await peer.ready; assert.equal(currentIdentity.name, "offline title"); assert.deepEqual(currentIdentity.groups, ["shared"]); assert.deepEqual(currentIdentity.info, { phase: "stored" });
   const beforeInvalid = structuredClone(peer.identity);
-  for (const invalid of [{ name: "changed", info: {}, groups: ["changed"] }, { name: "", info: {} }, { name: "changed", info: [] }]) await assert.rejects(peer.rehello(invalid), /invalid rehello identity/);
+  for (const invalid of [{ name: "", info: {} }, { name: "changed", info: [] }]) await assert.rejects(peer.rehello(undefined, invalid.name, invalid.info), /invalid rehello identity/);
   assert.deepEqual(peer.identity, beforeInvalid);
   assert.equal((await connections[1].call("message.deliver", delivery)).disposition, "injected"); assert.equal(deliveries, 1);
-  const renamed = { name: "renamed", info: {} }; await peer.rehello(renamed); assert.equal(currentIdentity.name, "renamed"); renamed.info.changed = true;
-  holdHello = deferred(); const crossed = peer.rehello({ name: "crossed title", info: { phase: "new" } }); await holdHello.promise; connections[1].close(); holdHello = null;
+  const renamed = { name: "renamed", info: {} }; await peer.rehello(undefined, renamed.name, renamed.info); assert.equal(currentIdentity.name, "renamed"); renamed.info.changed = true;
+  holdHello = deferred(); const crossed = peer.rehello(undefined, "crossed title", { phase: "new" }); await holdHello.promise; connections[1].close(); holdHello = null;
   await assert.rejects(crossed, /not connected/); await scheduledReady.promise; scheduledReady = deferred(); scheduled.shift().call(); await peer.ready;
   assert.equal(currentIdentity.name, "crossed title"); assert.deepEqual(currentIdentity.info, { phase: "new" });
   const beforeTerminal = structuredClone(peer.identity); await connections[2].call("session.superseded", {}); await peer.closed;
   assert.equal(peer.error instanceof ProtocolError, true); assert.equal(peer.error.code, -32012);
-  await assert.rejects(peer.rehello({ name: "too late", info: {} }), /superseded/); assert.deepEqual(peer.identity, beforeTerminal); assert.equal(scheduled.length, 0);
+  await assert.rejects(peer.rehello(undefined, "too late", {}), /superseded/); assert.deepEqual(peer.identity, beforeTerminal); assert.equal(scheduled.length, 0);
   await assert.rejects(peer.replace({ ...beforeTerminal, session_id: "too-late" }), /superseded/); assert.deepEqual(peer.identity, beforeTerminal);
 }
