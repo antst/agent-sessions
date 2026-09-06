@@ -136,7 +136,7 @@ export function createPlugin(dependencies = {}) {
       if (!validate("SessionHelloRequest", { protocol: 1, ...identity })) throw new Error("OpenCode peer identity is outside the Sessionbus grammar");
       if (event.type === "session.created" && requestedName && nativeName !== requestedName) {
         const updated = await client.session.update({ path: { id }, query: { directory }, body: { title: requestedName } });
-        if (updated?.error != null || updated?.response?.status !== 200 || updated.data?.title !== requestedName) throw new Error("OpenCode did not confirm the requested session title");
+        if (updated?.error != null || updated?.response?.status !== 200 || updated.data?.id !== id || updated.data?.title !== requestedName) throw new Error("OpenCode did not confirm the requested session title");
       }
       const current = sessions.get(id);
       if (!current) {

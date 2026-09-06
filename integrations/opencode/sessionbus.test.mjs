@@ -81,6 +81,14 @@ test("created session is renamed before its first peer hello", async () => {
   assert.equal(records.peers[0].identity.name, "Named session");
 });
 
+test("created session must confirm the exact retitled identity", async () => {
+  const module = await load(), records = { peers: [], actions: [], prompts: [] };
+  const plugin = module.createPlugin({ tool: fakeTool, createClient: () => ({ v2: v2(records) }), connectPeer: peerFactory(records), onExit() {} });
+  const hooks = await plugin({ client: { session: { async update(request) { return { response: { status: 200 }, data: { id: `${request.path.id}-other`, title: request.body.title } }; } } }, directory: "/work", serverUrl: new URL("http://127.0.0.1"), environment: { SESSIONBUS_SOCKET: "/tmp/bus.sock", SESSIONBUS_SESSION_NAME: "Named session", SESSIONBUS_GROUPS: "[]" } });
+  await assert.rejects(hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_exact", title: "New session", directory: "/work" } } } }), /did not confirm/u);
+  assert.equal(records.peers.length, 0);
+});
+
 test("peer tool and delivery use the same exact session", async () => {
   const module = await load(), records = { peers: [], actions: [], prompts: [] };
   const plugin = module.createPlugin({ tool: fakeTool, createClient: () => ({ v2: v2(records) }), connectPeer: peerFactory(records), onExit() {} });
