@@ -43,13 +43,14 @@ type acpClient struct {
 	notify      func(acpFrame)
 }
 
-func newACPClient(input io.WriteCloser, output io.Reader, notify func(acpFrame)) *acpClient {
+func newACPClient(input io.WriteCloser, output io.ReadCloser, notify func(acpFrame)) *acpClient {
 	c := &acpClient{input: input, responses: make(chan acpFrame, 16), interjected: make(chan interjectionNotice, 16), done: make(chan struct{}), notify: notify}
 	go c.read(output)
 	return c
 }
 
-func (c *acpClient) read(output io.Reader) {
+func (c *acpClient) read(output io.ReadCloser) {
+	defer output.Close()
 	scanner := bufio.NewScanner(output)
 	scanner.Buffer(make([]byte, 4096), maxACPFrame)
 	for scanner.Scan() {
@@ -85,6 +86,7 @@ func (c *acpClient) read(output io.Reader) {
 
 func (c *acpClient) finish(err error) {
 	c.err = err
+	close(c.responses)
 	close(c.done)
 }
 
@@ -106,7 +108,10 @@ func (c *acpClient) requestStarted(ctx context.Context, method string, params an
 	}
 	for {
 		select {
-		case frame := <-c.responses:
+		case frame, ok := <-c.responses:
+			if !ok {
+				return fmt.Errorf("read Grok ACP %s: %w", method, c.err)
+			}
 			if frame.ID == nil || *frame.ID != id {
 				continue
 			}
@@ -117,8 +122,6 @@ func (c *acpClient) requestStarted(ctx context.Context, method string, params an
 				return fmt.Errorf("decode Grok ACP %s response", method)
 			}
 			return nil
-		case <-c.done:
-			return fmt.Errorf("read Grok ACP %s: %w", method, c.err)
 		case <-ctx.Done():
 			return ctx.Err()
 		}

@@ -114,11 +114,8 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 	}
 	primaryCommand := command("grok", primaryArgs...)
 	primaryCommand.Dir, primaryCommand.Stderr = request.Open.Cwd, os.Stderr
-	input, _ := primaryCommand.StdinPipe()
-	output, _ := primaryCommand.StdoutPipe()
-	child, err := host.StartChild(primaryCommand, lock, endpoint)
+	child, input, output, err := host.StartChild(primaryCommand, lock, endpoint)
 	if err != nil {
-		_ = input.Close()
 		return sessionkit.OpenResult{}, fail(fmt.Errorf("start Grok primary: %w", err))
 	}
 	primary := newACPClient(input, output, p.receive)
