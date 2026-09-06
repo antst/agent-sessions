@@ -50,9 +50,12 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 		stop := context.AfterFunc(ctx, func() { _ = closer.Close() })
 		defer stop()
 	}
-	caller := sessionkit.NewCaller(s.Backend.Call)
-	if source, ok := s.Backend.(interface{ Caller() *sessionkit.Caller }); ok {
+	var caller *sessionkit.Caller
+	source, owned := s.Backend.(interface{ Caller() *sessionkit.Caller })
+	if owned {
 		caller = source.Caller()
+	} else {
+		caller = sessionkit.NewCaller(s.Backend.Call)
 	}
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 1<<20)
@@ -198,15 +201,9 @@ func toolDefinition() map[string]any {
 }
 
 func errorFailure(err error) *failure {
-	var local *failure
-	if errors.As(err, &local) {
-		return local
-	}
 	var protocol *sessionkit.ProtocolError
 	if errors.As(err, &protocol) {
 		return &failure{Code: protocol.Code, Message: protocol.Message, Data: protocol.Data}
 	}
 	return &failure{Code: -32603, Message: err.Error()}
 }
-
-func (e *failure) Error() string { return e.Message }
