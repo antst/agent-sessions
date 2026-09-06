@@ -20,6 +20,8 @@ type fakeBackend struct {
 	calls  int
 }
 
+func (*fakeBackend) Prepare(context.Context, json.RawMessage) error { return nil }
+
 type preparedBackend struct {
 	fakeBackend
 	prepared int

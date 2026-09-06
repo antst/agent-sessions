@@ -111,7 +111,7 @@ func TestPeerRehellosReplacesAndStopsOnObservationFailure(t *testing.T) {
 	<-backend.peer.Ready()
 	initial := <-events
 	check(t, initial["method"] == "session.hello" && initial["params"].(map[string]any)["session_id"] == "initial", "initial = %#v", initial)
-	must(t, backend.Prepare(context.Background()))
+	must(t, backend.Prepare(context.Background(), nil))
 	result, err := backend.Call(context.Background(), "session.list", sessionkit.SessionListRequest{})
 	must(t, err)
 	check(t, string(result) == `{"sessions":[]}`, "result = %s", result)
@@ -120,14 +120,14 @@ func TestPeerRehellosReplacesAndStopsOnObservationFailure(t *testing.T) {
 	check(t, params["session_id"] == "initial" && params["name"] == "same-title" && reflect.DeepEqual(params["groups"], []any{"team"}) && params["info"].(map[string]any)["cwd"] == "/same", "rehello = %#v", rehello)
 	check(t, call["method"] == "session.list", "call = %#v", call)
 	payload = `[{"sessionId":"replacement","name":"new-title","kind":"interactive","cwd":"/new","pid":` + fmt.Sprint(parent) + `}]`
-	must(t, backend.Prepare(context.Background()))
+	must(t, backend.Prepare(context.Background(), nil))
 	_, err = backend.Call(context.Background(), "session.list", sessionkit.SessionListRequest{})
 	must(t, err)
 	replaced, call := <-events, <-events
 	check(t, replaced["method"] == "session.hello" && replaced["params"].(map[string]any)["session_id"] == "replacement", "replacement = %#v", replaced)
 	check(t, call["method"] == "session.list", "call = %#v", call)
 	observationError = os.ErrNotExist
-	err = backend.Prepare(context.Background())
+	err = backend.Prepare(context.Background(), nil)
 	check(t, err != nil && strings.Contains(err.Error(), "start Claude with claude-peer"), "observation error = %v", err)
 	select {
 	case event := <-events:
@@ -169,7 +169,7 @@ func TestUnresolvedPeerNeverConnects(t *testing.T) {
 	backend, err := NewPeerBackend(context.Background())
 	must(t, err)
 	defer backend.Shutdown()
-	err = backend.Prepare(context.Background())
+	err = backend.Prepare(context.Background(), nil)
 	check(t, backend.peer == nil && err != nil && strings.Contains(err.Error(), "start Claude with claude-peer"), "backend = %#v / %v", backend, err)
 }
 
