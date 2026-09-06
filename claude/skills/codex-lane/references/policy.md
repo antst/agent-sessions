@@ -35,7 +35,7 @@ interrupts or relabels the lane. An orchestrator may choose a bounded wait to st
 tool-call limit; exit 124 means it should wait again or inspect status.
 
 Lifecycle and notification routing are not model policy. Ordinary lanes belong to the launching
-orchestrator, notify their immediate Agent Sessions parent automatically, and are interrupted/archived when
+orchestrator, notify their immediate Sessionbus parent automatically, and are interrupted/archived when
 that owner exits. `lane.ready.owner_session_id` exposes the parent attachment; the unified daemon
 does not use `notify_target`, `--notify`, or `--no-notify`. Pass `--persistent` only when requested. Auto-archive is enabled by default and
 retires an idle lane one minute after its latest final terminal turn; a newer turn cancels the timer.

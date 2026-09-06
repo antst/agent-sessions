@@ -5,7 +5,7 @@ description: Orchestrate named, messageable local or remote Qwen Code worker lan
 
 # Orchestrate Qwen lanes
 
-Use the process-attested `agent_sessions.lane` MCP tool with `product: "qwen"`.
+Use the process-attested `sessionbus.lane` MCP tool with `product: "qwen"`.
 The daemon owns a durable native Qwen transcript and exposes it as an Agent
 Sessions peer. Qwen remains the authority for its approval mode. Do not execute
 `qwen-peer-lane` through Bash.
@@ -32,7 +32,7 @@ Federation owns lifecycle, so omit `--persistent` and
 Never put a briefing on argv. `start` returns `lane.ready`, not the answer. Use one
 collector, then select the final agent message matching the last `turn.completed`.
 A timeout exits 124 without cancelling. Execute a delivered
-`QWEN_LANE_TERMINAL` structured collection hint through `agent_sessions.lane`, preserving
+`QWEN_LANE_TERMINAL` structured collection hint through `sessionbus.lane`, preserving
 its product, command, lane identity, host, and timeout arguments. The notice
 itself is not an answer.
 
@@ -40,7 +40,7 @@ Use `--yolo` only with explicit authority, `--no-yolo` for native initial
 `default`, or a supported `--approval-mode MODE`. Qwen may change mode natively
 after launch; status reports the last corroborated mode or `unknown`.
 
-The lane is messageable through the `agent-sessions` skill. Messages serialize as
+The lane is messageable through the `sessionbus` skill. Messages serialize as
 collectable turns. Collect debt before follow-up:
 
 Call `resume` with arguments `["qwen-review", "--timeout", "600", "-"]`

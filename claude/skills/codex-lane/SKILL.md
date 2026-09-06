@@ -6,18 +6,18 @@ description: Orchestrate named, messageable local or remote Codex lanes — star
 # Orchestrate Codex lanes
 
 A lane is a named Codex thread on the local shared App Server. It registers with
-the Agent Sessions host agent and is visible only to peers sharing one of its groups. Claude's
+the Sessionbus host agent and is visible only to peers sharing one of its groups. Claude's
 shared native registry contains ordinary/managed Claude rows and the single host-agent service,
 not synthetic Codex rows. `--persistent` is an explicit opt-in for a lane that must survive its owner.
 
-This skill is a pass-through to the process-attested `agent_sessions.lane` MCP
+This skill is a pass-through to the process-attested `sessionbus.lane` MCP
 tool. It owns no policy: model, reasoning effort, sandbox, approval, web access,
 config overlays, output schema, and worktree isolation are all decided by whoever
 asked for the lane. See `references/policy.md`.
 
 ## Required lifecycle transport
 
-Use `agent_sessions.lane` for every lifecycle operation with `product: "codex"`.
+Use `sessionbus.lane` for every lifecycle operation with `product: "codex"`.
 Supply one exact `command`, its native arguments after the command, optional
 briefing `input`, and optional federated `host`. Never execute `codex-peer-lane`
 through Bash. CLI spellings below document the argument contract only; translate
@@ -53,7 +53,7 @@ do not poll.
 
 ## Preflight (once per session)
 
-Call `agent_sessions.lane` with command `doctor` and arguments `["--json"]`, then
+Call `sessionbus.lane` with command `doctor` and arguments `["--json"]`, then
 command `list` and arguments `["--all"]`. Require **contract version 2**, a
 reachable runtime, and `ready: true`.
 
@@ -100,7 +100,7 @@ the unfiltered list remains the authoritative view for host-local lifecycle stat
 names can be ambiguous across otherwise group-isolated lanes, so retain and use exact IDs. `--mine` fails when
 the caller is not a corroborated live Codex or Claude peer; it never guesses from a transient shell.
 
-The runtime records this Claude Agent Sessions attachment as the immediate parent and notifies it
+The runtime records this Claude Sessionbus attachment as the immediate parent and notifies it
 automatically. `lane.ready.owner_session_id` identifies that relationship; it is not necessarily
 Claude's native transcript UUID. The unified daemon does not require `notify_target`, and
 `--notify`/`--no-notify` are not lifecycle inputs. Their absence never selects a different
@@ -123,11 +123,11 @@ Pick one mode. Modes A and B are both correct; C is a fallback.
 
 **A. Push-notice driven.** Continue with other work. The lane's
 terminal notice arrives as a peer message. If it carries `collection=required`,
-follow its structured `agent_sessions.lane` `wait` hint. If it carries
+follow its structured `sessionbus.lane` `wait` hint. If it carries
 `collection=none`, another collector already consumed the turn. The
 message is status metadata, never a result.
 
-Peer delivery is push-based. Do **not** poll `agent_sessions.check_inbox`, sleep, or block the
+Peer delivery is push-based. Do **not** poll `sessionbus.check_inbox`, sleep, or block the
 orchestrator waiting for the notice; continue useful work and the message will be injected
 automatically. `check_inbox` is only a recovery tool for content queued past a delivery boundary.
 
@@ -158,14 +158,14 @@ Exit codes: `0` completed, `124` timed out, `130` interrupted, `1` everything el
 
 ### 3. Talk to a running lane
 
-Use the `agent-sessions` skill and `agent_sessions.send_message`. Address the
+Use the `sessionbus` skill and `sessionbus.send_message`. Address the
 lane by its current visible name or exact host-qualified identity. Do not fall
 back to Claude's native messaging when the structured tool fails. A message
 wakes an idle lane or steers a turn already in flight. Message delivery does
 not return the result; a turn started by an inbound message is collected by a
 later `wait`.
 
-For a remote lane, use its current host-qualified identity from Agent Sessions discovery. The
+For a remote lane, use its current host-qualified identity from Sessionbus discovery. The
 destination-local lane name and session ID are valid behind the product lane launcher with `--host` for lifecycle
 commands; terminal notices include that remote collection command.
 

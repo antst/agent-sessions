@@ -5,7 +5,7 @@ description: Orchestrate named, messageable local or remote Grok Build worker la
 
 # Orchestrate Grok lanes
 
-Use the process-attested `agent_sessions.lane` MCP tool with `product: "grok"`.
+Use the process-attested `sessionbus.lane` MCP tool with `product: "grok"`.
 It runs a headless Grok Build conversation as a daemon-owned durable Agent
 Sessions peer. Do not execute `grok-peer-lane` through Bash.
 
@@ -24,7 +24,7 @@ matters. Hub disconnect is a hard failure; never fall back to SSH or local execu
 Call `doctor` with arguments `["--json"]`. Require contract version 2,
 `runtime_ready: true`, and a ready native Grok adapter.
 The nested `supervisor_reachable` field is diagnostic only because the Grok manager directly owns
-ACP. Check `list --all` output plus current Agent Sessions discovery, and retain the exact lane ID.
+ACP. Check `list --all` output plus current Sessionbus discovery, and retain the exact lane ID.
 Messaging names are group-scoped; bare
 lifecycle names can still be ambiguous in host-local lane state.
 
@@ -50,8 +50,8 @@ Pass the briefing as MCP `input`, never in `arguments`:
 does not interrupt the turn. From the collected JSONL, select the `agent_message` final answer with
 the same `turn_id` as the last `turn.completed`, and report `outcome` and `exit`.
 
-The lane is a grouped peer. Use the `agent-sessions` skill and
-`agent_sessions.send_message`; do not fall back to Claude's native messaging or
+The lane is a grouped peer. Use the `sessionbus` skill and
+`sessionbus.send_message`; do not fall back to Claude's native messaging or
 address a synthetic Grok row in Claude's registry. Then collect the resulting
 serialized turn with `wait`. A message during active work is durably queued for
 the next turn; it never creates a competing ACP driver.

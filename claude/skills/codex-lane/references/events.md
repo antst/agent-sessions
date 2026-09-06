@@ -93,12 +93,12 @@ fields plus normalized token counters, and a `usage` block. `cost` is deliberate
 
 ## Terminal notices
 
-The unified daemon delivers a durable terminal pointer to the lane's immediate Agent Sessions
+The unified daemon delivers a durable terminal pointer to the lane's immediate Sessionbus
 parent automatically. `owner_session_id` identifies that parent attachment; there is no
 `notify_target`, `--notify`, or `--no-notify` branch in this lifecycle surface.
 The notice contains lane, thread, turn, status, outcome, exit, and the current
 collection state. `collection=required` includes a structured
-`agent_sessions.lane` `wait` hint; `collection=none` means the turn was
+`sessionbus.lane` `wait` hint; `collection=none` means the turn was
 already consumed. `lane.ready` reports the selected target, ownership, and persistence mode.
 Terminal pointers, and ordinary peer messages sent by a parent-owned lane to its exact owner, use
 that established parent relationship and do not trigger a prompting/bypass mismatch approval.

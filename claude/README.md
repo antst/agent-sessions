@@ -1,7 +1,7 @@
-# agent-sessions
+# sessionbus
 
 The Claude Code side of this repository. It gives a Claude orchestrator the same
-daemon-backed Agent Sessions lifecycle surface as Codex, Grok, and Qwen: start a
+daemon-backed Sessionbus lifecycle surface as Codex, Grok, and Qwen: start a
 named Codex, Claude, Grok, or Qwen lane, collect its final answer, message or steer
 it while it runs, resume the same transcript, and archive it.
 
@@ -14,8 +14,8 @@ skills/codex-lane/             the Codex lane skill and its references
 skills/claude-lane/            the Claude self-lane skill
 skills/grok-lane/              the Grok lane skill and its references
 skills/qwen-lane/              the Qwen lane skill
-skills/agent-sessions/         canonical discovery, messaging, and lane router
-commands/doctor.md             /agent-sessions:doctor — read-only preflight
+skills/sessionbus/         canonical discovery, messaging, and lane router
+commands/doctor.md             /sessionbus:doctor — read-only preflight
 skills/codex-lane/scripts/     portable POSIX preflight included with the skill
 ```
 
@@ -23,10 +23,10 @@ Install it from the repository marketplace with:
 
 ```bash
 claude plugin marketplace add https://github.com/antst/sessionbus.git
-claude plugin install agent-sessions@agent-sessions
+claude plugin install sessionbus@sessionbus
 ```
 
-Or drop either skill directory into `~/.claude/skills/`. The Agent Sessions runtime must be
+Or drop either skill directory into `~/.claude/skills/`. The Sessionbus runtime must be
 installed separately; each skill's references carry its host setup and verification commands.
 
 A user-scope marketplace installation is loaded by new interactive sessions and non-interactive
@@ -44,7 +44,7 @@ A user-scope marketplace installation is loaded by new interactive sessions and 
   message it.
 - **No global settings mutation.** Plugin installation never edits the operator's Claude profile.
   `claude-peer` disables only a same-named project `.mcp.json` entry and merges the four exact,
-  plugin-qualified Agent Sessions tool approvals into its lifecycle-owned settings overlay. Claude
+  plugin-qualified Sessionbus tool approvals into its lifecycle-owned settings overlay. Claude
   lanes receive the same narrow policy. This prevents an arbitrary project from inheriting the
   installed connector's approval. Bare `claude` and unrelated MCP tools are unchanged; explicit
   tool removal or denial remains caller-owned.
@@ -54,7 +54,7 @@ A user-scope marketplace installation is loaded by new interactive sessions and 
 - **No policy defaults.** Model, effort, sandbox, approval, web access, config overlays, output
   schema, and worktree isolation are supplied by the caller or not at all.
 
-The MCP entry invokes the separately installed Agent Sessions runtime from `PATH`; the plugin still
+The MCP entry invokes the separately installed Sessionbus runtime from `PATH`; the plugin still
 ships no binary and remains portable across supported hosts.
 
 ## Contract

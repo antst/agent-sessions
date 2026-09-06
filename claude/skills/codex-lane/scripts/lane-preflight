@@ -8,7 +8,7 @@ set -eu
 # starts, installs, configures, or mutates anything.
 
 expected_contract_version=2
-state_root="${AGENT_SESSIONS_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/agent-sessions}"
+state_root="${SESSIONBUS_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/sessionbus}"
 
 json_string() {
   # Keep this expression portable to both GNU and BSD sed. In BSD sed, \r
