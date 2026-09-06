@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -115,5 +116,32 @@ func TestOwnedChildHelper(t *testing.T) {
 		}
 	}
 	_, _ = os.Stdin.Read(make([]byte, 1))
+	if os.Getenv("HOST_CHILD_FAILURE") == "1" {
+		os.Exit(3)
+	}
 	os.Exit(0)
+}
+
+func TestChildCloseIgnoresStoppedProcessNoise(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "bus.sock")
+	lock, err := AcquireSessionLock(socket, "example", "session")
+	must(t, err)
+	endpoint, err := ListenPrivate(socket, "session")
+	must(t, err)
+	command := exec.Command(os.Args[0], "-test.run=TestOwnedChildHelper")
+	command.Env = append(os.Environ(), "HOST_CHILD=1", "HOST_CHILD_FAILURE=1")
+	input, err := command.StdinPipe()
+	must(t, err)
+	child, err := StartChild(command, lock, endpoint)
+	must(t, err)
+	err = child.Close(context.Background(), func(context.Context) error {
+		_ = input.Close()
+		return errors.New("stdin already closed")
+	})
+	must(t, err)
+	_, err = os.Stat(endpoint.Path)
+	check(t, os.IsNotExist(err), "endpoint remains: %v", err)
+	again, err := AcquireSessionLock(socket, "example", "session")
+	must(t, err)
+	must(t, again.Close())
 }
