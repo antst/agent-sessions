@@ -64,7 +64,7 @@ func TestRunDeliveryInterruptAndCall(t *testing.T) {
 		return nil
 	}
 	for _, body := range []string{"first", "second"} {
-		receipt, err := product.Deliver(context.Background(), sdk.DeliveryRequest{Body: body})
+		receipt, err := product.Deliver(context.Background(), sdk.DeliveryRequest{Body: body}, nil)
 		if err != nil || receipt.Disposition != "queued_for_next_turn" {
 			t.Fatalf("idle receipt = %#v, %v", receipt, err)
 		}
@@ -88,7 +88,7 @@ func TestRunDeliveryInterruptAndCall(t *testing.T) {
 		terminal <- runResult{result, err}
 	}()
 	waitActive(t, product)
-	receipt, err := product.Deliver(context.Background(), sdk.DeliveryRequest{Body: "during"})
+	receipt, err := product.Deliver(context.Background(), sdk.DeliveryRequest{Body: "during"}, nil)
 	if err != nil || receipt.Disposition != "injected" {
 		t.Fatalf("active receipt = %#v, %v", receipt, err)
 	}
@@ -104,7 +104,7 @@ func TestRunDeliveryInterruptAndCall(t *testing.T) {
 	if err != nil || result.Outcome != "interrupted" || result.Result != "during" {
 		t.Fatalf("interrupted result = %#v, %v", result, err)
 	}
-	if err = product.Close(context.Background()); err != nil {
+	if err = product.Close(context.Background(), sdk.SessionCloseRequest{}); err != nil {
 		t.Fatal(err)
 	}
 }

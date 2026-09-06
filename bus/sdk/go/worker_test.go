@@ -20,8 +20,13 @@ type fakeProduct struct {
 	started                 chan *Run
 	release, interrupted    chan struct{}
 	deliverStart            chan struct{}
+	deliverRun              chan *Run
+	deliverRelease          chan struct{}
+	admit                   chan struct{}
+	nativeEvents            chan string
 	closeStart, closeEnd    chan struct{}
 	closeContext            chan error
+	closeRequest            chan SessionCloseRequest
 	outbound, hangInterrupt bool
 	closeErr, interruptErr  error
 	calls                   [6]int32
@@ -56,6 +61,14 @@ func (p *fakeProduct) Run(ctx context.Context, run *Run, input string) (TurnResu
 		p.started <- run
 		<-ctx.Done()
 		return TurnResult{}, ctx.Err()
+	case "admit":
+		p.started <- run
+		p.nativeEvents <- "input"
+		<-p.admit
+		run.Admitted()
+		run.Admitted()
+		<-p.release
+		return TurnResult{Outcome: "completed"}, nil
 	case "fail":
 		return TurnResult{}, p
 	case "long":
@@ -79,8 +92,36 @@ func (p *fakeProduct) Interrupt(ctx context.Context, run *Run) error {
 	}
 	return p.interruptErr
 }
-func (p *fakeProduct) Deliver(ctx context.Context, _ DeliveryRequest) (DeliveryReceipt, error) {
+func (p *fakeProduct) Deliver(ctx context.Context, _ DeliveryRequest, run *Run) (DeliveryReceipt, error) {
 	atomic.AddInt32(&p.calls[4], 1)
+	if p.deliverRun != nil {
+		p.deliverRun <- run
+		if p.deliverRelease != nil {
+			<-p.deliverRelease
+		}
+		if run == nil {
+			return DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+		}
+		select {
+		case <-run.Done():
+			return DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+		default:
+		}
+		select {
+		case <-run.Done():
+			return DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+		case <-run.AdmittedDone():
+		}
+		select {
+		case <-run.Done():
+			return DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+		default:
+		}
+		if p.nativeEvents != nil {
+			p.nativeEvents <- "steer"
+		}
+		return DeliveryReceipt{Disposition: "injected"}, nil
+	}
 	if p.deliverStart != nil {
 		close(p.deliverStart)
 		<-ctx.Done()
@@ -92,10 +133,63 @@ func (p *fakeProduct) Deliver(ctx context.Context, _ DeliveryRequest) (DeliveryR
 	}
 	return DeliveryReceipt{Disposition: "injected"}, nil
 }
-func (p *fakeProduct) Close(ctx context.Context) error {
+
+func TestWorkerDeliveryGetsNilWhileIdle(t *testing.T) {
+	p := &fakeProduct{deliverRun: make(chan *Run)}
+	h := startHarness(t, p, true, true)
+	var receipt DeliveryReceipt
+	delivered := async(h, "message.deliver", delivery, &receipt)
+	check(t, <-p.deliverRun == nil, "idle delivery received a run")
+	check(t, <-delivered == nil && receipt.Disposition == "queued_for_next_turn", "idle receipt = %#v", receipt)
+}
+
+func TestWorkerDeliveryKeepsAdmissionRun(t *testing.T) {
+	p := &fakeProduct{started: make(chan *Run), release: make(chan struct{}), deliverRun: make(chan *Run), deliverRelease: make(chan struct{})}
+	h := startHarness(t, p, true, true)
+	running := async(h, "turn.run", protocol.TurnRunRequest{SessionID: target.SessionID, Input: "block"}, &TurnResult{})
+	run := <-p.started
+	var receipt DeliveryReceipt
+	delivered := async(h, "message.deliver", delivery, &receipt)
+	check(t, <-p.deliverRun == run, "delivery did not receive the admitted run")
+	close(p.release)
+	check(t, <-running == nil, "run failed")
+	<-run.Done()
+	select {
+	case <-run.AdmittedDone():
+		t.Fatal("kit marked a failed native admission successful")
+	default:
+	}
+	close(p.deliverRelease)
+	check(t, <-delivered == nil && receipt.Disposition == "queued_for_next_turn", "terminal crossing receipt = %#v", receipt)
+}
+
+func TestRunAdmissionOrdersDelivery(t *testing.T) {
+	p := &fakeProduct{started: make(chan *Run), release: make(chan struct{}), admit: make(chan struct{}), nativeEvents: make(chan string, 2), deliverRun: make(chan *Run)}
+	h := startHarness(t, p, true, true)
+	running := async(h, "turn.run", protocol.TurnRunRequest{SessionID: target.SessionID, Input: "admit"}, &TurnResult{})
+	run := <-p.started
+	check(t, <-p.nativeEvents == "input", "native input was not first")
+	var receipt DeliveryReceipt
+	delivered := async(h, "message.deliver", delivery, &receipt)
+	check(t, <-p.deliverRun == run, "active delivery received the wrong run")
+	select {
+	case event := <-p.nativeEvents:
+		t.Fatalf("delivery crossed native admission: %s", event)
+	default:
+	}
+	close(p.admit)
+	check(t, <-p.nativeEvents == "steer", "native steer was not second")
+	check(t, <-delivered == nil && receipt.Disposition == "injected", "admitted delivery receipt = %#v", receipt)
+	close(p.release)
+	check(t, <-running == nil, "run failed")
+}
+func (p *fakeProduct) Close(ctx context.Context, request SessionCloseRequest) error {
 	atomic.AddInt32(&p.calls[5], 1)
 	if p.closeContext != nil {
 		p.closeContext <- ctx.Err()
+	}
+	if p.closeRequest != nil {
+		p.closeRequest <- request
 	}
 	if p.closeStart != nil {
 		close(p.closeStart)
@@ -178,8 +272,13 @@ func TestWorkerLifecycleTable(t *testing.T) {
 	check(t, stderrWriter.Close() == nil, "close stderr writer")
 	raw, err = io.ReadAll(stderrReader)
 	check(t, err == nil, "read stderr: %v", err)
-	want := "agentbus: product interrupt: \"first failure\\nsecond failure\"\nagentbus: product close: \"first failure\\nsecond failure\"\nagentbus: product close: \"first failure\\nsecond failure\"\nagentbus: product interrupt: \"first failure\\nsecond failure\"\n"
-	check(t, string(raw) == want, "callback stderr = %q", raw)
+	counts := map[string]int{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+		counts[line]++
+	}
+	interrupt := `agentbus: product interrupt: "first failure\nsecond failure"`
+	closeLine := `agentbus: product close: "first failure\nsecond failure"`
+	check(t, len(counts) == 2 && counts[interrupt] == 2 && counts[closeLine] == 2, "callback stderr = %q", raw)
 }
 
 func runCase(t *testing.T, name string) [6]int32 {
@@ -213,6 +312,7 @@ func runCase(t *testing.T, name string) [6]int32 {
 		if name == "eof-during-run" {
 			p.closeErr = errors.New("first failure\nsecond failure")
 			p.closeContext = make(chan error, 1)
+			p.closeRequest = make(chan SessionCloseRequest, 1)
 		}
 		h := startHarness(t, p, true, true)
 		p.started = make(chan *Run)
@@ -224,10 +324,12 @@ func runCase(t *testing.T, name string) [6]int32 {
 		<-runToken.Done()
 		if name == "eof-during-run" {
 			check(t, <-p.closeContext != nil, "EOF left the product Close context live")
+			check(t, <-p.closeRequest == (SessionCloseRequest{}), "pure EOF carried a close request")
 		}
 	case "peer-lifetime":
 		h := startHarness(t, p, true, false)
 		check(t, h.Call(context.Background(), "session.superseded", struct{}{}, &struct{}{}) == nil, "superseded call failed")
+		<-p.worker.Closed()
 		check(t, p.worker.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}) != nil, "expected error")
 	case "wrong-direction-request":
 		h := startHarness(t, p, true, false)
@@ -261,9 +363,26 @@ func runCase(t *testing.T, name string) [6]int32 {
 	case "close-error":
 		p.closeErr = errors.New("first failure\nsecond failure")
 		p.closeContext = make(chan error, 1)
+		p.closeRequest = make(chan SessionCloseRequest, 1)
 		h := startHarness(t, p, true, true)
 		check(t, h.Call(context.Background(), "session.close", target, &struct{}{}) == nil, "close error reached the wire")
 		check(t, <-p.closeContext == nil, "session.close cancelled the product Close context")
+		check(t, <-p.closeRequest == (SessionCloseRequest{SessionID: target.SessionID}), "ordinary close request changed")
+	case "close-forget":
+		p.started, p.release, p.interrupted = make(chan *Run), make(chan struct{}), make(chan struct{})
+		p.closeContext, p.closeRequest = make(chan error, 1), make(chan SessionCloseRequest, 1)
+		h := startHarness(t, p, true, true)
+		running := async(h, "turn.run", protocol.TurnRunRequest{SessionID: target.SessionID, Input: "block"}, &TurnResult{})
+		<-p.started
+		request := SessionCloseRequest{SessionID: target.SessionID, Forget: true}
+		closing := async(h, "session.close", request, &struct{}{})
+		<-p.interrupted
+		_ = h.Close()
+		check(t, <-p.closeContext != nil, "EOF left crossed product Close context live")
+		check(t, <-p.closeRequest == request, "product Close request changed")
+		close(p.release)
+		<-p.worker.Closed()
+		check(t, <-running != nil && <-closing != nil, "crossed calls survived EOF")
 	default:
 		t.Fatalf("unknown lifecycle case %q", name)
 	}

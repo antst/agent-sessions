@@ -267,13 +267,13 @@ func (p *fixtureProduct) Interrupt(_ context.Context, _ *sessionkit.Run) error {
 	p.mu.Unlock()
 	return nil
 }
-func (*fixtureProduct) Deliver(_ context.Context, request sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
+func (*fixtureProduct) Deliver(_ context.Context, request sessionkit.DeliveryRequest, _ *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
 	if request.MessageID == "" || request.From.SessionID == "" {
 		return sessionkit.DeliveryReceipt{}, errors.New("delivery identity missing")
 	}
 	return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
 }
-func (p *fixtureProduct) Close(context.Context) error {
+func (p *fixtureProduct) Close(context.Context, sessionkit.SessionCloseRequest) error {
 	if strings.HasPrefix(p.product, "close-error-worker") {
 		return errors.New("native cleanup failed")
 	}

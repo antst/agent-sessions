@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -184,11 +185,10 @@ func TestReviewLateChildKeepsHardStopIntent(t *testing.T) {
 	s.abortLaunch(answer{code: protocol.Timeout})
 	s.hardStop()
 	s.handleProcess(processEvent{launch: s.launch, child: child})
-	select {
-	case <-child.Done():
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("late child received TERM after the spawn deadline requested KILL")
+	if s.stopSignal != syscall.SIGKILL {
+		t.Fatalf("late child stop intent = %v", s.stopSignal)
 	}
+	<-child.Done()
 }
 
 func TestReviewWorkerPendingAndInboxBoundsAreSeparate(t *testing.T) {
