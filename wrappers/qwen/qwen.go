@@ -372,7 +372,7 @@ var argumentConflicts = map[string]string{
 }
 
 var qwenFlagOptions = []string{
-	"--telemetry-enabled", "--telemetry-log-prompts", "-d", "--debug", "--bare", "--safe-mode", "--insecure", "--chat-recording", "-s", "--sandbox", "-y", "--yolo", "--acp", "--experimental-lsp", "--restore-ask-user-question", "--openai-logging", "--screen-reader", "--include-partial-messages", "-c", "--continue", "--fork-session",
+	"--telemetry", "--telemetry-log-prompts", "-d", "--debug", "--bare", "--safe-mode", "--insecure", "--chat-recording", "-s", "--sandbox", "-y", "--yolo", "--acp", "--experimental-lsp", "--restore-ask-user-question", "--openai-logging", "--screen-reader", "--include-partial-messages", "-c", "--continue", "--fork-session",
 }
 
 var qwenArgumentRules = func() []host.ArgumentRule {

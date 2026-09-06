@@ -109,6 +109,11 @@ func TestOpenValueAndArgumentErrors(t *testing.T) {
 	arguments, err := launchArguments(sessionkit.OpenOptions{Arguments: []string{"--system-prompt", "--resume"}})
 	must(t, err)
 	check(t, reflect.DeepEqual(arguments, []string{"--acp", "--system-prompt", "--resume"}), "arguments = %#v", arguments)
+	arguments, err = launchArguments(sessionkit.OpenOptions{Arguments: []string{"--telemetry"}})
+	must(t, err)
+	check(t, reflect.DeepEqual(arguments, []string{"--acp", "--telemetry"}), "telemetry arguments = %#v", arguments)
+	_, err = launchArguments(sessionkit.OpenOptions{Arguments: []string{"--telemetry-enabled"}})
+	check(t, err != nil && err.Error() == "unsupported argument --telemetry-enabled", "telemetry-enabled error = %v", err)
 }
 
 func TestOpenResumeUsesCapturedACPShapesAndScrubsBusEnv(t *testing.T) {
