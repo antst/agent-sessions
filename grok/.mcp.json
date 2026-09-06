@@ -1,13 +1,8 @@
 {
   "mcpServers": {
-    "agent_sessions": {
+    "sessionbus": {
       "command": "${GROK_PLUGIN_ROOT}/scripts/native-entry",
-      "args": [
-        "connector",
-        "grok",
-        "--release-identity",
-        "@AGENT_SESSIONS_RELEASE_ID@"
-      ]
+      "args": []
     }
   }
 }

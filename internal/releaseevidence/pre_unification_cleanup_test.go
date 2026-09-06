@@ -541,7 +541,7 @@ func TestPreUnificationCleanupContractAndOperationalBoundary(t *testing.T) {
 	}
 	for _, removed := range []string{
 		"cmd/agent-session-runtime", "cmd/peer-federator", "deploy/peer-federator",
-		"cmd/grok-peer", "cmd/peer",
+		"cmd/codex-peer", "cmd/qwen-peer", "cmd/peer",
 		"cmd/codex-peer-lane", "cmd/claude-peer-lane", "cmd/grok-peer-lane", "cmd/qwen-peer-lane",
 	} {
 		if _, err := os.Lstat(filepath.Join(repository, filepath.FromSlash(removed))); !os.IsNotExist(err) {
