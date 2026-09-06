@@ -37,13 +37,16 @@ func fakeChild(mode string) {
 	body, _ := json.Marshal(record)
 	_ = os.WriteFile(os.Getenv("CLAUDE_TEST_RECORD"), body, 0o600)
 	output := json.NewEncoder(os.Stdout)
-	_ = output.Encode(map[string]any{"type": "system", "subtype": "init", "session_id": fixtureID})
+	if mode != "die-delayed-init" {
+		_ = output.Encode(map[string]any{"type": "system", "subtype": "init", "session_id": fixtureID})
+	}
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		var item map[string]any
 		_ = json.Unmarshal(scanner.Bytes(), &item)
 		if item["type"] == "user" {
-			if mode == "die" {
+			if mode == "die-delayed-init" {
+				_ = output.Encode(map[string]any{"type": "system", "subtype": "init", "session_id": fixtureID})
 				os.Exit(7)
 			}
 			_ = output.Encode(map[string]any{"type": "user", "isReplay": true})
@@ -112,9 +115,11 @@ func TestHelloAndIdentity(t *testing.T) {
 	id, err := sessionID("")
 	must(t, err)
 	check(t, len(id) == 36 && id[14] == '4' && strings.Contains("89ab", string(id[19])), "uuid = %q", id)
-	p.expected, p.ready = fixtureID, make(chan error, 1)
+	p.expected, p.ready, p.encoder = fixtureID, make(chan error, 1), json.NewEncoder(io.Discard)
+	failed := make(chan error, 1)
+	go func() { _, err := p.start(context.Background(), "first turn"); failed <- err }()
 	p.receive(frame{Type: "system", Subtype: "init", SessionID: "wrong"})
-	check(t, strings.Contains((<-p.ready).Error(), `from "00000000-0000-4000-8000-000000000123" to "wrong"`), "identity mismatch changed")
+	check(t, strings.Contains((<-failed).Error(), `from "00000000-0000-4000-8000-000000000123" to "wrong"`), "identity mismatch changed")
 }
 
 type frameLog struct{ wrote chan []byte }
@@ -225,7 +230,7 @@ func TestTerminalTable(t *testing.T) {
 	}
 }
 
-func TestWorkerChildDeathWritesTerminalBeforeEOF(t *testing.T) {
+func TestOpenCommitsBeforeInitAndChildDeathWritesTerminalBeforeEOF(t *testing.T) {
 	directory, err := os.MkdirTemp("/tmp", "cp")
 	must(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
@@ -238,7 +243,7 @@ func TestWorkerChildDeathWritesTerminalBeforeEOF(t *testing.T) {
 	t.Setenv(host.NameEnv, "secret")
 	t.Setenv(host.GroupsEnv, "secret")
 	t.Setenv(LaneSocketEnv, "stale")
-	t.Setenv("CLAUDE_TEST_CHILD", "die")
+	t.Setenv("CLAUDE_TEST_CHILD", "die-delayed-init")
 	t.Setenv("CLAUDE_TEST_RECORD", record)
 	must(t, os.Symlink(os.Args[0], filepath.Join(directory, "claude")))
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -258,13 +263,8 @@ func TestWorkerChildDeathWritesTerminalBeforeEOF(t *testing.T) {
 	writeJSON(t, connection, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "session.open", "params": map[string]any{"name": "parent/leaf@local", "groups": []string{}, "resume_session_id": fixtureID, "open": map[string]any{}}})
 	opened := readJSON(t, reader)
 	check(t, opened["error"] == nil, "open = %#v", opened)
-	var child map[string]any
-	must(t, json.Unmarshal(mustRead(t, record), &child))
-	check(t, strings.HasSuffix(child["lane_socket"].(string), "/lanes/"+fixtureID+".sock"), "child environment = %#v", child)
-	for _, name := range []string{host.SocketEnv, host.LocalKeyEnv, host.TokenEnv, host.SessionIDEnv, host.NameEnv, host.GroupsEnv} {
-		check(t, child[name] == "", "%s reached child: %#v", name, child)
-	}
-	lane, err := sessionkit.Dial(child["lane_socket"].(string))
+	laneSocket := filepath.Join(filepath.Dir(socket), "lanes", fixtureID+".sock")
+	lane, err := sessionkit.Dial(laneSocket)
 	must(t, err)
 	laneResult, err := lane.Call(context.Background(), "session.list", sessionkit.SessionListRequest{})
 	must(t, err)
@@ -274,6 +274,12 @@ func TestWorkerChildDeathWritesTerminalBeforeEOF(t *testing.T) {
 	terminal := readJSON(t, reader)
 	result := terminal["result"].(map[string]any)
 	check(t, result["outcome"] == "failed", "terminal = %#v", terminal)
+	var child map[string]any
+	must(t, json.Unmarshal(mustRead(t, record), &child))
+	check(t, child["lane_socket"] == laneSocket, "child environment = %#v", child)
+	for _, name := range []string{host.SocketEnv, host.LocalKeyEnv, host.TokenEnv, host.SessionIDEnv, host.NameEnv, host.GroupsEnv} {
+		check(t, child[name] == "", "%s reached child: %#v", name, child)
+	}
 	_, err = reader.ReadByte()
 	check(t, errors.Is(err, io.EOF), "worker remained connected: %v", err)
 	<-worker.Closed()

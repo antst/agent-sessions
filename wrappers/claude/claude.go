@@ -116,23 +116,10 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 		return sessionkit.OpenResult{}, closeLaunch(lock, endpoint, fmt.Errorf("start Claude stream: %w", err))
 	}
 	p.mu.Lock()
-	p.child, p.input, p.encoder, p.expected, p.ready = child, input, json.NewEncoder(input), id, make(chan error, 1)
+	p.child, p.input, p.encoder, p.expected, p.ready, p.opened = child, input, json.NewEncoder(input), id, make(chan error, 1), true
 	p.mu.Unlock()
 	go p.read(output)
 	go p.watch(child)
-	err = p.waitReady(ctx)
-	p.mu.Lock()
-	if err == nil {
-		err, p.opened = p.failed, p.failed == nil
-	}
-	if err != nil {
-		p.closing = true
-	}
-	p.mu.Unlock()
-	if err != nil {
-		err = errors.Join(err, child.Close(ctx, func(context.Context) error { return input.Close() }))
-		return sessionkit.OpenResult{}, err
-	}
 	return sessionkit.OpenResult{SessionID: id}, nil
 }
 
