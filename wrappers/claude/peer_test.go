@@ -55,7 +55,7 @@ func TestPeerDeliveryUsesCanonicalEnvelope(t *testing.T) {
 		_ = json.NewDecoder(connection).Decode(&frame)
 		received <- frame
 	}()
-	receipt, err := (&PeerBackend{}).deliver(context.Background(), delivery("hello"))
+	receipt, err := (&PeerBackend{}).deliver(context.Background(), sessionkit.PeerIdentity{SessionID: "current"}, delivery("hello"))
 	must(t, err)
 	check(t, receipt.Disposition == "injected", "receipt = %#v", receipt)
 	frame := <-received
@@ -75,10 +75,25 @@ func TestPeerDeliveryCancelStopsBlockedWrite(t *testing.T) {
 	t.Setenv(messagingSocketEnv, "fixture")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { _, err := (&PeerBackend{}).deliver(ctx, delivery("blocked")); done <- err }()
+	go func() {
+		receipt, err := (&PeerBackend{}).deliver(ctx, sessionkit.PeerIdentity{SessionID: "old"}, delivery("blocked"))
+		if err == nil && receipt.Disposition == "rejected" && receipt.Reason == "closing" {
+			done <- nil
+			return
+		}
+		done <- fmt.Errorf("receipt = %#v, error = %v", receipt, err)
+	}()
 	<-started
 	cancel()
-	check(t, <-done != nil, "blocked delivery succeeded after cancellation")
+	must(t, <-done)
+}
+
+func TestPeerDeliveryRejectsPreCanceledIdentity(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	receipt, err := (&PeerBackend{}).deliver(ctx, sessionkit.PeerIdentity{SessionID: "old"}, delivery("stale"))
+	must(t, err)
+	check(t, receipt.Disposition == "rejected" && receipt.Reason == "closing", "receipt = %#v", receipt)
 }
 
 type writeSignal struct {
