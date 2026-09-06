@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"regexp"
@@ -41,8 +42,11 @@ func Allows(method string, client bool) bool {
 
 func DecodeParams(method string, raw []byte) (any, error) {
 	spec, ok := methodCodecs[method]
-	if !ok || !validateDefinition(spec.params, raw) {
+	if !ok {
 		return nil, errInvalid
+	}
+	if err := validateDefinition(spec.params, raw); err != nil {
+		return nil, err
 	}
 	target := spec.newParams
 	if method == "session.hello" {
@@ -59,8 +63,11 @@ func DecodeParams(method string, raw []byte) (any, error) {
 
 func DecodeResult(method string, raw []byte) (any, error) {
 	spec, ok := methodCodecs[method]
-	if !ok || !validateDefinition(spec.result, raw) {
+	if !ok {
 		return nil, errInvalid
+	}
+	if err := validateDefinition(spec.result, raw); err != nil {
+		return nil, err
 	}
 	return decode(raw, spec.newResult)
 }
@@ -84,20 +91,26 @@ func encodeDefinition(method string, value any, params bool) ([]byte, error) {
 	if !ok {
 		return nil, errInvalid
 	}
-	raw, err := json.Marshal(value)
 	name := spec.result
 	if params {
 		name = spec.params
 	}
-	if err != nil || !validateDefinition(name, raw) {
-		return nil, errInvalid
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("%s: $ cannot be encoded as JSON", name)
+	}
+	if err = validateDefinition(name, raw); err != nil {
+		return nil, err
 	}
 	return raw, nil
 }
 func UnmarshalResult(method string, raw []byte, target any) error {
 	spec, ok := methodCodecs[method]
-	if !ok || target == nil || !validateDefinition(spec.result, raw) {
+	if !ok || target == nil {
 		return errInvalid
+	}
+	if err := validateDefinition(spec.result, raw); err != nil {
+		return err
 	}
 	if json.Unmarshal(raw, target) != nil {
 		return errInvalid
@@ -106,14 +119,17 @@ func UnmarshalResult(method string, raw []byte, target any) error {
 }
 func EncodeError(value *RPCError) ([]byte, error) {
 	raw, err := json.Marshal(value)
-	if err != nil || !validateDefinition("RPCError", raw) {
-		return nil, errInvalid
+	if err != nil {
+		return nil, fmt.Errorf("RPCError: $ cannot be encoded as JSON")
+	}
+	if err = validateDefinition("RPCError", raw); err != nil {
+		return nil, err
 	}
 	return raw, nil
 }
 func DecodeError(raw []byte) (*RPCError, error) {
-	if !validateDefinition("RPCError", raw) {
-		return nil, errInvalid
+	if err := validateDefinition("RPCError", raw); err != nil {
+		return nil, err
 	}
 	var value RPCError
 	var generic any
@@ -193,104 +209,152 @@ func checkSchemaNode(defs map[string]any, value schemaNode) error {
 	return nil
 }
 
-func validateDefinition(name string, raw []byte) bool {
+func validateDefinition(name string, raw []byte) error {
 	definition, ok := schemaDefinitions[name]
 	if !ok {
-		return false
+		return errInvalid
 	}
 	var value any
-	return utf8.Valid(raw) && json.Unmarshal(raw, &value) == nil && validSchemaNode(node(definition), value)
+	if !utf8.Valid(raw) || json.Unmarshal(raw, &value) != nil {
+		return fmt.Errorf("%s: $ is not valid JSON", name)
+	}
+	if issue := schemaIssue(node(definition), value, "", ""); issue != "" {
+		return fmt.Errorf("%s: %s", name, issue)
+	}
+	return nil
 }
 
 func validSchemaNode(rule schemaNode, value any) bool {
+	return schemaIssue(rule, value, "", "") == ""
+}
+
+func schemaIssue(rule schemaNode, value any, path, with string) string {
 	if ref, ok := rule["$ref"].(string); ok {
-		return validSchemaNode(node(schemaDefinitions[strings.TrimPrefix(ref, "#/$defs/")]), value)
+		return schemaIssue(node(schemaDefinitions[strings.TrimPrefix(ref, "#/$defs/")]), value, path, with)
 	}
 	if kind, ok := rule["type"].(string); ok && !validType(kind, value) {
-		return false
+		return fmt.Sprintf("%s must be %s", location(path), kind)
 	}
 	if expected, ok := rule["const"]; ok && !reflect.DeepEqual(value, expected) {
-		return false
+		return fmt.Sprintf("%s must equal %v", location(path), expected)
 	}
 	if values, ok := rule["enum"].([]any); ok && !contains(values, value) {
-		return false
+		return fmt.Sprintf("%s must be one of the allowed values", location(path))
 	}
 	if text, ok := value.(string); ok {
-		if !utf8.ValidString(text) || number(rule, "minLength") > float64(utf8.RuneCountInString(text)) || has(rule, "maxLength") && float64(utf8.RuneCountInString(text)) > number(rule, "maxLength") {
-			return false
+		length := float64(utf8.RuneCountInString(text))
+		if !utf8.ValidString(text) {
+			return fmt.Sprintf("%s must be valid UTF-8", location(path))
+		}
+		if minimum := number(rule, "minLength"); length < minimum {
+			return fmt.Sprintf("%s must contain at least %g character%s", location(path), minimum, plural(minimum))
+		}
+		if maximum := number(rule, "maxLength"); has(rule, "maxLength") && length > maximum {
+			return fmt.Sprintf("%s must contain at most %g character%s", location(path), maximum, plural(maximum))
 		}
 		if pattern, ok := rule["pattern"].(string); ok {
 			matched, _ := regexp.MatchString(pattern, text)
 			if !matched {
-				return false
+				return fmt.Sprintf("%s must match %q", location(path), pattern)
 			}
 		}
 	}
-	if value, ok := value.(float64); ok && (has(rule, "minimum") && value < number(rule, "minimum") || has(rule, "exclusiveMinimum") && value <= number(rule, "exclusiveMinimum")) {
-		return false
+	if value, ok := value.(float64); ok {
+		if minimum := number(rule, "minimum"); has(rule, "minimum") && value < minimum {
+			return fmt.Sprintf("%s must be at least %g", location(path), minimum)
+		}
+		if minimum := number(rule, "exclusiveMinimum"); has(rule, "exclusiveMinimum") && value <= minimum {
+			return fmt.Sprintf("%s must be greater than %g", location(path), minimum)
+		}
 	}
-	if object, ok := value.(map[string]any); ok && !validObject(rule, object) {
-		return false
+	if object, ok := value.(map[string]any); ok {
+		for _, name := range stringsOf(rule["required"]) {
+			if _, ok := object[name]; !ok {
+				return fmt.Sprintf("%s is required", location(childPath(path, name)))
+			}
+		}
+		if minimum := number(rule, "minProperties"); float64(len(object)) < minimum {
+			return fmt.Sprintf("%s must contain at least %g properties", location(path), minimum)
+		}
+		properties, _ := rule["properties"].(map[string]any)
+		for name, child := range object {
+			schema, known := properties[name]
+			if !known && rule["additionalProperties"] == false {
+				return fmt.Sprintf("%s is not allowed", location(childPath(path, name)))
+			}
+			if known {
+				if issue := schemaIssue(node(schema), child, childPath(path, name), with); issue != "" {
+					return issue
+				}
+			}
+		}
 	}
-	if list, ok := value.([]any); ok && !validList(rule, list) {
-		return false
+	if list, ok := value.([]any); ok {
+		if item, ok := rule["items"]; ok {
+			for index, child := range list {
+				if issue := schemaIssue(node(item), child, fmt.Sprintf("%s[%d]", path, index), with); issue != "" {
+					return issue
+				}
+			}
+		}
+		if rule["uniqueItems"] == true {
+			for index := range list {
+				if contains(list[:index], list[index]) {
+					return fmt.Sprintf("%s must not duplicate an earlier item", location(fmt.Sprintf("%s[%d]", path, index)))
+				}
+			}
+		}
 	}
 	if children, ok := rule["allOf"].([]any); ok {
 		for _, child := range children {
-			if !validSchemaNode(node(child), value) {
-				return false
+			if issue := schemaIssue(node(child), value, path, with); issue != "" {
+				return issue
 			}
 		}
 	}
-	if child, ok := rule["not"]; ok && validSchemaNode(node(child), value) {
-		return false
+	if child, ok := rule["not"]; ok && schemaIssue(node(child), value, path, "") == "" {
+		required := stringsOf(node(child)["required"])
+		if len(required) == 1 {
+			if with != "" {
+				return fmt.Sprintf("%s is not allowed with %q", location(childPath(path, required[0])), with)
+			}
+			return fmt.Sprintf("%s is not allowed", location(childPath(path, required[0])))
+		}
+		return fmt.Sprintf("%s violates an excluded constraint", location(path))
 	}
 	if condition, ok := rule["if"]; ok {
 		branch := "else"
-		if validSchemaNode(node(condition), value) {
+		relation := with
+		if schemaIssue(node(condition), value, path, "") == "" {
 			branch = "then"
+			if required := stringsOf(node(condition)["required"]); len(required) == 1 {
+				relation = required[0]
+			}
 		}
-		if child, ok := rule[branch]; ok && !validSchemaNode(node(child), value) {
-			return false
+		if child, ok := rule[branch]; ok {
+			return schemaIssue(node(child), value, path, relation)
 		}
 	}
-	return true
+	return ""
 }
 
-func validObject(rule schemaNode, value map[string]any) bool {
-	for _, name := range stringsOf(rule["required"]) {
-		if _, ok := value[name]; !ok {
-			return false
-		}
+func childPath(path, name string) string {
+	if path == "" {
+		return name
 	}
-	if float64(len(value)) < number(rule, "minProperties") {
-		return false
-	}
-	properties, _ := rule["properties"].(map[string]any)
-	for name, child := range value {
-		schema, known := properties[name]
-		if !known && rule["additionalProperties"] == false || known && !validSchemaNode(node(schema), child) {
-			return false
-		}
-	}
-	return true
+	return path + "." + name
 }
-func validList(rule schemaNode, value []any) bool {
-	if item, ok := rule["items"]; ok {
-		for _, child := range value {
-			if !validSchemaNode(node(item), child) {
-				return false
-			}
-		}
+func location(path string) string {
+	if path == "" {
+		return "$"
 	}
-	if rule["uniqueItems"] == true {
-		for i := range value {
-			if contains(value[:i], value[i]) {
-				return false
-			}
-		}
+	return fmt.Sprintf("%q", path)
+}
+func plural(number float64) string {
+	if number == 1 {
+		return ""
 	}
-	return true
+	return "s"
 }
 func validType(kind string, value any) bool {
 	switch kind {

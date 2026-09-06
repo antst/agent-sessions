@@ -60,6 +60,28 @@ func TestUsage(t *testing.T) {
 	}
 }
 
+func TestSchemaErrorNamesPathAndConstraint(t *testing.T) {
+	directory := t.TempDir()
+	socket := filepath.Join(directory, "sessionbus.sock")
+	service, err := daemon.Start(daemon.Config{SocketPath: socket, TablePath: filepath.Join(directory, "sessions")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	var stdout, stderr bytes.Buffer
+	params := `{"resume_session_id":"lane@local","name":"child"}`
+	if code := run([]string{"-socket", socket, "lane.spawn", params}, &stdout, &stderr); code != 1 {
+		t.Fatalf("exit = %d: %s / %s", code, stdout.String(), stderr.String())
+	}
+	var output map[string]string
+	decodeErr := json.Unmarshal(stdout.Bytes(), &output)
+	want := `LaneSpawnRequest: "name" is not allowed with "resume_session_id"`
+	if decodeErr != nil || output["error"] != want || stderr.Len() != 0 {
+		t.Fatalf("output = %q / %q", stdout.String(), stderr.String())
+	}
+}
+
 func TestTurnRunWaitsForTerminal(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "sessionbus.sock")
 	listener, err := net.Listen("unix", socket)

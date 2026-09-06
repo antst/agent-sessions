@@ -64,7 +64,10 @@ func NewCaller(call func(context.Context, string, any) (json.RawMessage, error))
 
 func callAs[T any](ctx context.Context, call callFunc, method string, params any) (T, error) {
 	var result T
-	err := call(ctx, method, params, &result)
+	_, err := protocol.EncodeParams(method, params)
+	if err == nil {
+		err = call(ctx, method, params, &result)
+	}
 	return result, err
 }
 

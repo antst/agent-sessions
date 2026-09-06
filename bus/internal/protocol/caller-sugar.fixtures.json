@@ -29,7 +29,7 @@
       "second_turn_id": "t-2"
     },
     "invalid_local_requests": [
-      {"operation":"start","request":{"session_id":"","input":"work"},"error":"invalid session value"},
+      {"operation":"start","request":{"session_id":"","input":"work"},"error":"TurnRunRequest: \"session_id\" must contain at least 1 character"},
       {"operation":"status","request":{"turn_id":""},"error":"invalid status request"},
       {"operation":"wait","request":{"turn_id":"t-1","timeout_ms":-1},"error":"invalid wait request"}
     ],

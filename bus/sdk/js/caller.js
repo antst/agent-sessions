@@ -1,7 +1,7 @@
 "use strict";
 
 const { ProtocolError } = require("./connection.js");
-const { validate } = require("./schema.js");
+const { validationError } = require("./schema.js");
 
 const ACTIONS = Object.freeze(["list", "send", "spawn", "describe", "run", "start", "wait", "status", "interrupt", "close", "forget"]);
 const ACTION_METHODS = Object.freeze({ list: "session.list", send: "message.send", spawn: "lane.spawn", describe: "lane.describe", run: "turn.run", interrupt: "turn.interrupt", close: "session.close", forget: "session.close" });
@@ -35,7 +35,7 @@ class Caller {
   }
 
   start(request) {
-    if (!validate("TurnRunRequest", request)) throw new Error("invalid session value");
+    const invalid = validationError("TurnRunRequest", request); if (invalid) throw invalid;
     if (this.targets.has(request.session_id)) throw new ProtocolError({ code: -32003, message: "busy" });
     const id = `t-${++this.next}`;
     let finish;

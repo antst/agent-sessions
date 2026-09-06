@@ -62,6 +62,19 @@ func TestCallerMapsWireMethods(t *testing.T) {
 	}
 }
 
+func TestCallerSchemaErrorNamesPathAndConstraint(t *testing.T) {
+	called := false
+	caller := NewCaller(func(context.Context, string, any) (json.RawMessage, error) {
+		called = true
+		return nil, nil
+	})
+	_, err := caller.Spawn(context.Background(), LaneSpawnRequest{Name: "child", ResumeSessionID: "lane@local"})
+	want := `LaneSpawnRequest: "name" is not allowed with "resume_session_id"`
+	if err == nil || err.Error() != want || called {
+		t.Fatalf("error = %v, called = %t", err, called)
+	}
+}
+
 func TestCallerSugarMatchesJavaScriptShapes(t *testing.T) {
 	fixtures := loadCallerFixtures(t)
 	type terminal struct {
