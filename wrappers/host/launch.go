@@ -95,6 +95,20 @@ func InteractivePlan(path string, args, environment []string, identity PeerIdent
 			groups = append(groups, group)
 			continue
 		}
+		if argument == "-n" || argument == "--peer-name" {
+			if index+1 == len(args) || strings.TrimSpace(args[index+1]) == "" {
+				return ExecPlan{}, errors.New("-n/--peer-name requires a non-empty value")
+			}
+			identity.Name, index = args[index+1], index+1
+			continue
+		}
+		if strings.HasPrefix(argument, "-n=") || strings.HasPrefix(argument, "--peer-name=") {
+			_, identity.Name, _ = strings.Cut(argument, "=")
+			if strings.TrimSpace(identity.Name) == "" {
+				return ExecPlan{}, errors.New("-n/--peer-name requires a non-empty value")
+			}
+			continue
+		}
 		forwarded = append(forwarded, argument)
 		if consumesValue != nil && consumesValue(argument) && index+1 < len(args) {
 			index++
