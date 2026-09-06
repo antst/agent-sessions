@@ -85,7 +85,7 @@ func TestCodexProcess(t *testing.T) {
 	if os.Getenv("CODEX_TEST_LARGE_EXIT") == "1" {
 		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"method": "turn/completed", "params": map[string]any{"threadId": "thread-1", "turn": map[string]any{
-				"id": "turn-1", "status": "completed", "items": []any{map[string]string{"type": "agentMessage", "phase": "final_answer", "text": strings.Repeat("x", 300000) + "tail"}},
+				"id": "turn-1", "status": "completed", "completedAt": 1, "items": []any{map[string]string{"type": "agentMessage", "phase": "final_answer", "text": strings.Repeat("x", 300000) + "tail"}},
 			}},
 		})
 		os.Exit(0)
@@ -135,41 +135,19 @@ func TestLargeTerminalFrameDrainsAfterExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	received := make(chan json.RawMessage, 1)
-	failed := make(chan error, 1)
-	client := newAppClient(input, output, func(method string, raw json.RawMessage) {
-		if method == "turn/completed" {
-			received <- raw
-		}
-	}, func(err error) { failed <- err })
-	if err = child.Wait(); err != nil {
-		t.Fatal(err)
+	p := &Wrapper{id: "thread-1", child: child}
+	native := &turn{owner: p, id: "turn-1", started: true, ready: make(chan error, 1), done: make(chan error, 1)}
+	p.active = native
+	p.app = newAppClient(input, output, p.receive, p.fail)
+	go p.watch(child, p.app.done)
+	result, err := native.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("preserved terminal did not complete the turn: %v", err)
 	}
-	var raw json.RawMessage
-	readFailed := false
-	select {
-	case raw = <-received:
-	case err = <-failed:
-		readFailed = true
-		select {
-		case raw = <-received:
-		default:
-			t.Fatalf("terminal frame was truncated: %v", err)
-		}
+	if result.Outcome != "completed" || len(result.Result) != 300004 || !strings.HasSuffix(result.Result, "tail") {
+		t.Fatalf("terminal = %#v", result)
 	}
-	var event struct {
-		Turn nativeTurn `json:"turn"`
-	}
-	if json.Unmarshal(raw, &event) != nil || len(event.Turn.Items) != 1 || len(event.Turn.Items[0].Text) != 300004 || !strings.HasSuffix(event.Turn.Items[0].Text, "tail") {
-		t.Fatalf("terminal bytes = %d", len(raw))
-	}
-	if !readFailed {
-		<-failed
-	}
-	if _, err = output.Read(make([]byte, 1)); err == nil {
-		t.Fatal("product reader did not close stdout")
-	}
-	if err = child.Close(context.Background(), func(context.Context) error { return client.close() }); err != nil {
+	if err = child.Close(context.Background(), func(context.Context) error { return p.app.close() }); err != nil {
 		t.Fatal(err)
 	}
 }

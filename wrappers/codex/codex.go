@@ -38,11 +38,12 @@ type Wrapper struct {
 }
 
 type turn struct {
-	owner   *Wrapper
-	id      string
-	started bool
-	ready   chan error
-	done    chan error
+	owner    *Wrapper
+	id       string
+	started  bool
+	ready    chan error
+	done     chan error
+	observed nativeTurn
 }
 
 type nativeTurn struct {
@@ -136,7 +137,7 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 	p.child, p.model, p.effort, p.approval, p.sandbox = child, request.Open.Model, request.Open.ReasoningEffort, approval, sandbox
 	p.app = newAppClient(input, output, p.receive, p.fail)
 	p.mu.Unlock()
-	go p.watch(child)
+	go p.watch(child, p.app.done)
 	threadID := request.ResumeSessionID
 	fresh := threadID == ""
 	cleanup := func(err error) (sessionkit.OpenResult, error) {
@@ -327,8 +328,36 @@ func (t *turn) Wait(ctx context.Context) (sessionkit.TurnResult, error) {
 		if err != nil {
 			return sessionkit.TurnResult{}, err
 		}
-		return t.read(ctx)
+		if result, resultErr, closed := t.closedResult(); closed {
+			return result, resultErr
+		}
+		result, resultErr := t.read(ctx)
+		if resultErr != nil {
+			if observed, observedErr, closed := t.closedResult(); closed {
+				return observed, observedErr
+			}
+		}
+		return result, resultErr
 	}
+}
+
+func (t *turn) closedResult() (sessionkit.TurnResult, error, bool) {
+	t.owner.mu.Lock()
+	observed, child, app := t.observed, t.owner.child, t.owner.app
+	t.owner.mu.Unlock()
+	closed := app != nil && app.isFailed()
+	if !closed && child != nil {
+		select {
+		case <-child.Done():
+			closed = true
+		default:
+		}
+	}
+	if !closed {
+		return sessionkit.TurnResult{}, nil, false
+	}
+	result, err := terminal(observed)
+	return result, err, true
 }
 
 func (t *turn) read(ctx context.Context) (sessionkit.TurnResult, error) {
@@ -393,6 +422,7 @@ func (p *Wrapper) receive(method string, raw json.RawMessage) {
 				t.started = true
 				t.ready <- nil
 			}
+			t.observed = event.Turn
 			p.active = nil
 			t.done <- nil
 		}
@@ -456,8 +486,9 @@ func (p *Wrapper) fail(err error) {
 	}
 }
 
-func (p *Wrapper) watch(child *host.Child) {
+func (p *Wrapper) watch(child *host.Child, drained <-chan struct{}) {
 	err := child.Wait()
+	<-drained
 	if err == nil {
 		err = errors.New("Codex App Server exited")
 	}
