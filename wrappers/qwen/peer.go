@@ -316,12 +316,14 @@ func qwenPassthrough(argument string) bool {
 
 func qwenOptionTakesValue(argument string) bool {
 	name, _, attached := strings.Cut(argument, "=")
-	return !attached && slices.Contains(qwenValueOptions, name)
+	return !attached && slices.Contains(qwenRequiredValueOptions, name)
 }
 
-var qwenValueOptions = []string{
+var qwenRequiredValueOptions = []string{
 	"--telemetry-target", "--telemetry-otlp-endpoint", "--telemetry-otlp-protocol", "--telemetry-outfile", "--proxy",
-	"-m", "--model", "--fallback-model", "-p", "--prompt", "-i", "--prompt-interactive", "--system-prompt", "--append-system-prompt", "--output-style", "--sandbox-image", "--approval-mode", "--channel", "--allowed-mcp-server-names", "--mcp-config", "--allowed-tools", "-e", "--extensions", "--include-directories", "--add-dir", "--openai-logging-dir", "--openai-api-key", "--openai-base-url", "--input-format", "-o", "--output-format", "--json-fd", "--json-file", "--json-schema", "--input-file", "--session-id", "--worktree", "--max-session-turns", "--max-wall-time", "--max-tool-calls", "--max-subagent-depth", "--core-tools", "--exclude-tools", "--disabled-slash-commands", "--auth-type",
+	"-m", "--model", "--fallback-model", "-p", "--prompt", "-i", "--prompt-interactive", "--system-prompt", "--append-system-prompt", "--output-style", "--sandbox-image", "--approval-mode", "--channel", "--allowed-mcp-server-names", "--mcp-config", "--allowed-tools", "-e", "--extensions", "--include-directories", "--add-dir", "--openai-logging-dir", "--openai-api-key", "--openai-base-url", "--input-format", "-o", "--output-format", "--json-fd", "--json-file", "--json-schema", "--input-file", "--session-id", "--max-session-turns", "--max-wall-time", "--max-tool-calls", "--max-subagent-depth", "--core-tools", "--exclude-tools", "--disabled-slash-commands", "--auth-type",
 }
+
+var qwenValueOptions = append(slices.Clone(qwenRequiredValueOptions), "--worktree")
 
 var _ mcp.Backend = (*PeerBackend)(nil)

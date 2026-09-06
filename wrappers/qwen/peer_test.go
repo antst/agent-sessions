@@ -96,6 +96,18 @@ func TestInteractivePlanFreshResumeAndPassthrough(t *testing.T) {
 	check(t, reflect.DeepEqual(plan.Args, original) && reflect.DeepEqual(plan.Env, []string{"ONLY=original", mcp.LaneSocketEnv + "=stale", InputFileEnv + "=stale"}), "passthrough = %#v", plan)
 }
 
+func TestInteractivePlanDoesNotConsumeGroupAfterBooleanOrOptionalValue(t *testing.T) {
+	for _, option := range []string{"--chat-recording", "--worktree"} {
+		t.Run(option, func(t *testing.T) {
+			plan, err := InteractivePlan([]string{option, "-g", "team"}, nil)
+			must(t, err)
+			t.Cleanup(func() { _ = os.Remove(environmentValue(plan.Env, InputFileEnv)) })
+			check(t, slicesContain(plan.Args, option), "native option missing: %#v", plan.Args)
+			check(t, !slicesContain(plan.Args, "-g") && environmentValue(plan.Env, host.GroupsEnv) == `["team"]`, "group projection = %#v / %#v", plan.Args, plan.Env)
+		})
+	}
+}
+
 func TestCancelledInitialPrepareKeepsResidentPeer(t *testing.T) {
 	root, socket := t.TempDir(), filepath.Join(t.TempDir(), "bus.sock")
 	listener, err := net.Listen("unix", socket)
