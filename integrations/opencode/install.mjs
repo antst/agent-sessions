@@ -21,8 +21,18 @@ function text(value) {
   return typeof value === "string" && value.length > 0 && !/[\0\r\n]/u.test(value);
 }
 
-function ownedSpecifier(specifier) {
-  return typeof specifier === "string" && /@sessionbus\/opencode|sessionbus-opencode[^/?#]*\.tgz(?:[?#]|$)/u.test(specifier);
+function ownedSpecifier(specifier, configFile) {
+  if (typeof specifier !== "string") return false;
+  if (/^@sessionbus\/opencode(?:@[^\s]+)?$/u.test(specifier)) return true;
+  const location = specifier.split(/[?#]/u, 1)[0].replaceAll("\\", "/");
+  if (/^sessionbus-opencode-.+\.tgz$/u.test(location.slice(location.lastIndexOf("/") + 1))) return true;
+  if (!specifier.startsWith("file:")) return false;
+  try {
+    const target = location.startsWith("file:/") ? fileURLToPath(location) : path.resolve(path.dirname(configFile), location.slice(5));
+    return JSON.parse(readFileSync(path.join(target, "package.json"), "utf8")).name === "@sessionbus/opencode";
+  } catch {
+    return false;
+  }
 }
 
 function entrySpecifier(entry) {
@@ -52,7 +62,7 @@ function commaOffset(body, start, end) {
 
 function edit(document, specifier, remove) {
   const entries = document.value.plugin || [];
-  const indices = entries.flatMap((entry, index) => ownedSpecifier(entrySpecifier(entry)) ? [index] : []);
+  const indices = entries.flatMap((entry, index) => ownedSpecifier(entrySpecifier(entry), document.file) ? [index] : []);
   let body = document.body;
   const plugin = findNodeAtLocation(document.tree, ["plugin"]);
   if (indices.length) {
@@ -114,7 +124,7 @@ export function configure(options = {}) {
   const documents = existing.map(readConfig);
   if (!existing.length) documents.push({ file: selected, body: "{}\n", value: {}, mode: 0o600 });
   for (const document of documents) document.selected = document.file === selected;
-  const owned = documents.flatMap((document) => (document.value.plugin || []).filter((entry) => ownedSpecifier(entrySpecifier(entry))).map((entry) => ({ document, entry })));
+  const owned = documents.flatMap((document) => (document.value.plugin || []).filter((entry) => ownedSpecifier(entrySpecifier(entry), document.file)).map((entry) => ({ document, entry })));
   if (remove && owned.length === 0) return false;
   if (!remove && owned.length === 1 && owned[0].document.selected && owned[0].entry === specifier) return false;
   const changes = documents.map((document) => ({ file: document.file, body: edit(document, specifier, remove), mode: document.mode })).filter((change, index) => change.body !== documents[index].body);

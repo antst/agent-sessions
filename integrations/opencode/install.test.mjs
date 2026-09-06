@@ -56,7 +56,8 @@ test("local and remote archives are replaced without duplicate entries", () => {
   const { directory, specifier } = fixture();
   const selected = path.join(directory, "config.json");
   const archive = `file:${path.join(directory, "sessionbus-opencode-0.1.0-pre.0.tgz")}`;
-  writeFileSync(selected, `${JSON.stringify({ plugin: [archive, "https://pkg.pr.new/antst/sessionbus/@sessionbus/opencode@old", "other-plugin"] })}\n`);
+  const remote = "https://packages.example/sessionbus-opencode-0.1.0-pre.0.tgz#sha256=old";
+  writeFileSync(selected, `${JSON.stringify({ plugin: [archive, remote, "other-plugin"] })}\n`);
   assert.equal(configure({ directory, specifier }), true);
   assert.deepEqual(value(selected), { plugin: ["other-plugin", specifier] });
 });
@@ -64,12 +65,28 @@ test("local and remote archives are replaced without duplicate entries", () => {
 test("HTTP npm archives are replaced and removed as one owned package", () => {
   const { directory, specifier } = fixture();
   const selected = path.join(directory, "opencode.jsonc");
-  const archive = "http://127.0.0.1:34567/sessionbus-opencode-0.1.0-pre.0.tgz";
+  const archive = "http://127.0.0.1:34567/sessionbus-opencode-0.1.0-pre.0.tgz?download=1";
   writeFileSync(selected, `${JSON.stringify({ plugin: [archive, "other-plugin"] })}\n`);
   assert.equal(configure({ directory, specifier }), true);
   assert.deepEqual(value(selected), { plugin: ["other-plugin", specifier] });
   assert.equal(configure({ directory, remove: true }), true);
   assert.deepEqual(value(selected), { plugin: ["other-plugin"] });
+});
+
+test("unrelated package tokens and URL queries are preserved on install and remove", () => {
+  const { directory, specifier } = fixture();
+  const selected = path.join(directory, "opencode.jsonc");
+  const unrelatedName = "not@sessionbus/opencode";
+  const unrelatedURL = "https://example.invalid/unrelated.tgz?note=@sessionbus/opencode";
+  const unrelatedDirectory = path.join(directory, "unrelated");
+  mkdirSync(unrelatedDirectory);
+  writeFileSync(path.join(unrelatedDirectory, "package.json"), '{"name":"unrelated"}\n');
+  const unrelatedFile = `file:${unrelatedDirectory}`;
+  writeFileSync(selected, `${JSON.stringify({ plugin: [unrelatedName, [unrelatedURL, { native: true }], unrelatedFile] })}\n`);
+  assert.equal(configure({ directory, specifier }), true);
+  assert.deepEqual(value(selected), { plugin: [unrelatedName, [unrelatedURL, { native: true }], unrelatedFile, specifier] });
+  assert.equal(configure({ directory, remove: true }), true);
+  assert.deepEqual(value(selected), { plugin: [unrelatedName, [unrelatedURL, { native: true }], unrelatedFile] });
 });
 
 test("an invalid merged file or failed transaction leaves every file byte-exact", () => {

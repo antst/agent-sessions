@@ -131,19 +131,21 @@ export function createPlugin(dependencies = {}) {
       const info = eventInfo(event), id = eventID(event);
       if (!sessionID(id) || !Object.hasOwn(info, "title")) return;
       const nativeName = title(info.title, id);
-      const name = event.type === "session.created" && requestedName ? requestedName : nativeName;
-      const identity = { product: "opencode", session_id: id, name, groups: [...groups], info: { cwd: info.directory || directory } };
-      if (!validate("SessionHelloRequest", { protocol: 1, ...identity })) throw new Error("OpenCode peer identity is outside the Sessionbus grammar");
+      const nativeIdentity = { product: "opencode", session_id: id, name: nativeName, groups: [...groups], info: { cwd: info.directory || directory } };
+      const requestedIdentity = event.type === "session.created" && requestedName ? { ...nativeIdentity, name: requestedName } : nativeIdentity;
+      if (!validate("SessionHelloRequest", { protocol: 1, ...nativeIdentity }) || !validate("SessionHelloRequest", { protocol: 1, ...requestedIdentity })) throw new Error("OpenCode peer identity is outside the Sessionbus grammar");
+      let current = sessions.get(id);
+      if (!current && !laneSocket && saved.SESSIONBUS_SOCKET) {
+        current = { identity: nativeIdentity, peer: makePeer(nativeIdentity, deliver, connectionEnvironment(saved)) };
+        sessions.set(id, current);
+      }
       if (event.type === "session.created" && requestedName && nativeName !== requestedName) {
         const updated = await client.session.update({ path: { id }, query: { directory }, body: { title: requestedName } });
         if (updated?.error != null || updated?.response?.status !== 200 || updated.data?.id !== id || updated.data?.title !== requestedName) throw new Error("OpenCode did not confirm the requested session title");
       }
-      const current = sessions.get(id);
-      if (!current) {
-        if (!laneSocket && saved.SESSIONBUS_SOCKET) sessions.set(id, { identity, peer: makePeer(identity, deliver, connectionEnvironment(saved)) });
-      } else if (current.identity.name !== name || current.identity.info.cwd !== identity.info.cwd) {
-        await current.peer.rehello(undefined, name, identity.info);
-        current.identity = identity;
+      if (current && (current.identity.name !== requestedIdentity.name || current.identity.info.cwd !== requestedIdentity.info.cwd)) {
+        await current.peer.rehello(undefined, requestedIdentity.name, requestedIdentity.info);
+        current.identity = requestedIdentity;
       }
     };
     const caller = (id) => laneSocket ? { action: (action, args, signal) => callLane(laneSocket, action, args, signal) } : sessions.get(id)?.peer?.caller;

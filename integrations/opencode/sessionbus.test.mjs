@@ -28,7 +28,7 @@ function peerFactory(records) {
     const peer = {
       identity, deliver, environment, rehellos: [], stopped: false,
       caller: { async action(action, argumentsValue) { records.actions.push({ identity, action, argumentsValue }); return { ok: true }; } },
-      async rehello(signal, name, info) { assert.equal(signal, undefined); this.rehellos.push({ name, info }); },
+      async rehello(signal, name, info) { assert.equal(signal, undefined); if (!this.stopped) this.rehellos.push({ name, info }); },
       shutdown() { this.stopped = true; },
     };
     records.peers.push(peer);
@@ -81,13 +81,14 @@ test("unknown update publishes a peer, retitles it, and deletion retires it", as
   assert.equal(records.peers[0].stopped, true);
 });
 
-test("created session is renamed before its first peer hello", async () => {
+test("created session publishes before its requested title update", async () => {
   const module = await load(), records = { peers: [], actions: [], prompts: [] }, updates = [];
   const plugin = module.createPlugin({ tool: fakeTool, createClient: () => ({ v2: v2(records) }), connectPeer: peerFactory(records), onExit() {} });
   const hooks = await plugin({ client: { session: { async update(request) { updates.push(request); return { response: { status: 200 }, data: { id: request.path.id, title: request.body.title } }; } } }, directory: "/work", serverUrl: new URL("http://127.0.0.1"), environment: { SESSIONBUS_SOCKET: "/tmp/bus.sock", SESSIONBUS_SESSION_NAME: "Named session", SESSIONBUS_GROUPS: "[]" } });
   await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_exact", title: "New session", directory: "/work" } } } });
   assert.equal(updates.length, 1);
-  assert.equal(records.peers[0].identity.name, "Named session");
+  assert.equal(records.peers[0].identity.name, "New session");
+  assert.deepEqual(records.peers[0].rehellos, [{ name: "Named session", info: { cwd: "/work" } }]);
 });
 
 test("created session must confirm the exact retitled identity", async () => {
@@ -95,7 +96,26 @@ test("created session must confirm the exact retitled identity", async () => {
   const plugin = module.createPlugin({ tool: fakeTool, createClient: () => ({ v2: v2(records) }), connectPeer: peerFactory(records), onExit() {} });
   const hooks = await plugin({ client: { session: { async update(request) { return { response: { status: 200 }, data: { id: `${request.path.id}-other`, title: request.body.title } }; } } }, directory: "/work", serverUrl: new URL("http://127.0.0.1"), environment: { SESSIONBUS_SOCKET: "/tmp/bus.sock", SESSIONBUS_SESSION_NAME: "Named session", SESSIONBUS_GROUPS: "[]" } });
   await assert.rejects(hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_exact", title: "New session", directory: "/work" } } } }), /did not confirm/u);
-  assert.equal(records.peers.length, 0);
+  assert.equal(records.peers.length, 1);
+  assert.equal(records.peers[0].identity.name, "New session");
+  assert.deepEqual(records.peers[0].rehellos, []);
+});
+
+test("deleted session cannot be republished by a held title update", async () => {
+  const module = await load(), records = { peers: [], actions: [], prompts: [] };
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  const plugin = module.createPlugin({ tool: fakeTool, createClient: () => ({ v2: v2(records) }), connectPeer: peerFactory(records), onExit() {} });
+  const hooks = await plugin({ client: { session: { async update(request) { await held; return { response: { status: 200 }, data: { id: request.path.id, title: request.body.title } }; } } }, directory: "/work", serverUrl: new URL("http://127.0.0.1"), environment: { SESSIONBUS_SOCKET: "/tmp/bus.sock", SESSIONBUS_SESSION_NAME: "Named session", SESSIONBUS_GROUPS: "[]" } });
+  const created = hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_exact", title: "New session", directory: "/work" } } } });
+  assert.equal(records.peers.length, 1);
+  await hooks.event({ event: { type: "session.deleted", properties: { info: { id: "ses_exact" } } } });
+  assert.equal(records.peers[0].stopped, true);
+  release();
+  await created;
+  assert.equal(records.peers.length, 1);
+  assert.deepEqual(records.peers[0].rehellos, []);
+  await assert.rejects(hooks.tool.sessionbus.execute({ action: "list", arguments: {} }, context), /no live OpenCode peer/u);
 });
 
 test("peer tool and delivery use the same exact session", async () => {
