@@ -17,6 +17,8 @@ type crossingBackend struct {
 	calls   chan string
 }
 
+func (*crossingBackend) Prepare(context.Context, json.RawMessage) error { return nil }
+
 func (b *crossingBackend) Call(_ context.Context, method string, params any) (json.RawMessage, error) {
 	arguments, _ := json.Marshal(params)
 	b.calls <- method + ":" + string(arguments)
