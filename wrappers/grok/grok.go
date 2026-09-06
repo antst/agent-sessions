@@ -412,8 +412,12 @@ func (p *Wrapper) Interrupt(ctx context.Context, run *sessionkit.Run) error {
 }
 
 func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, _ *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
-	return p.handoff.Deliver(ctx, request, func(ctx context.Context, message string) (bool, error) {
-		return p.inject(ctx, request.MessageID, message)
+	return p.handoff.Deliver(ctx, request, func(ctx context.Context, message string) (host.Injection, error) {
+		injected, err := p.inject(ctx, request.MessageID, message)
+		if injected {
+			return host.Injected, err
+		}
+		return host.NotInjected, err
 	})
 }
 
