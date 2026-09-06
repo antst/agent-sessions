@@ -1,6 +1,6 @@
-# Sessionbus
+# Agent Sessions
 
-Sessionbus lets coding agents discover one another, exchange live messages,
+Agent Sessions lets coding agents discover one another, exchange live messages,
 and run named worker sessions across products and machines. It works with the
 products you already use: each product keeps ownership of its models,
 credentials, settings, names, transcripts, and native session IDs.
@@ -20,7 +20,7 @@ Eight products can run as interactive peers. All eight, plus DeepSeek Harness
 | Oh My Pi (OMP) | yes | yes |
 | DeepSeek Harness (DSH) | — | yes |
 
-Sessionbus is useful when one agent should implement while another reviews,
+Agent Sessions is useful when one agent should implement while another reviews,
 when specialists should keep their native conversation history across tasks, or
 when agents on separate build hosts need one shared collaboration surface.
 
@@ -30,7 +30,7 @@ Install from a source checkout:
 
 ```sh
 git clone https://github.com/antst/sessionbus.git
-cd sessionbus
+cd agent-sessions
 make install
 ```
 
@@ -42,14 +42,14 @@ codex-peer --name lead --group demo
 claude-peer --name reviewer --group demo
 ```
 
-Inside either managed session, use the installed Sessionbus skill and ask
+Inside either managed session, use the installed Agent Sessions skill and ask
 it to list peers or send a message. The model calls the structured
-`sessionbus` tools; it does not need to invoke a shell command.
+`agent_sessions` tools; it does not need to invoke a shell command.
 
 For example:
 
 ```text
-List the Sessionbus peers, then ask reviewer to inspect the current diff.
+List the Agent Sessions peers, then ask reviewer to inspect the current diff.
 ```
 
 The receiving product gets a labeled message containing the sender's native
@@ -73,9 +73,9 @@ PRODUCT-peer --name NAME --group GROUP [--group GROUP] [--yolo] [NATIVE_ARGS...]
 PRODUCT-peer --resume [NATIVE_SELECTOR] [--group GROUP] [OPTIONS...]
 ```
 
-`--resume` is uniform only at the wrapper boundary. Sessionbus translates
+`--resume` is uniform only at the wrapper boundary. Agent Sessions translates
 the flag and passes its optional selector verbatim; the product owns names,
-IDs, duplicate handling, native pickers, and errors. Sessionbus never lists
+IDs, duplicate handling, native pickers, and errors. Agent Sessions never lists
 or matches product sessions to resolve a peer resume.
 
 Every invocation is complete. Omitting a group, model, agent, effort, or
@@ -115,7 +115,7 @@ See [Groups](docs/GROUPS.md) for namespace and lane-handover rules.
 ## Worker lanes
 
 A managed parent can run any supported lane product, including its own. DSH is
-lane-only. Inside a managed agent, use the `sessionbus.lane` MCP tool. The
+lane-only. Inside a managed agent, use the `agent_sessions.lane` MCP tool. The
 shell aliases are the equivalent operator and scripting surface:
 
 ```text
@@ -163,29 +163,29 @@ semantics.
 Useful commands are:
 
 ```sh
-sessionbus status
-sessionbus doctor
-sessionbus roster
-sessionbus roster --json
-sessionbus catalog --json
+agent-sessions status
+agent-sessions doctor
+agent-sessions roster
+agent-sessions roster --json
+agent-sessions catalog --json
 ```
 
 A healthy local installation has exactly one service-managed
-`sessionbus daemon` per operating-system user. Product-launched
-`sessionbus connector ...` processes are short-lived clients of that
+`agent-sessions daemon` per operating-system user. Product-launched
+`agent-sessions connector ...` processes are short-lived clients of that
 daemon, not additional daemons.
 
 On Linux:
 
 ```sh
-systemctl --user status sessionbus.service --no-pager
-journalctl --user -u sessionbus.service -n 100 --no-pager
+systemctl --user status agent-sessions.service --no-pager
+journalctl --user -u agent-sessions.service -n 100 --no-pager
 ```
 
 On macOS:
 
 ```sh
-launchctl print "gui/$(id -u)/net.antst.sessionbus"
+launchctl print "gui/$(id -u)/net.antst.agent-sessions"
 ```
 
 See [Installation](docs/INSTALL.md) and
@@ -193,7 +193,7 @@ See [Installation](docs/INSTALL.md) and
 
 ## Multiple machines
 
-Each host daemon may connect to one optional `sessionbus-hub`. The hub
+Each host daemon may connect to one optional `agent-sessions-hub`. The hub
 relays complete live rosters, messages, and remote lane calls; it owns no
 product credentials, transcripts, or lane sessions. Shared groups work across
 hosts, and remote lifecycle calls use the same MCP operation with a `host`
@@ -203,7 +203,7 @@ See [Federation](docs/FEDERATION.md).
 
 ## Trust and state
 
-Sessionbus is designed for a trusted local environment: the user's own
+Agent Sessions is designed for a trusted local environment: the user's own
 agents on infrastructure the user controls. Deployment boundaries such as
 separate accounts, hosts, VLANs, or hubs provide isolation.
 
@@ -213,7 +213,7 @@ discovery candidate row. Products remain the authority for whether a session
 exists and for every product-owned field returned to users.
 
 The wire contract for native clients is the
-[Native Sessionbus Presence Protocol](docs/specs/NATIVE-PEER-PROTOCOL.md).
+[Native Agent Sessions Presence Protocol](docs/specs/NATIVE-PEER-PROTOCOL.md).
 The shorter [adapter architecture](docs/ADAPTER-PROTOCOL.md) explains how the
 shipped integrations apply it.
 
