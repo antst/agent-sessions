@@ -97,6 +97,13 @@ func TestPeerWebSocketCapturedInitializeFrame(t *testing.T) {
 	}
 }
 
+func TestPeerWebSocketRejectsMaskedServerClose(t *testing.T) {
+	transport := &webSocketTransport{reader: bufio.NewReader(bytes.NewReader([]byte{0x88, 0x80, 1, 2, 3, 4}))}
+	if err := transport.Read(&appFrame{}); err == nil || err == io.EOF {
+		t.Fatalf("masked close = %v", err)
+	}
+}
+
 func readMaskedText(reader io.Reader) ([]byte, error) {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(reader, header); err != nil {

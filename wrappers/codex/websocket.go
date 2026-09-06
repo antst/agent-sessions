@@ -112,10 +112,13 @@ func (w *webSocketTransport) Read(value any) error {
 		return errors.New("Codex App Server returned an unsupported WebSocket frame")
 	}
 	opcode := header[0] & 0x0f
+	if header[1]&0x80 != 0 {
+		return errors.New("Codex App Server returned an unsupported WebSocket frame")
+	}
 	if opcode == 8 {
 		return io.EOF
 	}
-	if opcode != 1 || header[1]&0x80 != 0 {
+	if opcode != 1 {
 		return errors.New("Codex App Server returned an unsupported WebSocket frame")
 	}
 	length := uint64(header[1] & 0x7f)
