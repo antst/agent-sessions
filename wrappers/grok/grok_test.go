@@ -103,6 +103,7 @@ func fakeGrok() {
 		case "session/prompt":
 			go func(id any, params map[string]any) {
 				session, _ := params["sessionId"].(string)
+				promptID := fmt.Sprintf("prompt-%v", id)
 				prompt := fmt.Sprint(params["prompt"])
 				stop := "end_turn"
 				if strings.Contains(prompt, "hold") {
@@ -116,8 +117,11 @@ func fakeGrok() {
 				if size, _ := strconv.Atoi(os.Getenv("GROK_TEST_OUTPUT_SIZE")); size > 0 {
 					answer = strings.Repeat("x", size)
 				}
-				reply(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": session, "update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]string{"type": "text", "text": answer}}}})
-				reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]string{"stopReason": stop}})
+				if os.Getenv("GROK_TEST_FOREIGN_CHUNK") != "" {
+					reply(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": session, "update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]string{"type": "text", "text": "foreign"}}, "_meta": map[string]string{"promptId": "foreign-prompt"}}})
+				}
+				reply(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": session, "update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]string{"type": "text", "text": answer}}, "_meta": map[string]string{"promptId": promptID}}})
+				reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"stopReason": stop, "_meta": map[string]string{"promptId": promptID}}})
 				if os.Getenv("GROK_TEST_EXIT_AFTER_PROMPT") != "" {
 					os.Exit(0)
 				}
@@ -189,6 +193,7 @@ func TestFreshLaneNativeLifecycle(t *testing.T) {
 	idle, err := p.Deliver(context.Background(), delivery("idle"))
 	must(t, err)
 	check(t, idle.Disposition == "queued_for_next_turn", "idle = %#v", idle)
+	check(t, countFrames(records(t, recordPath), "_x.ai/interject") == 0, "idle delivery started native work")
 	must(t, p.Close(context.Background()))
 	check(t, !exists(filepath.Join(root, "lanes", p.key+".sock")), "lane socket remains")
 }
@@ -300,6 +305,44 @@ func TestDeliveryDoesNotHoldRunHandoff(t *testing.T) {
 	check(t, readWorkerResponse(t, reader, 5).Result != nil, "close response absent")
 }
 
+func TestIdleDeliveryJoinsOwnedPromptAndForeignChunksAreIgnored(t *testing.T) {
+	root, recordPath := shortRoot(t), filepath.Join(t.TempDir(), "record")
+	t.Setenv("GROK_TEST_RECORD", recordPath)
+	t.Setenv("GROK_TEST_FOREIGN_CHUNK", "1")
+	_, connection, reader := startGrokWorker(t, root)
+	writeWorkerRequest(t, connection, 2, "message.deliver", delivery("idle-wire-token"))
+	var receipt sessionkit.DeliveryReceipt
+	must(t, json.Unmarshal(readWorkerResponse(t, reader, 2).Result, &receipt))
+	check(t, receipt.Disposition == "queued_for_next_turn", "idle receipt = %#v", receipt)
+	check(t, countFrames(records(t, recordPath), "_x.ai/interject") == 0, "idle delivery used native interject")
+	writeWorkerRequest(t, connection, 3, "turn.run", map[string]any{"session_id": testSessionID + "@local", "input": "caller-input"})
+	var terminal sessionkit.TurnResult
+	must(t, json.Unmarshal(readWorkerResponse(t, reader, 3).Result, &terminal))
+	check(t, terminal.Outcome == "completed" && terminal.Result == "answer", "terminal = %#v", terminal)
+	prompt := string(findFrame(records(t, recordPath), "session/prompt"))
+	check(t, strings.Index(prompt, "idle-wire-token") >= 0 && strings.Index(prompt, "idle-wire-token") < strings.Index(prompt, "caller-input"), "owned prompt = %s", prompt)
+	writeWorkerRequest(t, connection, 4, "session.close", map[string]string{"session_id": testSessionID + "@local"})
+	check(t, readWorkerResponse(t, reader, 4).Result != nil, "close response absent")
+}
+
+func TestActiveDeliveryUsesInterject(t *testing.T) {
+	root, recordPath := shortRoot(t), filepath.Join(t.TempDir(), "record")
+	t.Setenv("GROK_TEST_RECORD", recordPath)
+	t.Setenv("GROK_TEST_RELEASE", filepath.Join(root, "never"))
+	p, connection, reader := startGrokWorker(t, root)
+	writeWorkerRequest(t, connection, 2, "turn.run", map[string]any{"session_id": testSessionID + "@local", "input": "hold"})
+	waitActive(t, p)
+	writeWorkerRequest(t, connection, 3, "message.deliver", delivery("active-wire-token"))
+	var receipt sessionkit.DeliveryReceipt
+	must(t, json.Unmarshal(readWorkerResponse(t, reader, 3).Result, &receipt))
+	check(t, receipt.Disposition == "injected" && countFrames(records(t, recordPath), "_x.ai/interject") == 1, "active receipt = %#v", receipt)
+	writeWorkerRequest(t, connection, 4, "turn.interrupt", map[string]string{"session_id": testSessionID + "@local"})
+	check(t, readWorkerResponse(t, reader, 4).Result != nil, "interrupt response absent")
+	check(t, readWorkerResponse(t, reader, 2).Result != nil, "terminal absent")
+	writeWorkerRequest(t, connection, 5, "session.close", map[string]string{"session_id": testSessionID + "@local"})
+	check(t, readWorkerResponse(t, reader, 5).Result != nil, "close response absent")
+}
+
 func TestChildExitWaitsForRunDoneBeforeShutdown(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GROK_TEST_OUTPUT_SIZE", "300000")
@@ -348,6 +391,14 @@ func startGrokWorker(t *testing.T, root string) (*Wrapper, net.Conn, *workerRead
 	check(t, opened.Result != nil, "open failed: %s", opened.Error)
 	t.Cleanup(func() { _ = connection.Close(); <-worker.Closed(); _ = listener.Close() })
 	return p, connection, reader
+}
+
+func shortRoot(t *testing.T) string {
+	t.Helper()
+	root, err := os.MkdirTemp("", "grok-")
+	must(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	return root
 }
 
 func writeWorkerRequest(t *testing.T, connection net.Conn, id int, method string, params any) {
@@ -399,6 +450,21 @@ func waitFrame(t *testing.T, path, method string, count int) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("did not observe %s", method)
+}
+
+func waitActive(t *testing.T, p *Wrapper) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		active := p.active != nil
+		p.mu.Unlock()
+		if active {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("native prompt did not become active")
 }
 
 func records(t *testing.T, path string) []json.RawMessage {

@@ -38,8 +38,10 @@ type Wrapper struct {
 	leader      *nativeProcess
 	watcher     *nativeProcess
 	sessionID   string
+	handoff     host.Handoff
 	run         *sessionkit.Run
-	answer      strings.Builder
+	active      *nativePrompt
+	answers     map[string]*strings.Builder
 	closing     bool
 	shutdown    func()
 }
@@ -263,57 +265,79 @@ func (p *Wrapper) Run(ctx context.Context, run *sessionkit.Run, input string) (s
 		p.mu.Unlock()
 		return sessionkit.TurnResult{}, errors.New("Grok lane is not idle")
 	}
-	p.run, p.answer = run, strings.Builder{}
+	p.run, p.answers = run, map[string]*strings.Builder{}
 	primary, id := p.primary, p.sessionID
 	go p.retireRun(run)
-	if run.Interrupted() {
-		p.mu.Unlock()
-		return sessionkit.TurnResult{Outcome: "interrupted"}, nil
-	}
-	var result struct {
-		StopReason string `json:"stopReason"`
-	}
-	started, finished := make(chan error, 1), make(chan error, 1)
-	go func() {
-		finished <- primary.requestStarted(ctx, "session/prompt", map[string]any{"sessionId": id, "prompt": []map[string]string{{"type": "text", "text": input}}}, &result, started)
-	}()
-	if err := <-started; err != nil {
-		p.mu.Unlock()
-		return sessionkit.TurnResult{}, err
-	}
-	native := &nativePrompt{client: primary, sessionID: id}
-	run.Native = native
-	interrupted := run.Interrupted()
-	if interrupted {
-		run.Native = nil
-	}
 	p.mu.Unlock()
-	if interrupted {
-		_ = native.client.cancel(native.sessionID)
-	}
-	err := <-finished
+	result, err := p.handoff.Run(ctx, run, input, func(ctx context.Context, prompt string) (host.Turn, error) {
+		return p.startPrompt(ctx, primary, id, prompt)
+	})
 	p.mu.Lock()
-	answer := p.answer.String()
-	if run.Native == native {
-		run.Native = nil
-	}
+	p.answers = nil
 	p.mu.Unlock()
-	if err != nil {
-		return sessionkit.TurnResult{}, err
-	}
-	outcome := "completed"
-	if result.StopReason == "cancelled" {
-		outcome = "interrupted"
-	} else if result.StopReason != "end_turn" {
-		outcome = "failed"
-	}
-	return sessionkit.TurnResult{Outcome: outcome, Result: answer, NativeStopReason: result.StopReason}, nil
+	return result, err
 }
 
 type nativePrompt struct {
+	owner     *Wrapper
 	client    *acpClient
 	sessionID string
+	done      chan error
+	result    struct {
+		StopReason string `json:"stopReason"`
+		Meta       struct {
+			PromptID string `json:"promptId"`
+		} `json:"_meta"`
+	}
 }
+
+func (p *Wrapper) startPrompt(ctx context.Context, primary *acpClient, id, prompt string) (host.Turn, error) {
+	t := &nativePrompt{owner: p, client: primary, sessionID: id, done: make(chan error, 1)}
+	started := make(chan error, 1)
+	go func() {
+		t.done <- primary.requestStarted(ctx, "session/prompt", map[string]any{"sessionId": id, "prompt": []map[string]string{{"type": "text", "text": prompt}}}, &t.result, started)
+	}()
+	if err := <-started; err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	p.active = t
+	p.mu.Unlock()
+	return t, nil
+}
+
+func (t *nativePrompt) Wait(ctx context.Context) (sessionkit.TurnResult, error) {
+	var err error
+	select {
+	case <-ctx.Done():
+		err = ctx.Err()
+	case err = <-t.done:
+	}
+	answer := ""
+	t.owner.mu.Lock()
+	if builder := t.owner.answers[t.result.Meta.PromptID]; builder != nil {
+		answer = builder.String()
+	}
+	if t.owner.active == t {
+		t.owner.active = nil
+	}
+	t.owner.mu.Unlock()
+	if err != nil {
+		return sessionkit.TurnResult{}, err
+	}
+	if t.result.Meta.PromptID == "" {
+		return sessionkit.TurnResult{}, errors.New("Grok prompt response omitted its identity")
+	}
+	outcome := "completed"
+	if t.result.StopReason == "cancelled" {
+		outcome = "interrupted"
+	} else if t.result.StopReason != "end_turn" {
+		outcome = "failed"
+	}
+	return sessionkit.TurnResult{Outcome: outcome, Result: answer, NativeStopReason: t.result.StopReason}, nil
+}
+
+func (t *nativePrompt) Interrupt(context.Context) error { return t.client.cancel(t.sessionID) }
 
 func (p *Wrapper) retireRun(run *sessionkit.Run) {
 	<-run.Done()
@@ -336,55 +360,50 @@ func (p *Wrapper) receive(frame acpFrame) {
 				Text string `json:"text"`
 			} `json:"content"`
 		} `json:"update"`
+		Meta struct {
+			PromptID string `json:"promptId"`
+		} `json:"_meta"`
 	}
-	if json.Unmarshal(frame.Params, &update) != nil || update.Update.Kind != "agent_message_chunk" {
+	if json.Unmarshal(frame.Params, &update) != nil || update.Update.Kind != "agent_message_chunk" || update.Meta.PromptID == "" {
 		return
 	}
 	p.mu.Lock()
-	if p.run != nil && p.run.Native != nil && update.SessionID == p.sessionID {
-		p.answer.WriteString(update.Update.Content.Text)
+	if p.answers != nil && update.SessionID == p.sessionID {
+		if p.answers[update.Meta.PromptID] == nil {
+			p.answers[update.Meta.PromptID] = &strings.Builder{}
+		}
+		p.answers[update.Meta.PromptID].WriteString(update.Update.Content.Text)
 	}
 	p.mu.Unlock()
 }
 
-func (p *Wrapper) Interrupt(_ context.Context, run *sessionkit.Run) error {
-	p.mu.Lock()
-	native, _ := run.Native.(*nativePrompt)
-	if native != nil {
-		run.Native = nil
-	}
-	p.mu.Unlock()
-	if native == nil {
-		return nil
-	}
-	return native.client.cancel(native.sessionID)
+func (p *Wrapper) Interrupt(ctx context.Context, run *sessionkit.Run) error {
+	return p.handoff.Interrupt(ctx, run)
 }
 
 func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
-	message, err := host.RenderNativeMessage(request)
-	if err != nil {
-		return sessionkit.DeliveryReceipt{}, err
-	}
+	return p.handoff.Deliver(ctx, request, func(ctx context.Context, message string) (bool, error) {
+		return p.inject(ctx, request.MessageID, message)
+	})
+}
+
+func (p *Wrapper) inject(ctx context.Context, messageID, message string) (bool, error) {
 	p.mu.Lock()
-	observer, id := p.observer, p.sessionID
-	var native any
-	if p.run != nil {
-		native = p.run.Native
-	}
+	observer, id, native := p.observer, p.sessionID, p.active
 	p.mu.Unlock()
+	if native == nil {
+		return false, nil
+	}
 	if observer == nil {
-		return sessionkit.DeliveryReceipt{}, errors.New("Grok observer is unavailable")
+		return false, errors.New("Grok observer is unavailable")
 	}
-	if err := observer.interject(ctx, id, request.MessageID, message); err != nil {
-		return sessionkit.DeliveryReceipt{}, fmt.Errorf("Grok interject: %w", err)
+	if err := observer.interject(ctx, id, messageID, message); err != nil {
+		return false, fmt.Errorf("Grok interject: %w", err)
 	}
 	p.mu.Lock()
-	active := native != nil && p.run != nil && p.run.Native == native
+	active := p.active == native
 	p.mu.Unlock()
-	if active {
-		return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
-	}
-	return sessionkit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+	return active, nil
 }
 
 func (p *Wrapper) Close(ctx context.Context) error {
