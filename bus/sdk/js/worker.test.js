@@ -127,7 +127,16 @@ test("peer delivery context aborts on EOF", async (t) => {
 test("peer shutdown closes a held replacement hello", async (t) => {
   const endpoint = peerEndpoint(), peer = connectPeer({ product: "native-product", session_id: "old", name: "old", groups: [], info: {} }, async () => ({ disposition: "injected" }), { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
   t.after(() => endpoint.daemon.close()); await endpoint.daemon.result(await endpoint.next(), {}); await peer.ready;
-  const replacing = peer.replace({ product: "native-product", session_id: "new", name: "new", groups: [], info: {} }); await endpoint.next(); peer.shutdown(); await assert.rejects(replacing, /not connected|closed/); await peer.closed;
+  const replacing = peer.replace({ product: "native-product", session_id: "new", name: "new", groups: [], info: {} }); await endpoint.next(); peer.shutdown(); await assert.rejects(replacing, /not connected|closed/); await peer.closed; assert.equal(peer.error, null);
+});
+
+test("peer rejected hello is terminal", async (t) => {
+  const endpoint = peerEndpoint(), scheduled = [];
+  const peer = connectPeer({ product: "native-product", session_id: "session", name: "sentence title", groups: [], info: {} }, async () => ({ disposition: "injected" }), { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: (call) => scheduled.push(call) });
+  t.after(() => endpoint.daemon.close());
+  const hello = await endpoint.next(); assert.equal(hello.params.name, "sentence title"); await endpoint.daemon.error(hello, -32602); await peer.closed;
+  assert.equal(peer.error instanceof ProtocolError, true); assert.equal(peer.error.code, -32602); assert.equal(scheduled.length, 0);
+  let ready = false; peer.ready.then(() => { ready = true; }); await Promise.resolve(); assert.equal(ready, false);
 });
 
 async function harness(t, product, options = {}) {
@@ -223,6 +232,7 @@ async function peerLifetime() {
   await assert.rejects(crossed, /not connected/); await scheduledReady.promise; scheduledReady = deferred(); scheduled.shift().call(); await peer.ready;
   assert.equal(currentIdentity.name, "crossed title"); assert.deepEqual(currentIdentity.info, { phase: "new" });
   const beforeTerminal = structuredClone(peer.identity); await connections[2].call("session.superseded", {}); await peer.closed;
+  assert.equal(peer.error instanceof ProtocolError, true); assert.equal(peer.error.code, -32012);
   await assert.rejects(peer.rehello({ name: "too late", info: {} }), /superseded/); assert.deepEqual(peer.identity, beforeTerminal); assert.equal(scheduled.length, 0);
   await assert.rejects(peer.replace({ ...beforeTerminal, session_id: "too-late" }), /superseded/); assert.deepEqual(peer.identity, beforeTerminal);
 }

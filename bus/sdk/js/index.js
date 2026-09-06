@@ -6,6 +6,7 @@ const { Connection, ProtocolError } = require("./connection.js");
 const { schema, validate } = require("./schema.js");
 
 const ENV = ["AGENTBUS_LAUNCH_TOKEN", "AGENTBUS_LOCAL_KEY", "AGENTBUS_SOCKET"];
+const never = new Promise(() => {});
 
 class Run {
   constructor(parent) {
@@ -99,6 +100,7 @@ class Peer {
     this.schedule = options.schedule || ((call) => setTimeout(call, 2000));
     this.socket = environment(env, false).socket;
     this.terminal = false;
+    this.error = null;
     this.admitted = null;
     this.identityController = null;
     this.closed = new Promise((resolve) => { this.finish = resolve; });
@@ -123,7 +125,7 @@ class Peer {
   shutdown() { this.terminal = true; this.connection = null; this.identityController?.abort(new Error("not connected")); this.caller.disconnected(); this.wire?.close(); this.finish(); }
   async _open() {
     if (this.terminal) return; let connection; try { connection = new Connection(this.connect(this.socket), true, (request) => this._handle(request, connection)); } catch { this.schedule(() => { this.ready = this._open(); }, 2000); return; } this.wire = connection;
-    try { await this._hello(connection); } catch { connection.close(); }
+    try { await this._hello(connection); } catch (error) { connection.close(); if (error instanceof ProtocolError && error.code === -32602) { this.terminal = true; this.error = error; this.wire = null; this.connection = null; this.identityController?.abort(error); this.identityController = null; this.admitted = null; this.caller.disconnected(); this.finish(); return never; } }
     if (!connection.signal.aborted) void connection.done.then(() => this._lost(connection)); else this._lost(connection);
   }
   async _hello(connection, identity = this.identity) { for (;;) { let installed = false; const result = await connection.call("session.hello", { protocol: 1, ...identity }, undefined, () => {
@@ -132,7 +134,7 @@ class Peer {
   }); if (installed) return result; identity = this.identity; } }
   _lost(connection) { if (this.wire !== connection || this.terminal) return; this.wire = null; this.connection = null; this.admitted = null; this.identityController?.abort(connection.signal.reason); this.identityController = null; this.caller.disconnected(); this.schedule(() => { this.ready = this._open(); }, 2000); }
   _handle(request, connection) {
-    if (request.method === "session.superseded") { this.terminal = true; this.connection = null; this.caller.disconnected(); void connection.result(request, {}).finally(() => { this.identityController?.abort(new Error("superseded")); connection.close(); this.finish(); }); return; }
+    if (request.method === "session.superseded") { this.terminal = true; this.error = new ProtocolError({ code: -32012, message: "superseded" }); this.connection = null; this.caller.disconnected(); void connection.result(request, {}).finally(() => { this.identityController?.abort(this.error); connection.close(); this.finish(); }); return; }
     if (request.method === "message.deliver") { const current = this.connection === connection && this.admitted && this.identityController && !this.identityController.signal.aborted; const admission = current ? { identity: snapshot(this.admitted), signal: this.identityController.signal } : null; void Promise.resolve().then(() => admission ? this.deliver(admission.signal, request.params, admission.identity) : { disposition: "rejected", reason: "closing" }).then((result) => connection.result(request, result), (error) => connection.result(request, { disposition: "rejected", reason: clean(error) })).catch(() => connection.close()); }
   }
 }

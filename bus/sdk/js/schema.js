@@ -11,7 +11,7 @@ function valid(rule, value) {
   if (rule.type && !validType(rule.type, value)) return false;
   if (Object.hasOwn(rule, "const") && !isDeepStrictEqual(rule.const, value)) return false;
   if (rule.enum && !rule.enum.some((item) => isDeepStrictEqual(item, value))) return false;
-  if (typeof value === "string" && (rule.minLength > [...value].length || rule.maxLength < [...value].length)) return false;
+  if (typeof value === "string" && (rule.minLength > [...value].length || rule.maxLength < [...value].length || rule.pattern && !new RegExp(rule.pattern, "u").test(value))) return false;
   if (typeof value === "number" && (rule.minimum > value || rule.exclusiveMinimum >= value)) return false;
   if (isObject(value) && !validObject(rule, value)) return false;
   if (Array.isArray(value) && (!value.every((item) => !rule.items || valid(rule.items, item)) || rule.uniqueItems && value.some((item, index) => value.slice(0, index).some((other) => isDeepStrictEqual(item, other))))) return false;
