@@ -2,7 +2,7 @@
 set -eu
 
 expected_contract_version=2
-state_root="${AGENT_SESSIONS_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/agent-sessions}"
+state_root="${SESSIONBUS_STATE_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/sessionbus}"
 
 json_string() {
   printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g')"

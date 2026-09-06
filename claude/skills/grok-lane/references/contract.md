@@ -9,10 +9,10 @@ control acknowledgement; the eventual collectable terminal result is still `turn
 Outcomes and exits are `completed`/0, `failed`/1, `timed_out`/124, and `interrupted`/130. A wait
 timeout also exits 124 without terminalizing the turn. Exactly one collector may acknowledge a
 turn. Resume refuses uncollected debt and uses ACP `session/load` with the exact stored native Grok
-UUID; the Agent Sessions lane UUID remains the stable lifecycle/message identity.
+UUID; the Sessionbus lane UUID remains the stable lifecycle/message identity.
 
 The lane manager is the sole ACP driver. It publishes only after authentication, exact resident
-roster identity, live bypass permission, and a direct Agent Sessions MCP probe. Peer messages form
+roster identity, live bypass permission, and a direct Sessionbus MCP probe. Peer messages form
 durable serialized turns; duplicate IDs are idempotent and conflicts fail closed.
 Its local owner-only control socket rejects a request unless it carries the exact stable lane
 session ID. This is a same-UID lifecycle boundary; names and model-supplied IDs grant nothing.

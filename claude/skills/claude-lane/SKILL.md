@@ -5,8 +5,8 @@ description: Orchestrate named, messageable local or remote Claude Code lanes fr
 
 # Orchestrate Claude lanes
 
-Use the process-attested `agent_sessions.lane` MCP tool. The parent happens to
-be Claude, while the target adapter is the ordinary Agent Sessions Claude lane
+Use the process-attested `sessionbus.lane` MCP tool. The parent happens to
+be Claude, while the target adapter is the ordinary Sessionbus Claude lane
 runtime. This is intentionally separate from Claude-native subagents and makes
 the same orchestration instructions portable to Codex, Grok, and Qwen parents.
 
@@ -26,7 +26,7 @@ Start detached work with one structured call:
 ```
 
 Do not execute `claude-peer-lane` through Bash and do not shell-background a
-foreground command. `start` returns after registration; the Agent Sessions
+foreground command. `start` returns after registration; the Sessionbus
 daemon owns the background worker. Add model, effort, permission, budget,
 schema, worktree, or tool flags only when the caller supplied that policy.
 
@@ -36,13 +36,13 @@ parent’s other groups; use repeatable `--group NAME` for child-specific groups
 `--no-inherit-groups` resets optional inheritance without removing the anchor.
 Omitted resume flags restore the durable choice.
 
-Discover and message the child through the `agent-sessions` skill using
-`agent_sessions.list_peers` and `agent_sessions.send_message`. The lane is also
+Discover and message the child through the `sessionbus` skill using
+`sessionbus.list_peers` and `sessionbus.send_message`. The lane is also
 a real native Claude registry row, but native Claude messaging is not an Agent
 Sessions fallback; report a structured-tool failure instead of switching
-channels. Only Agent Sessions discovery and routing are group-filtered.
+channels. Only Sessionbus discovery and routing are group-filtered.
 
-For a remote target set `host` on the same `agent_sessions.lane` call after
+For a remote target set `host` on the same `sessionbus.lane` call after
 status, host discovery, and remote doctor. Never fall back to SSH. Federation
 supplies an attested parent context and grouped terminal notices.
 
