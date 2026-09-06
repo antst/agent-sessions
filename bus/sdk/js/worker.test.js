@@ -36,7 +36,7 @@ class FakeProduct {
     this.calls[4]++; if (this.deliverStart) { this.deliverStart.resolve(); await aborted(cancel); throw cancel.reason; }
     if (this.outbound) await this.worker.caller.list({}); return { disposition: "injected" };
   }
-  async close(cancel) { this.calls[5]++; this.closeAborted = cancel.aborted; this.closeStart?.resolve(); if (this.closeEnd) await this.closeEnd.promise; if (this.closeError) throw this.closeError; }
+  async close(cancel) { this.calls[5]++; this.closeSignal = cancel; this.closeAborted = cancel.aborted; this.closeStart?.resolve(); if (this.closeEnd) await this.closeEnd.promise; if (this.closeError) throw this.closeError; }
 }
 
 test("connection write failure rejects once", async (t) => {
@@ -61,6 +61,12 @@ test("unmatched response closes the connection", async () => {
 test("worker closed resolves when product close rejects", async (t) => {
   const product = new FakeProduct(); product.closeError = new Error("close failed"); const stderr = captureStderr(t); const { worker, daemon, serving } = await harness(t, product); daemon.close();
   await worker.closed; await serving; assert.equal(product.calls[5], 1); assert.equal(stderr(), 'agentbus: product close: "close failed"\n');
+});
+
+test("worker waits for orderly product close across EOF", async (t) => {
+  const product = new FakeProduct(); product.closeStart = deferred(); product.closeEnd = deferred(); const { worker, daemon, serving } = await harness(t, product); let closed = false; worker.closed.then(() => { closed = true; });
+  const closing = daemon.call("session.close", target).catch((error) => error); await product.closeStart.promise; assert.equal(product.closeSignal.aborted, false); daemon.close(); await aborted(product.closeSignal); assert.equal(closed, false);
+  product.closeEnd.resolve(); await worker.closed; await serving; await closing; assert.equal(product.closeSignal.aborted, true); assert.equal(product.calls[5], 1);
 });
 
 test("one chunk is admitted before its first callback", async (t) => {

@@ -88,7 +88,7 @@ class Worker {
     await this._closeProduct(this.connection.signal);
     try { await this.connection.result(request, {}); } catch { this.shutdown(); } finally { this.shutdown(); }
   }
-  async _closeProduct(signal = this.controller.signal) { if (!this.opened || this.closedProduct) return; this.closedProduct = true; try { await this.callbacks.close(signal); } catch (error) { callbackError("close", error); } }
+  async _closeProduct(signal = this.controller.signal) { if (!this.opened) return; if (!this.productClose) this.productClose = Promise.resolve().then(() => this.callbacks.close(signal)).catch((error) => callbackError("close", error)); await this.productClose; }
   async _replyError(request, code, data) { try { await this.connection.error(request, code, data); } catch { this.shutdown(); } }
 }
 
