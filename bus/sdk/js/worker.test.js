@@ -40,7 +40,8 @@ class FakeProduct {
       if (this.deliverRelease) await this.deliverRelease.promise;
       if (!run) return { disposition: "queued_for_next_turn" };
       const state = await Promise.race([run.Done.then(() => "done"), run.AdmittedDone.then(() => "admitted")]);
-      if (state === "done") return { disposition: "queued_for_next_turn" };
+      this.admissionSelected?.resolve(); if (this.afterAdmission) await this.afterAdmission.promise;
+      if (state === "done" || run.finished) return { disposition: "queued_for_next_turn" };
       this.nativeEvents?.push("steer"); this.steered?.resolve(); return { disposition: "injected" };
     }
     if (this.outbound) await this.worker.caller.list({}); return { disposition: "injected" };
@@ -64,6 +65,12 @@ test("run admission orders active delivery", async (t) => {
   const product = new FakeProduct(); product.started = deferred(); product.release = deferred(); product.admit = deferred(); product.deliverRun = deferred(); product.nativeEvents = []; product.steered = deferred(); const { daemon } = await harness(t, product);
   const running = daemon.call("turn.run", { ...target, input: "admit" }); const run = await product.started.promise, delivered = daemon.call("message.deliver", delivery); assert.equal(await product.deliverRun.promise, run); assert.deepEqual(product.nativeEvents, ["input"]);
   product.admit.resolve(); await product.steered.promise; assert.deepEqual(product.nativeEvents, ["input", "steer"]); assert.equal((await delivered).disposition, "injected"); product.release.resolve(); await running;
+});
+
+test("finished run wins after admission is selected", async (t) => {
+  const product = new FakeProduct(); product.started = deferred(); product.release = deferred(); product.admit = deferred(); product.deliverRun = deferred(); product.nativeEvents = []; product.admissionSelected = deferred(); product.afterAdmission = deferred(); const { daemon } = await harness(t, product);
+  const running = daemon.call("turn.run", { ...target, input: "admit" }); const run = await product.started.promise, delivered = daemon.call("message.deliver", delivery); assert.equal(await product.deliverRun.promise, run);
+  product.admit.resolve(); await product.admissionSelected.promise; product.release.resolve(); await running; await run.Done; product.afterAdmission.resolve(); assert.equal((await delivered).disposition, "queued_for_next_turn"); assert.deepEqual(product.nativeEvents, ["input"]);
 });
 
 test("connection write failure rejects once", async (t) => {

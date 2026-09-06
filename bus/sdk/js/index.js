@@ -14,7 +14,8 @@ class Run {
     this.interrupted = false;
     this.controller = new AbortController();
     parent?.addEventListener("abort", () => this.controller.abort(parent.reason), { once: true });
-    this.Done = new Promise((resolve) => { this.finish = resolve; });
+    this.finished = false;
+    this.Done = new Promise((resolve) => { this.finish = () => { this.finished = true; resolve(); }; });
     this.AdmittedDone = new Promise((resolve) => { this.admit = resolve; });
     this.admitted = false;
   }
