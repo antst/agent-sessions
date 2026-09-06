@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/sessionbus/internal/federation"
 )
 
 func TestScanBoundaries(t *testing.T) {

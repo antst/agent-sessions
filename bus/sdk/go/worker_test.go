@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 
-	"github.com/antst/agent-sessions/bus/internal/protocol"
-	"github.com/antst/agent-sessions/bus/internal/rpc"
+	"github.com/antst/sessionbus/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/rpc"
 )
 
 type fakeProduct struct {
@@ -19,14 +20,21 @@ type fakeProduct struct {
 	started                 chan *Run
 	release, interrupted    chan struct{}
 	deliverStart            chan struct{}
+	deliverRun              chan *Run
+	deliverRelease          chan struct{}
+	admit                   chan struct{}
+	nativeEvents            chan string
 	closeStart, closeEnd    chan struct{}
+	closeContext            chan error
+	closeRequest            chan SessionCloseRequest
 	outbound, hangInterrupt bool
+	closeErr, interruptErr  error
 	calls                   [6]int32
 }
 
 func (p *fakeProduct) Hello(context.Context) (HelloDescription, error) {
 	atomic.AddInt32(&p.calls[0], 1)
-	if os.Getenv("AGENTBUS_LAUNCH_TOKEN") != "" || os.Getenv("AGENTBUS_LOCAL_KEY") != "" || os.Getenv("AGENTBUS_SOCKET") != "" {
+	if os.Getenv("SESSIONBUS_LAUNCH_TOKEN") != "" || os.Getenv("SESSIONBUS_LOCAL_KEY") != "" || os.Getenv("SESSIONBUS_SOCKET") != "" {
 		panic("worker environment reached Hello")
 	}
 	return HelloDescription{Product: "example-peer", SupportedOpenFields: []string{}, ExtraArguments: []ExtraArgument{}}, nil
@@ -53,14 +61,20 @@ func (p *fakeProduct) Run(ctx context.Context, run *Run, input string) (TurnResu
 		p.started <- run
 		<-ctx.Done()
 		return TurnResult{}, ctx.Err()
+	case "admit":
+		p.started <- run
+		p.nativeEvents <- "input"
+		<-p.admit
+		run.Admitted()
+		run.Admitted()
+		<-p.release
+		return TurnResult{Outcome: "completed"}, nil
 	case "fail":
 		return TurnResult{}, p
 	case "long":
 		return TurnResult{Outcome: "completed", Result: strings.Repeat("x", protocol.MaxTextRunes+1)}, nil
-	case "empty":
-		return TurnResult{Outcome: "completed"}, nil
-	case "interrupted":
-		return TurnResult{Outcome: "interrupted"}, nil
+	case "completed", "interrupted":
+		return TurnResult{Outcome: input}, nil
 	default:
 		return TurnResult{Outcome: "completed", Result: input}, nil
 	}
@@ -76,30 +90,112 @@ func (p *fakeProduct) Interrupt(ctx context.Context, run *Run) error {
 	if p.hangInterrupt {
 		<-ctx.Done()
 	}
-	return nil
+	return p.interruptErr
 }
-func (p *fakeProduct) Deliver(ctx context.Context, _ DeliveryRequest) (DeliveryReceipt, error) {
+func (p *fakeProduct) Deliver(ctx context.Context, _ DeliveryRequest, run *Run) (DeliveryReceipt, error) {
 	atomic.AddInt32(&p.calls[4], 1)
+	if p.deliverRun != nil {
+		p.deliverRun <- run
+		if p.deliverRelease != nil {
+			<-p.deliverRelease
+		}
+		if run == nil {
+			return DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+		}
+		select {
+		case <-run.Done():
+			return DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+		default:
+		}
+		select {
+		case <-run.Done():
+			return DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+		case <-run.AdmittedDone():
+		}
+		select {
+		case <-run.Done():
+			return DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+		default:
+		}
+		if p.nativeEvents != nil {
+			p.nativeEvents <- "steer"
+		}
+		return DeliveryReceipt{Disposition: "injected"}, nil
+	}
 	if p.deliverStart != nil {
 		close(p.deliverStart)
 		<-ctx.Done()
 		return DeliveryReceipt{}, ctx.Err()
 	}
 	if p.outbound {
-		return DeliveryReceipt{Disposition: "injected"}, p.worker.Call(ctx, "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{})
+		_, err := p.worker.Caller().List(ctx, protocol.SessionListRequest{})
+		return DeliveryReceipt{Disposition: "injected"}, err
 	}
 	return DeliveryReceipt{Disposition: "injected"}, nil
 }
-func (p *fakeProduct) Close(ctx context.Context) error {
+
+func TestWorkerDeliveryGetsNilWhileIdle(t *testing.T) {
+	p := &fakeProduct{deliverRun: make(chan *Run)}
+	h := startHarness(t, p, true, true)
+	var receipt DeliveryReceipt
+	delivered := async(h, "message.deliver", delivery, &receipt)
+	check(t, <-p.deliverRun == nil, "idle delivery received a run")
+	check(t, <-delivered == nil && receipt.Disposition == "queued_for_next_turn", "idle receipt = %#v", receipt)
+}
+
+func TestWorkerDeliveryKeepsAdmissionRun(t *testing.T) {
+	p := &fakeProduct{started: make(chan *Run), release: make(chan struct{}), deliverRun: make(chan *Run), deliverRelease: make(chan struct{})}
+	h := startHarness(t, p, true, true)
+	running := async(h, "turn.run", protocol.TurnRunRequest{SessionID: target.SessionID, Input: "block"}, &TurnResult{})
+	run := <-p.started
+	var receipt DeliveryReceipt
+	delivered := async(h, "message.deliver", delivery, &receipt)
+	check(t, <-p.deliverRun == run, "delivery did not receive the admitted run")
+	close(p.release)
+	check(t, <-running == nil, "run failed")
+	<-run.Done()
+	select {
+	case <-run.AdmittedDone():
+		t.Fatal("kit marked a failed native admission successful")
+	default:
+	}
+	close(p.deliverRelease)
+	check(t, <-delivered == nil && receipt.Disposition == "queued_for_next_turn", "terminal crossing receipt = %#v", receipt)
+}
+
+func TestRunAdmissionOrdersDelivery(t *testing.T) {
+	p := &fakeProduct{started: make(chan *Run), release: make(chan struct{}), admit: make(chan struct{}), nativeEvents: make(chan string, 2), deliverRun: make(chan *Run)}
+	h := startHarness(t, p, true, true)
+	running := async(h, "turn.run", protocol.TurnRunRequest{SessionID: target.SessionID, Input: "admit"}, &TurnResult{})
+	run := <-p.started
+	check(t, <-p.nativeEvents == "input", "native input was not first")
+	var receipt DeliveryReceipt
+	delivered := async(h, "message.deliver", delivery, &receipt)
+	check(t, <-p.deliverRun == run, "active delivery received the wrong run")
+	select {
+	case event := <-p.nativeEvents:
+		t.Fatalf("delivery crossed native admission: %s", event)
+	default:
+	}
+	close(p.admit)
+	check(t, <-p.nativeEvents == "steer", "native steer was not second")
+	check(t, <-delivered == nil && receipt.Disposition == "injected", "admitted delivery receipt = %#v", receipt)
+	close(p.release)
+	check(t, <-running == nil, "run failed")
+}
+func (p *fakeProduct) Close(ctx context.Context, request SessionCloseRequest) error {
 	atomic.AddInt32(&p.calls[5], 1)
-	if ctx.Err() == nil {
-		return errors.New("close context was not cancelled")
+	if p.closeContext != nil {
+		p.closeContext <- ctx.Err()
+	}
+	if p.closeRequest != nil {
+		p.closeRequest <- request
 	}
 	if p.closeStart != nil {
 		close(p.closeStart)
 		<-p.closeEnd
 	}
-	return nil
+	return p.closeErr
 }
 func (p *fakeProduct) Error() string {
 	if p.deliverStart != nil {
@@ -108,38 +204,37 @@ func (p *fakeProduct) Error() string {
 	}
 	return "failed exactly"
 }
-
 func startHarness(t *testing.T, p *fakeProduct, acknowledge, openNow bool) *rpc.Conn {
 	setEnvironment(t, "token", "")
 	worker, daemon := net.Pipe()
-	w := NewWorker(p)
-	w.dial = func(_ context.Context, network, address string) (net.Conn, error) {
+	p.worker = NewWorker(p)
+	check(t, p.worker.Caller() == p.worker.Caller(), "worker did not retain one pre-serve caller")
+	p.worker.dial = func(_ context.Context, network, address string) (net.Conn, error) {
 		check(t, atomic.LoadInt32(&p.calls[0]) == 1 && network == "unix" && address == "/fixture/socket", "dial before hello or wrong endpoint")
 		return worker, nil
 	}
-	p.worker = w
 	hello := make(chan struct{})
 	var h *rpc.Conn
 	h = rpc.New(daemon, false, func(_ context.Context, request *rpc.Request) {
 		switch request.Method {
 		case "session.hello":
 			if acknowledge {
-				must(t, h.Result(request, struct{}{}))
+				check(t, h.Result(request, struct{}{}) == nil, "hello response failed")
 			} else {
 				_ = h.Close()
 			}
 			close(hello)
 		case "session.list":
 			if p.worker.opened.Load() {
-				must(t, h.Result(request, protocol.SessionListResult{Sessions: []protocol.SessionSummary{}}))
+				check(t, h.Result(request, protocol.SessionListResult{Sessions: []protocol.SessionSummary{}}) == nil, "list response failed")
 			} else {
-				must(t, h.Error(request, protocol.NotCommitted, nil))
+				check(t, h.Error(request, protocol.NotCommitted, nil) == nil, "list error response failed")
 			}
 		}
 	})
-	go w.Serve(context.Background())
+	go p.worker.Serve(context.Background())
 	<-hello
-	t.Cleanup(func() { _ = h.Close(); <-w.Closed() })
+	t.Cleanup(func() { p.worker.Shutdown(); <-p.worker.Closed() })
 	if openNow {
 		open(t, h)
 	}
@@ -157,20 +252,33 @@ func open(t *testing.T, h *rpc.Conn) {
 }
 
 func TestWorkerLifecycleTable(t *testing.T) {
-	var table struct {
-		Cases []struct {
-			Name  string   `json:"name"`
-			Calls [6]int32 `json:"calls"`
-		} `json:"cases"`
+	stderrReader, stderrWriter, err := os.Pipe()
+	check(t, err == nil, "stderr pipe: %v", err)
+	previousStderr := os.Stderr
+	os.Stderr = stderrWriter
+	defer func() { os.Stderr = previousStderr; _ = stderrReader.Close(); _ = stderrWriter.Close() }()
+	var table []struct {
+		Name  string   `json:"name"`
+		Calls [6]int32 `json:"calls"`
 	}
 	raw, err := os.ReadFile("../../internal/protocol/session-lifecycle.fixtures.json")
-	must(t, err)
-	must(t, json.Unmarshal(raw, &table))
-	for _, row := range table.Cases {
+	check(t, err == nil && json.Unmarshal(raw, &table) == nil, "read lifecycle table: %v", err)
+	for _, row := range table {
 		t.Run(row.Name, func(t *testing.T) {
 			check(t, runCase(t, row.Name) == row.Calls, "callback calls did not match %v", row.Calls)
 		})
 	}
+	os.Stderr = previousStderr
+	check(t, stderrWriter.Close() == nil, "close stderr writer")
+	raw, err = io.ReadAll(stderrReader)
+	check(t, err == nil, "read stderr: %v", err)
+	counts := map[string]int{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+		counts[line]++
+	}
+	interrupt := `sessionbus: product interrupt: "first failure\nsecond failure"`
+	closeLine := `sessionbus: product close: "first failure\nsecond failure"`
+	check(t, len(counts) == 2 && counts[interrupt] == 2 && counts[closeLine] == 2, "callback stderr = %q", raw)
 }
 
 func runCase(t *testing.T, name string) [6]int32 {
@@ -180,7 +288,7 @@ func runCase(t *testing.T, name string) [6]int32 {
 		h := startHarness(t, p, true, false)
 		wantCode(t, p.worker.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}), protocol.NotCommitted)
 		open(t, h)
-		must(t, p.worker.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}))
+		check(t, p.worker.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}) == nil, "worker list failed")
 	case "describe-eof":
 		startHarness(t, p, false, false)
 	case "terminal-results":
@@ -189,30 +297,40 @@ func runCase(t *testing.T, name string) [6]int32 {
 			input string
 			want  TurnResult
 		}{
-			{"ok", TurnResult{Outcome: "completed", Result: "ok"}}, {"interrupted", TurnResult{Outcome: "interrupted"}}, {"fail", TurnResult{Outcome: "failed", Result: "failed exactly"}}, {"empty", TurnResult{Outcome: "completed"}}, {"long", TurnResult{Outcome: "completed", Result: strings.Repeat("x", protocol.MaxTextRunes), Truncated: true}},
+			{"ok", TurnResult{Outcome: "completed", Result: "ok"}},
+			{"interrupted", TurnResult{Outcome: "interrupted"}},
+			{"fail", TurnResult{Outcome: "failed", Result: "failed exactly"}},
+			{"completed", TurnResult{Outcome: "completed"}},
+			{"long", TurnResult{Outcome: "completed", Result: strings.Repeat("x", protocol.MaxTextRunes), Truncated: true}},
 		} {
 			var result TurnResult
-			must(t, h.Call(context.Background(), "turn.run", protocol.TurnRunRequest{SessionID: "product-session@local", Input: test.input}, &result))
-			check(t, result == test.want, "%s result = %#v", test.input, result)
+			check(t, h.Call(context.Background(), "turn.run", protocol.TurnRunRequest{SessionID: "product-session@local", Input: test.input}, &result) == nil && result == test.want, "%s result = %#v", test.input, result)
 		}
-	case "one-run", "one-interrupt", "full-duplex", "close-during-run", "callback-originated-method":
-		return blockingCase(t, name)
-	case "eof-during-run":
+	case "one-run", "one-interrupt", "interrupt-error", "full-duplex", "close-during-run", "callback-originated-method", "run-done":
+		blockingCase(t, name, p)
+	case "eof-during-run", "run-done-write-failure":
+		if name == "eof-during-run" {
+			p.closeErr = errors.New("first failure\nsecond failure")
+			p.closeContext = make(chan error, 1)
+			p.closeRequest = make(chan SessionCloseRequest, 1)
+		}
 		h := startHarness(t, p, true, true)
 		p.started = make(chan *Run)
 		run := async(h, "turn.run", protocol.TurnRunRequest{SessionID: "product-session@local", Input: "eof"}, &TurnResult{})
-		<-p.started
+		runToken := <-p.started
 		_ = h.Close()
 		<-p.worker.Closed()
 		check(t, <-run != nil, "expected error")
+		<-runToken.Done()
+		if name == "eof-during-run" {
+			check(t, <-p.closeContext != nil, "EOF left the product Close context live")
+			check(t, <-p.closeRequest == (SessionCloseRequest{}), "pure EOF carried a close request")
+		}
 	case "peer-lifetime":
 		h := startHarness(t, p, true, false)
-		must(t, h.Call(context.Background(), "session.superseded", struct{}{}, &struct{}{}))
+		check(t, h.Call(context.Background(), "session.superseded", struct{}{}, &struct{}{}) == nil, "superseded call failed")
+		<-p.worker.Closed()
 		check(t, p.worker.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}) != nil, "expected error")
-		for _, item := range []string{"eof reconnect", "same-id re-hello", "changed groups", "different-id re-hello"} {
-			t.Run(item, func(t *testing.T) { t.Skip("pending connectPeer in commit 3") })
-		}
-		t.Run("worker re-hello", func(t *testing.T) { t.Skip("pending daemon admission (commit 2)") })
 	case "wrong-direction-request":
 		h := startHarness(t, p, true, false)
 		check(t, h.Call(context.Background(), "session.hello", protocol.WorkerHello{Protocol: 1, LaunchToken: "again", HelloDescription: HelloDescription{Product: "worker", SupportedOpenFields: []string{}, ExtraArguments: []ExtraArgument{}}}, &struct{}{}) != nil, "expected error")
@@ -223,7 +341,7 @@ func runCase(t *testing.T, name string) [6]int32 {
 		<-p.deliverStart
 		wantCode(t, h.Call(context.Background(), "turn.interrupt", target, &struct{}{}), protocol.NotRunning)
 		close(p.release)
-		must(t, <-terminal)
+		check(t, <-terminal == nil, "terminal response failed")
 	case "idle-close-deliver":
 		h := startHarness(t, p, true, true)
 		p.deliverStart, p.closeStart, p.closeEnd = make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -232,22 +350,47 @@ func runCase(t *testing.T, name string) [6]int32 {
 		closed := async(h, "session.close", target, &struct{}{})
 		<-p.closeStart
 		checkDelivery(t, h, "rejected")
-		must(t, <-delivered)
+		check(t, <-delivered == nil, "cancelled delivery response failed")
 		close(p.closeEnd)
-		must(t, <-closed)
+		check(t, <-closed == nil, "close response failed")
 	case "environment":
 		setEnvironment(t, "token", "key")
 		err := NewWorker(p).Serve(context.Background())
-		check(t, err != nil && err.Error() == "local key transport not implemented in this build", "key error = %v", err)
-		check(t, os.Getenv("AGENTBUS_LAUNCH_TOKEN") == "" && os.Getenv("AGENTBUS_LOCAL_KEY") == "" && os.Getenv("AGENTBUS_SOCKET") == "", "keyed worker environment was not scrubbed")
+		check(t, err != nil && err.Error() == "local key transport not implemented in this build" && os.Getenv("SESSIONBUS_LAUNCH_TOKEN") == "" && os.Getenv("SESSIONBUS_LOCAL_KEY") == "" && os.Getenv("SESSIONBUS_SOCKET") == "", "key error or uncleared environment: %v", err)
+	case "shutdown":
+		startHarness(t, p, true, false)
+		p.worker.Shutdown()
+	case "close-error":
+		p.closeErr = errors.New("first failure\nsecond failure")
+		p.closeContext = make(chan error, 1)
+		p.closeRequest = make(chan SessionCloseRequest, 1)
+		h := startHarness(t, p, true, true)
+		check(t, h.Call(context.Background(), "session.close", target, &struct{}{}) == nil, "close error reached the wire")
+		check(t, <-p.closeContext == nil, "session.close cancelled the product Close context")
+		check(t, <-p.closeRequest == (SessionCloseRequest{SessionID: target.SessionID}), "ordinary close request changed")
+	case "close-forget":
+		p.started, p.release, p.interrupted = make(chan *Run), make(chan struct{}), make(chan struct{})
+		p.closeContext, p.closeRequest = make(chan error, 1), make(chan SessionCloseRequest, 1)
+		h := startHarness(t, p, true, true)
+		running := async(h, "turn.run", protocol.TurnRunRequest{SessionID: target.SessionID, Input: "block"}, &TurnResult{})
+		<-p.started
+		request := SessionCloseRequest{SessionID: target.SessionID, Forget: true}
+		closing := async(h, "session.close", request, &struct{}{})
+		<-p.interrupted
+		_ = h.Close()
+		check(t, <-p.closeContext != nil, "EOF left crossed product Close context live")
+		check(t, <-p.closeRequest == request, "product Close request changed")
+		close(p.release)
+		<-p.worker.Closed()
+		check(t, <-running != nil && <-closing != nil, "crossed calls survived EOF")
 	default:
 		t.Fatalf("unknown lifecycle case %q", name)
 	}
 	return p.calls
 }
 
-func blockingCase(t *testing.T, name string) [6]int32 {
-	p := &fakeProduct{started: make(chan *Run), release: make(chan struct{})}
+func blockingCase(t *testing.T, name string, p *fakeProduct) {
+	p.started, p.release = make(chan *Run), make(chan struct{})
 	h := startHarness(t, p, true, true)
 	run := async(h, "turn.run", protocol.TurnRunRequest{SessionID: "product-session@local", Input: "block"}, &TurnResult{})
 	runToken := <-p.started
@@ -258,29 +401,38 @@ func blockingCase(t *testing.T, name string) [6]int32 {
 		p.interrupted = make(chan struct{})
 		first, second := async(h, "turn.interrupt", target, &struct{}{}), async(h, "turn.interrupt", target, &struct{}{})
 		<-p.interrupted
-		must(t, <-first)
-		must(t, <-second)
+		check(t, errors.Join(<-first, <-second) == nil, "interrupt response failed")
+	case "interrupt-error":
+		p.interruptErr = errors.New("first failure\nsecond failure")
+		check(t, h.Call(context.Background(), "turn.interrupt", target, &struct{}{}) == nil, "interrupt error reached the wire")
 	case "full-duplex", "callback-originated-method":
 		p.outbound = true
 		checkDelivery(t, h, "injected")
 	case "close-during-run":
 		p.interrupted, p.closeStart, p.closeEnd, p.hangInterrupt = make(chan struct{}), make(chan struct{}), make(chan struct{}), true
+		p.interruptErr = errors.New("first failure\nsecond failure")
 		closed := async(h, "session.close", target, &struct{}{})
 		<-p.interrupted
-		must(t, h.Call(context.Background(), "turn.interrupt", target, &struct{}{}))
+		check(t, h.Call(context.Background(), "turn.interrupt", target, &struct{}{}) == nil, "coalesced interrupt failed")
 		close(p.release)
-		must(t, <-run)
+		check(t, <-run == nil, "run response failed")
 		<-p.closeStart
 		close(p.closeEnd)
-		must(t, <-closed)
-		return p.calls
+		check(t, <-closed == nil, "close response failed")
+		return
+	case "run-done":
+		select {
+		case <-runToken.Done():
+			t.Fatal("Run.Done closed before the terminal response")
+		default:
+		}
 	}
 	close(p.release)
-	must(t, <-run)
+	check(t, <-run == nil, "run response failed")
+	<-runToken.Done()
 	if name == "one-interrupt" {
 		check(t, runToken.Native == nil, "native work started after pre-handoff interrupt")
 	}
-	return p.calls
 }
 
 func checkDelivery(t *testing.T, h *rpc.Conn, disposition string) {
@@ -289,15 +441,15 @@ func checkDelivery(t *testing.T, h *rpc.Conn, disposition string) {
 }
 
 func setEnvironment(t *testing.T, token, key string) {
-	for name, value := range map[string]string{"AGENTBUS_LAUNCH_TOKEN": token, "AGENTBUS_LOCAL_KEY": key, "AGENTBUS_SOCKET": "/fixture/socket"} {
+	for name, value := range map[string]string{"SESSIONBUS_LAUNCH_TOKEN": token, "SESSIONBUS_LOCAL_KEY": key, "SESSIONBUS_SOCKET": "/fixture/socket"} {
 		t.Setenv(name, value)
 	}
 }
+
 func wantCode(t *testing.T, err error, code int) {
 	var rpcErr *protocol.RPCError
 	check(t, errors.As(err, &rpcErr) && rpcErr.Code == code, "error = %v, want code %d", err, code)
 }
-func must(t *testing.T, err error) { check(t, err == nil, "%v", err) }
 func check(t *testing.T, condition bool, format string, args ...any) {
 	if !condition {
 		t.Fatalf(format, args...)

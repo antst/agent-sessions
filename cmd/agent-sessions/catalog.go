@@ -6,8 +6,8 @@ import (
 	"io"
 	"reflect"
 
-	"github.com/antst/agent-sessions/internal/clihelp"
-	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/clihelp"
+	"github.com/antst/sessionbus/internal/productcatalog"
 )
 
 func runCatalog(_ context.Context, invocation clihelp.Invocation, output io.Writer) error {

@@ -1,16 +1,18 @@
-// Package sessionkit is the product-agnostic Go implementation of Agentbus.
+// Package sessionkit is the product-agnostic Go implementation of Sessionbus.
 package sessionkit
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"sync"
 	"sync/atomic"
 
-	"github.com/antst/agent-sessions/bus/internal/protocol"
-	"github.com/antst/agent-sessions/bus/internal/rpc"
+	"github.com/antst/sessionbus/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/rpc"
 )
 
 type WorkerCallbacks interface {
@@ -18,46 +20,57 @@ type WorkerCallbacks interface {
 	Open(context.Context, OpenRequest) (OpenResult, error)
 	Run(context.Context, *Run, string) (TurnResult, error)
 	Interrupt(context.Context, *Run) error
-	Deliver(context.Context, DeliveryRequest) (DeliveryReceipt, error)
-	Close(context.Context) error
+	Deliver(context.Context, DeliveryRequest, *Run) (DeliveryReceipt, error)
+	Close(context.Context, SessionCloseRequest) error
 }
 
 type Run struct {
 	Native      any
 	context     context.Context
 	cancel      context.CancelFunc
-	done        chan struct{}
+	done        <-chan struct{}
+	finish      context.CancelFunc
+	admitted    chan struct{}
+	admit       sync.Once
 	interrupted atomic.Bool
 }
 
-func (r *Run) Interrupted() bool { return r.interrupted.Load() }
+func (r *Run) Interrupted() bool             { return r.interrupted.Load() }
+func (r *Run) Done() <-chan struct{}         { return r.done }
+func (r *Run) Admitted()                     { r.admit.Do(func() { close(r.admitted) }) }
+func (r *Run) AdmittedDone() <-chan struct{} { return r.admitted }
 
 type Worker struct {
-	product WorkerCallbacks
-	dial    func(context.Context, string, string) (net.Conn, error)
-	mu      sync.Mutex
-	conn    *rpc.Conn
-	context context.Context
-	cancel  context.CancelFunc
-	run     *Run
-	opened  atomic.Bool
-	once    sync.Once
-	closed  chan struct{}
+	product      WorkerCallbacks
+	caller       *Caller
+	dial         func(context.Context, string, string) (net.Conn, error)
+	mu           sync.Mutex
+	conn         *rpc.Conn
+	context      context.Context
+	cancel       context.CancelFunc
+	run          *Run
+	closeRequest SessionCloseRequest
+	opened       atomic.Bool
+	once         sync.Once
+	closed       chan struct{}
 }
 
 func NewWorker(product WorkerCallbacks) *Worker {
-	return &Worker{product: product, dial: (&net.Dialer{}).DialContext, closed: make(chan struct{})}
+	worker := &Worker{product: product, dial: (&net.Dialer{}).DialContext, closed: make(chan struct{})}
+	worker.caller = NewCaller(func(ctx context.Context, method string, params any) (result json.RawMessage, err error) {
+		err = worker.Call(ctx, method, params, &result)
+		return
+	})
+	return worker
 }
 
 func (w *Worker) Closed() <-chan struct{} { return w.closed }
+func (w *Worker) Caller() *Caller         { return w.caller }
 
 func (w *Worker) Serve(ctx context.Context) error {
 	defer close(w.closed)
-	endpoint, token, key, err := workerEnvironment()
-	if err != nil || key != "" {
-		if err == nil {
-			err = errors.New("local key transport not implemented in this build")
-		}
+	endpoint, token, err := sessionEnvironment(true)
+	if err != nil {
 		return err
 	}
 	hello, err := w.product.Hello(ctx)
@@ -76,6 +89,11 @@ func (w *Worker) Serve(ctx context.Context) error {
 		err = rpc.ErrClosed
 	}
 	_ = w.conn.Close()
+	w.mu.Lock()
+	if w.run != nil && w.run.finish != nil {
+		w.run.finish()
+	}
+	w.mu.Unlock()
 	w.closeProduct(w.conn.Context())
 	return err
 }
@@ -84,13 +102,14 @@ func (w *Worker) Call(ctx context.Context, method string, params, result any) er
 	return w.conn.Call(ctx, method, params, result)
 }
 
-func (w *Worker) handle(_ context.Context, request *rpc.Request) {
-	ctx := w.context
+func (w *Worker) Shutdown() { _ = w.conn.Close() }
+
+func (w *Worker) handle(ctx context.Context, request *rpc.Request) {
 	switch request.Method {
 	case "session.superseded":
 		go func() { w.reply(w.conn.Result(request, struct{}{})); _ = w.conn.Close() }()
 	case "session.open":
-		go w.open(ctx, request)
+		go w.open(w.context, request)
 	case "turn.run":
 		w.mu.Lock()
 		if !w.opened.Load() || w.run != nil {
@@ -98,11 +117,12 @@ func (w *Worker) handle(_ context.Context, request *rpc.Request) {
 			go w.answer(request, nil, protocol.Busy)
 			return
 		}
-		runCtx, cancel := context.WithCancel(ctx)
-		slot := &Run{context: runCtx, cancel: cancel, done: make(chan struct{})}
+		runCtx, cancel := context.WithCancel(w.context)
+		done, finish := context.WithCancel(context.Background())
+		slot := &Run{context: runCtx, cancel: cancel, done: done.Done(), finish: finish, admitted: make(chan struct{})}
 		w.run = slot
 		w.mu.Unlock()
-		go w.runTurn(ctx, request, slot)
+		go w.runTurn(w.context, request, slot)
 	case "turn.interrupt":
 		w.mu.Lock()
 		if w.run == nil {
@@ -121,13 +141,14 @@ func (w *Worker) handle(_ context.Context, request *rpc.Request) {
 		go w.interrupt(request, slot, call)
 	case "message.deliver":
 		w.mu.Lock()
-		closing := w.run != nil && w.run.done == nil
+		slot := w.run
+		closing := slot != nil && slot.done == nil
 		w.mu.Unlock()
 		if closing {
 			go w.answer(request, DeliveryReceipt{Disposition: "rejected", Reason: "closing"}, 0)
 			return
 		}
-		go w.deliver(ctx, request)
+		go w.deliver(w.context, request, slot)
 	case "session.close":
 		w.mu.Lock()
 		slot := w.run
@@ -138,6 +159,7 @@ func (w *Worker) handle(_ context.Context, request *rpc.Request) {
 		}
 		w.run = &Run{}
 		w.run.interrupted.Store(true)
+		w.closeRequest = *request.Params.(*SessionCloseRequest)
 		interrupt := slot != nil && slot.context.Err() == nil && slot.interrupted.CompareAndSwap(false, true)
 		w.mu.Unlock()
 		go w.close(ctx, request, slot, interrupt)
@@ -170,23 +192,22 @@ func (w *Worker) runTurn(_ context.Context, request *rpc.Request, slot *Run) {
 	if err == nil && w.run == slot {
 		w.run = nil
 	}
-	close(slot.done)
+	if err != nil {
+		_ = w.conn.Close()
+	}
+	slot.finish()
 	w.mu.Unlock()
-	w.reply(err)
 }
 
 func (w *Worker) interrupt(request *rpc.Request, run *Run, call bool) {
 	if call {
-		if err := w.nativeInterrupt(run); err != nil {
-			w.reply(w.conn.Error(request, protocol.Internal, nil))
-			return
-		}
+		callbackError("interrupt", w.nativeInterrupt(run))
 	}
 	w.reply(w.conn.Result(request, struct{}{}))
 }
 
-func (w *Worker) deliver(ctx context.Context, request *rpc.Request) {
-	receipt, err := w.product.Deliver(ctx, *request.Params.(*DeliveryRequest))
+func (w *Worker) deliver(ctx context.Context, request *rpc.Request, run *Run) {
+	receipt, err := w.product.Deliver(ctx, *request.Params.(*DeliveryRequest), run)
 	if err != nil {
 		receipt = DeliveryReceipt{Disposition: "rejected", Reason: err.Error()}
 	}
@@ -195,17 +216,16 @@ func (w *Worker) deliver(ctx context.Context, request *rpc.Request) {
 
 func (w *Worker) close(ctx context.Context, request *rpc.Request, slot *Run, interrupt bool) {
 	if interrupt {
-		go w.nativeInterrupt(slot)
+		go func() {
+			callbackError("interrupt", w.nativeInterrupt(slot))
+		}()
 	}
 	if slot != nil {
 		<-slot.done
 	}
 	w.cancel()
-	if err := w.closeProduct(ctx); err != nil {
-		w.reply(w.conn.Error(request, protocol.Internal, nil))
-	} else {
-		w.reply(w.conn.Result(request, struct{}{}))
-	}
+	w.closeProduct(ctx)
+	w.reply(w.conn.Result(request, struct{}{}))
 	_ = w.conn.Close()
 }
 
@@ -224,14 +244,21 @@ func (w *Worker) answer(request *rpc.Request, value any, code int) {
 	}
 }
 
-func (w *Worker) closeProduct(ctx context.Context) error {
-	var err error
+func (w *Worker) closeProduct(ctx context.Context) {
 	w.once.Do(func() {
+		w.mu.Lock()
+		request := w.closeRequest
+		w.mu.Unlock()
 		if w.opened.Load() {
-			err = w.product.Close(ctx)
+			callbackError("close", w.product.Close(ctx, request))
 		}
 	})
-	return err
+}
+
+func callbackError(callback string, err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sessionbus: product %s: %q\n", callback, err.Error())
+	}
 }
 
 func (w *Worker) reply(err error) {
@@ -240,19 +267,22 @@ func (w *Worker) reply(err error) {
 	}
 }
 
-func workerEnvironment() (string, string, string, error) {
-	token, ok := os.LookupEnv("AGENTBUS_LAUNCH_TOKEN")
-	key, endpoint := os.Getenv("AGENTBUS_LOCAL_KEY"), os.Getenv("AGENTBUS_SOCKET")
-	for _, name := range []string{"AGENTBUS_LAUNCH_TOKEN", "AGENTBUS_LOCAL_KEY", "AGENTBUS_SOCKET"} {
+func sessionEnvironment(worker bool) (string, string, error) {
+	token, ok := os.LookupEnv("SESSIONBUS_LAUNCH_TOKEN")
+	key, endpoint := os.Getenv("SESSIONBUS_LOCAL_KEY"), Socket()
+	for _, name := range []string{"SESSIONBUS_LAUNCH_TOKEN", "SESSIONBUS_LOCAL_KEY", "SESSIONBUS_SOCKET"} {
 		_ = os.Unsetenv(name)
 	}
-	if !ok || token == "" {
-		return "", "", "", errors.New("launch token is required")
+	if worker && (!ok || token == "") {
+		return "", "", errors.New("launch token is required")
 	}
 	if endpoint == "" {
-		return "", "", "", errors.New("agentbus socket is required")
+		return "", "", errors.New("sessionbus socket is required")
 	}
-	return endpoint, token, key, nil
+	if key != "" {
+		return "", "", errors.New("local key transport not implemented in this build")
+	}
+	return endpoint, token, nil
 }
 
 func truncate(text string) (string, bool) {

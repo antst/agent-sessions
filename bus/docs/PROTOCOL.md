@@ -27,6 +27,8 @@ A request with a usable ID whose params or method are invalid receives its
 correlated `invalid_frame` response, or `invalid_hello` for `session.hello`,
 before the reader closes the connection. Without a usable ID the reader closes
 without writing. The reader never dispatches a later frame after either case.
+A response whose ID does not match an outstanding call is also an invalid frame:
+the receiver closes the connection and fails its pending calls once.
 
 The local Unix socket is trusted and plain by default. When the daemon's
 optional `local_key` is configured, every peer and worker connection instead
@@ -36,10 +38,10 @@ listener; one shared key replaces federation's SNI lookup. A keyed daemon never
 accepts plain frames. A kit without the required key reports `daemon requires
 local key`; a keyed client connecting to a plain daemon reports the TLS
 handshake failure. The key is never a wire field, argument, or log value.
-Clients read the daemon Unix-socket path from `AGENTBUS_SOCKET`, falling
+Clients read the daemon Unix-socket path from `SESSIONBUS_SOCKET`, falling
 back to the documented default path when absent. Every spawned lane receives
-that variable alongside `AGENTBUS_LAUNCH_TOKEN` and, when configured,
-`AGENTBUS_LOCAL_KEY`.
+that variable alongside `SESSIONBUS_LAUNCH_TOKEN` and, when configured,
+`SESSIONBUS_LOCAL_KEY`.
 
 A product is a binary; started with a launch token in its environment it is a
 lane worker, with no mode argument. Lane-only workers such as non-AI tools are
@@ -55,14 +57,19 @@ every federated host. The product owns the ID part because it owns the session
 primitive that can address it; the daemon mints no session IDs. A caller may
 use a bare ID or bare name as shorthand for its own daemon's host.
 Resolution splits a qualified name on its last `@`. Name parts are 1–128
-printable characters with no whitespace or control character; `/` and `@` are
-allowed. The last `@` is always the canonical host boundary. Host parts match
+printable Unicode characters, including spaces, with control characters excluded;
+`/` and `@` are allowed. Name values are preserved exactly: no trimming,
+whitespace collapse, tokenization on whitespace, or Unicode normalization. The
+128-character limit counts Unicode code points. ID parts remain 1–128 printable
+characters with no whitespace or control character. The last `@` is always the
+canonical host boundary. Host parts match
 `^[a-z0-9][a-z0-9-]{0,31}$`. For identity input, no `@` means a bare local part:
 the daemon appends the caller's host, then tries exact ID before exact name. An
 input containing `@` is always split at the last one, and an unknown right part
-is `unknown_host` rather than a bare name. These grammars
-are daemon checks because the shared schema deliberately has no `pattern`
-keyword.
+is `unknown_host` rather than a bare name. The schema carries the printable-name
+pattern and code-point bounds; the daemon separately checks name, ID, product,
+and host grammar so changing one does not loosen another. Overlong or
+control-bearing product titles are rejected visibly and are never rewritten.
 The wire has no generic tool frame: after hello, a peer or committed worker
 originates the ordinary client-to-daemon methods in this section. Product-facing
 start/wait/status/interrupt/list/send tools are caller-kit sugar over them.
@@ -110,8 +117,9 @@ worker's product must equal the product recorded by its launch-token
 reservation. The result is `{}`.
 
 A live peer may send another hello. With the same `session_id`, it updates the
-product-owned name and `info` in place; `groups` must equal the installed set
-exactly or the daemon returns `invalid_hello` and closes the connection. With a
+product-owned name and `info` in place; `groups` must equal the original
+declared slice exactly, including order, or the daemon returns `invalid_hello`
+and closes the connection. With a
 different `session_id`, identity replacement is atomic: the old transient
 entry and private group are removed, its reply sinks are detached, and pending
 inbound deliveries fail once before the new hello is acknowledged; the new
@@ -126,11 +134,12 @@ The daemon sends the displaced connection the ID-bearing request
 `session.superseded` with `{}` when a new peer connection claims the same
 canonical identity. The displaced client marks that identity terminal before its
 best-effort `{}` response, closes, and never reconnects that identity. The new
-connection is already current, so every request from the displaced connection
-is rejected. The daemon writes the supersession request before closing the old
-local socket with an immediate write deadline and never waits for an
-acknowledgement; inability to write is indistinguishable from EOF to the old
-client. If a displaced client races one final reconnect, that new claim
+connection is already current, so every request from the displaced connection,
+including another hello, is rejected. After the directory replaces the exact
+entry and releases its mutex, the old connection's owner writes the supersession request once with
+`supersedeWriteBound = 1s`, closes the old local socket, and never waits for an
+acknowledgement. A writable socket returns immediately; the bound only stops a
+dead client from blocking this path. If a displaced client races one final reconnect, that new claim
 may cause one more swap; because each displaced instance becomes terminal, the
 race is bounded and cannot flap indefinitely.
 
@@ -142,9 +151,9 @@ the filter is absent. Each item reports canonical `id@host` and `name@host`, whe
 connection is open, and whether one `turn.run` is outstanding. The host is already carried by both canonical identities, so no
 separate summary host field exists. This single method
 replaces peer listing, lane listing, and lane status. Its optional `hosts` array advertises product names by host. Whenever
-the local optional product list is configured, the daemon's effective local
-host identity is present, even when that list is empty; federated hosts
-contribute their published lists.
+the local optional non-empty product list is configured, the daemon's effective
+local host identity is present; an empty list is treated as absent. Federated
+hosts contribute their published lists.
 Advertisement never gates launch: the service PATH remains authoritative.
 Lane-row identity is immutable. Peers have no durable rows and follow the
 re-hello and connection-supersession rules above. A session outside the caller's visibility is indistinguishable
@@ -159,12 +168,13 @@ A connected session sends `message.send` to exactly one `target`, one explicit
 connections, sends each one `message.deliver`, and returns one truthful receipt
 per attempted delivery. The request retains one message body; explicit
 multicast and group expansion do not create another protocol method.
-Resolution tries exact canonical session ID, then canonical visible name. Bare
-input is first qualified with the caller's own host. A foreign host part that
-is not federated is `unknown_host` rather than an unresolved session; for an
-explicit target list that error is checked before any delivery is attempted.
-An ambiguous name produces a rejected receipt with reason `ambiguous` and no
-resolved IDs. Recipients are deduplicated by session ID, with one receipt each.
+Resolution validates the target name-part grammar, then tries exact canonical
+session ID and canonical visible name. Bare input is first qualified with the
+caller's own host. Each label yields its own receipt: an unknown session,
+unknown host, or ambiguous name is rejected with that reason, while every
+resolvable target is delivered. Resolved recipients are deduplicated by session
+ID. Deliveries run concurrently, and one response returns their receipts in
+label order after deduplication. There is no multicast timeout.
 
 #### `message.deliver`
 
@@ -215,20 +225,23 @@ authoritative daemon resolves and starts the worker, waits for hello, sends
 `session.open`, durably
 commits the product-returned session ID, and only then returns `{session_id}`. The row
 stores the original closed open-options object as one JSON value. Resume replays
-that value verbatim with `resume_session_id`; this version permits no resume
-overrides. The one spawn/open transaction timeout covers all of those steps.
+that stored value unchanged, preserving `arguments` order, with
+`resume_session_id`; this version permits no resume overrides. The one
+spawn/open transaction timeout covers all of those steps.
 Unsupported supplied
 open fields, an invalid session ID, exit, or timeout fail truthfully and do not
 publish a live session.
 
-One in-memory per-row lock covers the whole spawn, resume, or close transaction;
-it is coordination, not persisted state. Events within spawn/open are handled
-sequentially in arrival order: an open result commits before a later EOF can
-make the row offline, while EOF observed first fails the spawn. The launch
-token, not a speculative ID, keys a fresh transaction until open returns.
-Resume requires the returned ID to equal `resume_session_id`. A fresh open
-returning an ID already held by an existing row fails with `spawn_failed` and
-the exact text `session id already exists`.
+One lane owner processes the open result, exit, timeout, and shutdown in event
+order, so exactly one outcome finishes the request. A fresh spawn has no ID, so
+its composed name is reserved until the product returns an ID. The launch
+token, not a speculative ID, keys the provisional worker until open returns.
+Resume requires the returned ID
+to equal `resume_session_id`. A fresh open returning an ID already held by an
+existing row fails with `spawn_failed` and the exact text `session id already
+exists`. The lane owner commits while handling the open response, before it
+handles the next inbox frame. An exit drains the closed socket first, so an
+already-written valid open response can commit; EOF first fails the spawn.
 
 #### `session.open`
 
@@ -282,8 +295,8 @@ at most once per run, and later interrupt requests return `{}`.
 
 Either a caller sends `session.close` to the daemon or the daemon sends it to
 the addressed lane. The request has optional `forget`, default false. The
-worker asks the product to close and returns `{}` when
-it does. One constant `closeBound = 10s`, measured from the daemon sending this
+worker asks the product to close and always returns `{}`; a product cleanup
+error is one quoted line on worker stderr. One constant `closeBound = 10s`, measured from the daemon sending this
 request, bounds the entire close path. A result before the bound makes the
 daemon close the socket, send TERM, and reap; expiry makes it close the socket,
 send KILL, and reap with no second waiting period. The spawn/open transaction
@@ -306,7 +319,7 @@ this version has none.
 - A hello with both `session_id` and `launch_token`, with neither, or with fields
   from the other branch is invalid and closes the connection.
 - A peer re-hello with the same ID updates name and info only; changed groups
-  are `invalid_hello`. A different-ID re-hello ends the old transient identity
+  or group order are `invalid_hello`. A different-ID re-hello ends the old transient identity
   once, detaches its reply sinks, fails pending deliveries once, and installs
   the new peer, private group, and groups before acknowledging on the same
   connection, without a supersession frame. Already-admitted requests retain
@@ -317,11 +330,11 @@ this version has none.
 - A rowless describe token can authenticate hello but can never authorize
   `session.open`; EOF after describe is the worker's normal exit.
 - Worker-originated session methods before the session ID commit are rejected.
-  After a successful open response, the transaction commits the row before it
-  dispatches any subsequently read worker request; the reader may keep draining
-  frames, but commit failure closes the provisional connection. The kit adds no
-  commit wait. After commit, the same connection is the lane's presence and
-  uses those ordinary methods; there is no tool frame.
+  The lane owner commits while handling the successful open response, before
+  handling the next inbox frame; commit failure closes the provisional
+  connection. The kit adds no additional commit buffer, gate, or
+  acknowledgement. After commit, the same connection is the lane's presence
+  and uses those ordinary methods; there is no tool frame.
 - A second `turn.run` while one is outstanding returns busy. There is one
   running boolean in a product kit and one pending RPC in the daemon.
 - `lane.spawn` with `resume_session_id` naming a connected row returns
@@ -338,10 +351,11 @@ this version has none.
 - Composed lane names and recursive private groups record creation ancestry.
   A later peer or parent rename does not cascade into existing child names or
   group paths, and attached lane titles stay fixed.
-- The per-row lock serializes concurrent spawn, resume, and close transactions.
-  A waiter rechecks the row after acquiring it: a second resume sees
-  `already_connected`, and resume cannot exec
-  until synchronous supervisor cleanup of the prior worker has finished.
+- A lane row is claimed for resume, close, or forget until that operation's
+  cleanup finishes. New run, interrupt, close, resume, or forget requests for a
+  claimed row return `busy`; nothing waits on a row. Delivery to a claimed but
+  still attached lane proceeds. Fresh spawn reserves its composed name until
+  its product ID is known.
 - Resume acquires product-side exclusive ownership before touching the existing
   native session and holds it through cleanup. Fresh open does the same before
   create when the wrapper chooses the ID; when only the product can allocate the
@@ -421,9 +435,10 @@ The closed method authority therefore shrinks from twenty-one methods to eleven.
 ### 1.4 Error authority
 
 Every correlated failure uses exactly one numeric JSON-RPC code and symbolic
-message from this table. Kits match the code, never free-form text. Only
-`spawn_failed` has `data`: the closed object
-`{exit_code?:integer,stderr_tail:[string]}`. `exit_code` is absent when process
+message from this table. Kits match the code, never free-form text.
+`spawn_failed` has the closed `data` object
+`{exit_code?:integer,stderr_tail:[string]}`; `internal` has a non-empty string
+containing the daemon error. No other code has `data`. `exit_code` is absent when process
 creation itself failed, because no child existed from which to obtain one. If an
 invalid frame has no valid request ID, the daemon cannot correlate a response
 and closes the connection without writing one.
@@ -434,7 +449,7 @@ and closes the connection without writing one.
 | `-32602` | `invalid_hello` | `session.hello` when its union, protocol, identity, or token is invalid. |
 | `-32001` | `unknown_session` | `message.send`, resume `lane.spawn`, `turn.run`, `turn.interrupt`, or `session.close` when the named row or peer does not exist or is invisible to the caller. |
 | `-32002` | `not_connected` | `turn.run`, `turn.interrupt`, or `session.close` when a durable row has no connection. |
-| `-32003` | `busy` | `turn.run` when the target already has an outstanding run. |
+| `-32003` | `busy` | `turn.run` when the target already has an outstanding run; a worker loop dequeuing a 257th unanswered call; a full 256-event connection inbox; or a new run, interrupt, close, resume, or forget for a claimed lane row. A delivery rejected by either bound has reason `busy`; delivery to a claimed but attached lane is still admitted. |
 | `-32004` | `not_running` | `turn.interrupt` when the target has no outstanding run. |
 | `-32005` | `already_connected` | Resume `lane.spawn` when the durable row already has its worker connection. |
 | `-32007` | `unknown_product` | `lane.describe` or new `lane.spawn` when the product token is invalid or its binary is absent from the target host's service PATH. |
@@ -442,11 +457,11 @@ and closes the connection without writing one.
 | `-32009` | `spawn_failed` | `lane.describe` or `lane.spawn` when exec, hello, open, or native creation fails before commit. |
 | `-32010` | `timeout` | `lane.describe` or `lane.spawn` when its one spawn/open transaction bound expires. |
 | `-32011` | `not_committed` | Any worker-originated client-to-daemon session method received after hello but before product-session-ID commit. |
-| `-32012` | `superseded` | Any request from a peer connection displaced by the atomic same-identity swap. |
+| `-32012` | `superseded` | Any request from a peer connection displaced by exact directory replacement. |
 | `-32013` | `name_taken` | New `lane.spawn` when another row on that host already holds the requested composed name. |
 | `-32014` | `unknown_host` | `lane.describe` or new `lane.spawn` naming an unfederated `host`, or any canonical identity input whose host part is neither local nor connected. |
 | `-32015` | `forward_lost` | A one-hop federated request whose transport ends before its response; the request may or may not have been applied on the target host and is never retried. |
-| `-32603` | `internal` | A durable-table write fails after in-memory cleanup, or a worker interrupt/close callback fails; it has no other use. |
+| `-32603` | `internal` | The daemon's own shutdown or durable row-file operation fails; `data` carries its error text. A product callback never raises this code. |
 
 ### 3.1 Product contract
 
@@ -497,12 +512,12 @@ Callback failures map exactly once:
 | --- | --- |
 | `open` | `spawn_failed` with `stderr_tail:[message]`; the daemon passes it through unchanged. |
 | `run` | Terminal `{outcome:"failed",result:message}`; a run callback never returns an RPC error. |
-| `interrupt` | `internal`. |
+| `interrupt` | `{}`; the callback message is one quoted line on worker stderr, and the run terminal remains the stopping truth. |
 | `deliver` | Rejected receipt with the callback message as `reason`. |
-| `close` | `internal`, followed by ordinary kit exit. |
+| `close` | `{}` followed by ordinary kit exit; the callback message is one quoted line on worker stderr. |
 
-The worker kit reads `AGENTBUS_SOCKET`,
-`AGENTBUS_LAUNCH_TOKEN`, and the optional `AGENTBUS_LOCAL_KEY`;
+The worker kit reads `SESSIONBUS_SOCKET`,
+`SESSIONBUS_LAUNCH_TOKEN`, and the optional `SESSIONBUS_LOCAL_KEY`;
 it removes both secrets from the process environment and connects to the
 named daemon endpoint. The local key selects TLS and is retained only
 in the kit's private connection material; neither secret is logged, returned,
@@ -526,6 +541,9 @@ reads the slot under the same lock. Whichever side observes the other performs
 the one native interrupt. Once `run()` returns, the kit issues no new native
 interrupt, including while it writes the terminal result. A product or wrapper
 keeps no second starting, active, or interrupt-requested lifecycle bits.
+`Run.Done()` closes after the terminal response has been written and the run
+slot has been cleared, or after the connection has entered its single close
+path when no terminal can be written. It never closes before either boundary.
 
 Before mutating an existing session, a native product must acquire exclusivity
 that excludes any competing process and hold it through native cleanup. A

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/sessionbus/internal/procinfo"
 )
 
 type processIdentityStatus uint8

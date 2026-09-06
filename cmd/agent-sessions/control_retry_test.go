@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
 )
 
 func TestCallDaemonWithStableRetryReplaysSameRequestAfterLostResponse(t *testing.T) {

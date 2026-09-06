@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/stateroot"
+	"github.com/antst/sessionbus/internal/stateroot"
 )
 
 const bootstrapTimeout = 30 * time.Second

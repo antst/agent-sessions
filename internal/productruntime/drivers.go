@@ -3,7 +3,7 @@ package productruntime
 import (
 	"context"
 
-	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/productcatalog"
 )
 
 type RuntimeProduct struct {

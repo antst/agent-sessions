@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/acceptance"
-	"github.com/antst/agent-sessions/internal/releaseevidence"
+	"github.com/antst/sessionbus/internal/acceptance"
+	"github.com/antst/sessionbus/internal/releaseevidence"
 )
 
 func TestExecutionOrderIncludesEachExactPrerequisiteOnce(t *testing.T) {

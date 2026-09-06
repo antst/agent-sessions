@@ -12,12 +12,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/bridge"
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/launcher"
-	"github.com/antst/agent-sessions/internal/livepresence"
-	"github.com/antst/agent-sessions/internal/productcatalog"
-	"github.com/antst/agent-sessions/internal/sessiontools"
+	"github.com/antst/sessionbus/internal/bridge"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
+	"github.com/antst/sessionbus/internal/launcher"
+	"github.com/antst/sessionbus/internal/livepresence"
+	"github.com/antst/sessionbus/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/sessiontools"
 )
 
 func runConnector(ctx context.Context, product string, output io.Writer) error {

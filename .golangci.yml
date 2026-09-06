@@ -97,7 +97,7 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - github.com/antst/agent-sessions
+        - github.com/antst/sessionbus
 
 issues:
   max-issues-per-linter: 0

@@ -1,6 +1,6 @@
 package bridge
 
-import "github.com/antst/agent-sessions/internal/sessiontools"
+import "github.com/antst/sessionbus/internal/sessiontools"
 
 // LaneUsage returns the established native lane help for one supported product.
 // Keeping this projection in the bridge preserves the pre-unification CLI

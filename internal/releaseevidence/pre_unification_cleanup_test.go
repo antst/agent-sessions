@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/releasepkg"
+	"github.com/antst/sessionbus/internal/releasepkg"
 )
 
 type cleanupPlan struct {
@@ -541,7 +541,7 @@ func TestPreUnificationCleanupContractAndOperationalBoundary(t *testing.T) {
 	}
 	for _, removed := range []string{
 		"cmd/agent-session-runtime", "cmd/peer-federator", "deploy/peer-federator",
-		"cmd/codex-peer", "cmd/claude-peer", "cmd/grok-peer", "cmd/qwen-peer", "cmd/peer",
+		"cmd/codex-peer", "cmd/grok-peer", "cmd/qwen-peer", "cmd/peer",
 		"cmd/codex-peer-lane", "cmd/claude-peer-lane", "cmd/grok-peer-lane", "cmd/qwen-peer-lane",
 	} {
 		if _, err := os.Lstat(filepath.Join(repository, filepath.FromSlash(removed))); !os.IsNotExist(err) {

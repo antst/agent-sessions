@@ -12,7 +12,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/sessionbus/internal/productruntime"
 )
 
 const maxDoctorOutput = 64 << 10

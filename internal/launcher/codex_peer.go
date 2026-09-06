@@ -11,10 +11,10 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/envutil"
-	"github.com/antst/agent-sessions/internal/pathidentity"
-	"github.com/antst/agent-sessions/internal/procinfo"
-	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/envutil"
+	"github.com/antst/sessionbus/internal/pathidentity"
+	"github.com/antst/sessionbus/internal/procinfo"
+	"github.com/antst/sessionbus/internal/productcatalog"
 )
 
 var threadIDPattern = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)

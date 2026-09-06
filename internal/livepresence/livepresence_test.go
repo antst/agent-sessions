@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/testutil"
+	"github.com/antst/sessionbus/internal/testutil"
 )
 
 func TestClosedLaneMethodValidators(t *testing.T) {

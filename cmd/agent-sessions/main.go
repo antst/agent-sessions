@@ -17,12 +17,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/clihelp"
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/launcher"
-	"github.com/antst/agent-sessions/internal/servicecontrol"
-	"github.com/antst/agent-sessions/internal/sessiontools"
-	"github.com/antst/agent-sessions/internal/stateroot"
+	"github.com/antst/sessionbus/internal/clihelp"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
+	"github.com/antst/sessionbus/internal/launcher"
+	"github.com/antst/sessionbus/internal/servicecontrol"
+	"github.com/antst/sessionbus/internal/sessiontools"
+	"github.com/antst/sessionbus/internal/stateroot"
 )
 
 var version = "dev"
