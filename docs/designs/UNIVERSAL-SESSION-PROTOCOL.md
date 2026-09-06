@@ -33,6 +33,8 @@ A request with a usable ID whose params or method are invalid receives its
 correlated `invalid_frame` response, or `invalid_hello` for `session.hello`,
 before the reader closes the connection. Without a usable ID the reader closes
 without writing. The reader never dispatches a later frame after either case.
+A response whose ID does not match an outstanding call is also an invalid frame:
+the receiver closes the connection and fails its pending calls once.
 
 The local Unix socket is trusted and plain by default. When the daemon's
 optional `local_key` is configured, every peer and worker connection instead
@@ -1204,6 +1206,22 @@ peer identity every fixed `peerReconnectInterval = 2s`, with no backoff,
 jitter, or attempt cap. A call made while disconnected fails `not_connected`
 and is never replayed. `session.superseded` tombstones that identity instance
 and stops retries permanently.
+The peer kit keeps one JSON-round-trip snapshot as the desired identity. After
+each hello response it compares what it sent with that desired value and sends
+the current value immediately until they match; a change crossed with connect
+or another re-hello therefore cannot leave the older value installed. Its
+`rehello(name, info)` call preserves the product, session ID, and groups. While
+disconnected it stores the new desired name and information and returns
+`not_connected`.
+Its `replace(ctx, identity)` call supplies a complete new identity for a
+different-ID re-hello on the same connection. It settles outstanding operations
+from the old identity as `not_connected`; reconnect uses the new desired
+identity. The desired-identity swap, caller settlement, and removal of the old
+wire from new-call admission are one peer-lock operation; calls in the gap fail
+`not_connected`. The replacement hello acknowledgement reinstalls that wire
+only if its desired-identity generation is still current. `rehello` composes
+its name and information from the current desired identity under the same lock,
+so a crossed replacement keeps the new session ID and groups.
 The product's current title is the peer name. A same-ID re-hello updates that
 name and information in place only when the declared groups slice is exactly
 equal, including order. A
@@ -1217,19 +1235,36 @@ delivery, and worker-originated session-method API are otherwise shared.
 The public SDK exposes `WorkerCallbacks`, the kit-owned `Run`, and the wire types
 generated from the schema:
 `HelloDescription`, `ExtraArgument`, `OpenOptions`, `OpenRequest`, `OpenResult`,
-`TurnResult`, `DeliverySource`, `DeliveryRequest`, `DeliveryReceipt`,
+`TurnResult`, `DeliverySource`, `DeliveryRequest`, `DeliveryReceipt`, `Identity`,
 `SessionSummary`, `HostProducts`, and `ProtocolError`; wrappers and products do
 not hand-maintain protocol-shaped duplicates. The worker entry is
 `serveWorker(callbacks, env)`, which returns the kit-owned `closed` signal. Peer
-mode is `connectPeer(identity, deliver)` plus `rehello(identity)`. A
+mode is `connectPeer(identity, deliver)`, `rehello(name, info)`, and
+`replace(ctx, identity)`. A
 connection-bound client supplies `list`, `send`, `describe`, `spawn`, `resume`,
 `run`, `interrupt`, and `close(forget)` and is usable from every callback
 without blocking the reader. Go also exports one thin no-hello client:
 `Dial(socket)`, `Call(ctx, method, params)`, and `Close`; the caller kit and a
 wrapper's private lane socket use that one framed implementation.
+Go exports `NewCaller(call)` to place the same typed methods and caller
+conveniences over that no-hello client's call function; workers and peers are
+the other two uses of the same caller.
+The caller kit also owns the tool action vocabulary: exported `Actions` is
+`list`, `send`, `spawn`, `describe`, `run`, `start`, `wait`, `status`,
+`interrupt`, `close`, and `forget`, and `Caller.Action(ctx, action, args)`
+decodes the wrapper/MCP JSON argument shape and dispatches to the corresponding
+typed method or caller convenience. `forget` is `close` with `forget:true`.
+An unknown action returns an error for the MCP layer to report as Invalid
+params. This dispatcher is at most 40 production logical lines; wrappers do not
+carry another action switch.
 
-`start`, `status`, and `wait` are caller conveniences, not wire methods, and
-have one shared Go/JavaScript shape:
+Go constructs one caller for each worker before `Serve` and binds it to the
+worker's current connection through `Worker.Call`; repeated `Worker.Caller()`
+calls return that same object, including when called before `Serve`.
+
+`start`, `status`, and `wait` are caller conveniences for resident callers such
+as plugins and the shared MCP server. They are not wire methods or
+`agentbus-call` subcommands, and have one shared Go/JavaScript shape:
 
 | Call | Result and local rule |
 | --- | --- |
@@ -1246,7 +1281,8 @@ worker mode has none.
 The Go host and JavaScript worker mode implement the preceding algorithm, not
 two interpretations of it. Each uses a small interpreter over the published
 schema with no external validation library. Both are tested against
-`bus/internal/protocol/session.fixtures.json`, and both run the same ordinary
+`bus/internal/protocol/session.fixtures.json`; both caller kits also execute
+`bus/internal/protocol/caller-sugar.fixtures.json`. Both run the same ordinary
 table-driven lifecycle cases with fake product callbacks and a fake duplex
 connection. The schema and fixtures are published for vendors to test their
 kits. The lifecycle cases are:
@@ -1298,9 +1334,10 @@ The size contract is final logical lines:
 | Reference surface | Production | Tests |
 | --- | ---: | ---: |
 | Go transport (`bus/internal/rpc`) | 200 | 250 |
-| Go worker host | 200 | 250 |
+| Go worker host | 205 | 250 |
 | JavaScript client plus worker mode | 200 | 250 |
-| Go caller kit | 250 | 250 |
+| Go caller kit | 250 | 400 |
+| Go no-hello client (`client.go`) | 30 | — |
 | JavaScript caller kit | 150 | 150 |
 | Reference caller | 200 | 200 |
 | Reference worker | 250 | 150 |
@@ -1308,7 +1345,8 @@ The size contract is final logical lines:
 | Shared lifecycle fixture data | — | 220 |
 
 Generic connection framing is counted in Section 2, not duplicated into either
-worker host. A kit
+worker host. The no-hello client's tests are counted in the Go caller-kit test
+budget; it has no separate test allowance. A kit
 exceeding these limits has grown product policy or a third lifecycle fact and
 must be simplified.
 
@@ -1609,8 +1647,8 @@ against installed products is permitted only on `umka-dev1`.
 
 | Reference | Closed behavior |
 | --- | --- |
-| Reference worker | PATH-resolved `example-peer` started with the one-use launch token in its environment and empty argv; worker hello declares all five open fields, open returns a deterministic product session ID, run can echo/block/fail or never settle, interrupt and close can independently never settle, deliver is scriptable to `injected`, `queued_for_next_turn`, or `rejected`, and worker-originated session methods are scriptable. It imports no product package. |
-| Reference caller | Up to two peer connections plus the shared caller kit. They can issue every client-to-daemon method, deliberately abandon reply sinks, supersede or re-hello an identity, prove second-visible-peer and invisible-peer authorization, and script delivery responses. They contain no product condition. |
+| Reference worker | PATH-resolved `example-peer` starts with the one-use launch token in its environment and empty argv. Its hello declares all five open fields. Ordered `open.arguments` entries are `key=value`; `session_id=<id>` selects the returned product session ID and its absence makes the worker mint one. A plain turn input is echoed; `block` waits only for the run cancellation and returns `interrupted`; `call <method> <params-json>` performs that worker-originated session method and returns the response JSON; `fail <code>` returns that error. An idle delivery is `queued_for_next_turn` and prepended to the next input; a delivery during a run is `injected` and appended to the echoed result. The close callback returns immediately. The worker has no configuration, clock, or product import. |
+| Reference caller | `bus/cmd/agentbus-call [-name <name>] [-g a,b] [-socket <path>] <method> [<params-json>]` opens one peer connection, sends exactly one raw client-to-daemon request, prints its result or error object on stdout, and exits 0 for a result, 1 for an error, or 2 for usage. `turn.run` waits for its terminal; deliveries during the call are JSON lines on stderr and receive `injected`. Separate invocations supply a second peer or abandon a reply sink. The binary has no configuration file, stdin protocol, product condition, or local turn registry. |
 | Worker invocation | The worker suite accepts only a product token and invokes that exact PATH binary with empty argv and a launch token in its environment; every vendor and `example-peer` run the identical trace. |
 | Caller invocation | The caller suite invokes the product's installed Agent Sessions tool, not a private test API; every product runs the identical trace against the reference worker. |
 
@@ -1618,7 +1656,8 @@ The caller/reference size contract is final logical lines:
 
 | Reference surface | Production | Tests |
 | --- | ---: | ---: |
-| Go caller kit | 250 | 250 |
+| Go caller kit | 250 | 400 |
+| Go no-hello client (`client.go`) | 30 | — |
 | JavaScript caller kit, additional to the 200-line JavaScript client/worker cap | 150 | 150 |
 | Reference caller | 200 | 200 |
 | Reference worker | 250 | 150 |

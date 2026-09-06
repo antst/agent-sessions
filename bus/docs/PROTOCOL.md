@@ -27,6 +27,8 @@ A request with a usable ID whose params or method are invalid receives its
 correlated `invalid_frame` response, or `invalid_hello` for `session.hello`,
 before the reader closes the connection. Without a usable ID the reader closes
 without writing. The reader never dispatches a later frame after either case.
+A response whose ID does not match an outstanding call is also an invalid frame:
+the receiver closes the connection and fails its pending calls once.
 
 The local Unix socket is trusted and plain by default. When the daemon's
 optional `local_key` is configured, every peer and worker connection instead

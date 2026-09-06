@@ -3,6 +3,7 @@ package sessionkit
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -36,6 +37,7 @@ func (r *Run) Done() <-chan struct{} { return r.done }
 
 type Worker struct {
 	product WorkerCallbacks
+	caller  *Caller
 	dial    func(context.Context, string, string) (net.Conn, error)
 	mu      sync.Mutex
 	conn    *rpc.Conn
@@ -48,18 +50,21 @@ type Worker struct {
 }
 
 func NewWorker(product WorkerCallbacks) *Worker {
-	return &Worker{product: product, dial: (&net.Dialer{}).DialContext, closed: make(chan struct{})}
+	worker := &Worker{product: product, dial: (&net.Dialer{}).DialContext, closed: make(chan struct{})}
+	worker.caller = NewCaller(func(ctx context.Context, method string, params any) (result json.RawMessage, err error) {
+		err = worker.Call(ctx, method, params, &result)
+		return
+	})
+	return worker
 }
 
 func (w *Worker) Closed() <-chan struct{} { return w.closed }
+func (w *Worker) Caller() *Caller         { return w.caller }
 
 func (w *Worker) Serve(ctx context.Context) error {
 	defer close(w.closed)
-	endpoint, token, key, err := workerEnvironment()
-	if err != nil || key != "" {
-		if err == nil {
-			err = errors.New("local key transport not implemented in this build")
-		}
+	endpoint, token, err := sessionEnvironment(true)
+	if err != nil {
 		return err
 	}
 	hello, err := w.product.Hello(ctx)
@@ -91,9 +96,7 @@ func (w *Worker) Call(ctx context.Context, method string, params, result any) er
 	return w.conn.Call(ctx, method, params, result)
 }
 
-func (w *Worker) Shutdown() {
-	_ = w.conn.Close()
-}
+func (w *Worker) Shutdown() { _ = w.conn.Close() }
 
 func (w *Worker) handle(_ context.Context, request *rpc.Request) {
 	switch request.Method {
@@ -253,19 +256,22 @@ func (w *Worker) reply(err error) {
 	}
 }
 
-func workerEnvironment() (string, string, string, error) {
+func sessionEnvironment(worker bool) (string, string, error) {
 	token, ok := os.LookupEnv("AGENTBUS_LAUNCH_TOKEN")
 	key, endpoint := os.Getenv("AGENTBUS_LOCAL_KEY"), os.Getenv("AGENTBUS_SOCKET")
 	for _, name := range []string{"AGENTBUS_LAUNCH_TOKEN", "AGENTBUS_LOCAL_KEY", "AGENTBUS_SOCKET"} {
 		_ = os.Unsetenv(name)
 	}
-	if !ok || token == "" {
-		return "", "", "", errors.New("launch token is required")
+	if worker && (!ok || token == "") {
+		return "", "", errors.New("launch token is required")
 	}
 	if endpoint == "" {
-		return "", "", "", errors.New("agentbus socket is required")
+		return "", "", errors.New("agentbus socket is required")
 	}
-	return endpoint, token, key, nil
+	if key != "" {
+		return "", "", errors.New("local key transport not implemented in this build")
+	}
+	return endpoint, token, nil
 }
 
 func truncate(text string) (string, bool) {
