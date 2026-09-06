@@ -52,6 +52,12 @@ test("pre-aborted call has no pending request or write", async (t) => {
   assert.equal(seen, 0); assert.equal(connection.pending.size, 0);
 });
 
+test("unmatched response closes the connection", async () => {
+  const [clientSocket, daemonSocket] = pair(), connection = new Connection(clientSocket, true);
+  daemonSocket.write('{"jsonrpc":"2.0","id":99,"result":{}}\n'); await connection.done;
+  await assert.rejects(connection.call("session.list", {}), /closed/);
+});
+
 test("worker closed resolves when product close rejects", async (t) => {
   const product = new FakeProduct(); product.closeError = new Error("close failed"); const stderr = captureStderr(t); const { worker, daemon, serving } = await harness(t, product); daemon.close();
   await worker.closed; await serving; assert.equal(product.calls[5], 1); assert.equal(stderr(), 'agentbus: product close: "close failed"\n');

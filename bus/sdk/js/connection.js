@@ -55,7 +55,7 @@ class Connection {
       const spec = METHODS[frame.method], allowed = spec && (spec[2] === "both" || spec[2] === (this.client ? "daemon" : "client"));
       if (frame.id <= this.last || !allowed || !validate(spec[0], frame.params)) return this._reject(frame, true); this.last = frame.id; this.handler({ id: frame.id, method: frame.method, params: frame.params }); return true;
     }
-    const pending = this.pending.get(frame.id); if (!pending) return true; this.pending.delete(frame.id);
+    const pending = this.pending.get(frame.id); if (!pending) return false; this.pending.delete(frame.id);
     if (!(frame.error ? validate("RPCError", frame.error) : validate(METHODS[pending.method][1], frame.result))) { pending.reject(new Error("invalid frame")); return false; }
     try { if (!frame.error) pending.observed?.(); } catch (error) { pending.reject(error); return false; }
     (frame.error ? pending.reject : pending.accept)(frame.error ? new ProtocolError(frame.error) : frame.result);
