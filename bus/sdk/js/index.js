@@ -76,7 +76,7 @@ class Worker {
     try { await this.connection.result(request, result); if (this.run === run) this.run = null; } catch { this.shutdown(); } finally { run.finish(); }
   }
   async _interrupt(request, run, call) {
-    try { if (call && !run.controller.signal.aborted) await this.callbacks.interrupt(run.controller.signal, run); } catch { await this._replyError(request, -32603); return; }
+    try { if (call && !run.controller.signal.aborted) await this.callbacks.interrupt(run.controller.signal, run); } catch (error) { process.stderr.write(`agentbus: product interrupt: ${JSON.stringify(clean(error))}\n`); }
     try { await this.connection.result(request, {}); } catch { this.shutdown(); }
   }
   async _deliver(request) {
@@ -85,7 +85,7 @@ class Worker {
   }
   async _close(request, run, interrupt) {
     if (interrupt) void Promise.resolve().then(() => this.callbacks.interrupt(run.controller.signal, run)).catch(() => {}); if (run) await run.Done; this.controller.abort();
-    try { await this._closeProduct(); } catch { await this._replyError(request, -32603); this.shutdown(); return; }
+    try { await this._closeProduct(); } catch (error) { process.stderr.write(`agentbus: product close: ${JSON.stringify(clean(error))}\n`); }
     try { await this.connection.result(request, {}); } catch { this.shutdown(); } finally { this.shutdown(); }
   }
   async _closeProduct() { if (!this.opened || this.closedProduct) return; this.closedProduct = true; await this.callbacks.close(this.controller.signal); }

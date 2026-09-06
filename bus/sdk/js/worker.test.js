@@ -31,12 +31,12 @@ class FakeProduct {
     if (input === "long") return { outcome: "completed", result: "x".repeat(262145) };
     return { outcome: input === "interrupted" ? "interrupted" : "completed", result: input === "completed" || input === "interrupted" ? "" : input };
   }
-  async interrupt(cancel, run) { this.calls[3]++; assert.equal(run.Interrupted(), true); this.interrupted?.resolve(); if (this.hangInterrupt) await aborted(cancel); }
+  async interrupt(cancel, run) { this.calls[3]++; assert.equal(run.Interrupted(), true); this.interrupted?.resolve(); if (this.hangInterrupt) await aborted(cancel); if (this.interruptError) throw this.interruptError; }
   async deliver(cancel) {
     this.calls[4]++; if (this.deliverStart) { this.deliverStart.resolve(); await aborted(cancel); throw cancel.reason; }
     if (this.outbound) await this.worker.caller.list({}); return { disposition: "injected" };
   }
-  async close(cancel) { this.calls[5]++; assert.equal(cancel.aborted, true); this.closeStart?.resolve(); if (this.closeEnd) await this.closeEnd.promise; if (this.closeError) throw new Error("close failed"); }
+  async close(cancel) { this.calls[5]++; assert.equal(cancel.aborted, true); this.closeStart?.resolve(); if (this.closeEnd) await this.closeEnd.promise; if (this.closeError) throw this.closeError; }
 }
 
 test("connection write failure rejects once", async (t) => {
@@ -53,8 +53,8 @@ test("pre-aborted call has no pending request or write", async (t) => {
 });
 
 test("worker closed resolves when product close rejects", async (t) => {
-  const product = new FakeProduct(); product.closeError = true; const { worker, daemon, serving } = await harness(t, product); daemon.close();
-  await worker.closed; assert.match((await serving).message, /close failed/);
+  const product = new FakeProduct(); product.closeError = new Error("close failed"); const { worker, daemon, serving } = await harness(t, product); daemon.close();
+  await worker.closed; await serving; assert.equal(product.calls[5], 1);
 });
 
 test("one chunk is admitted before its first callback", async (t) => {
@@ -115,10 +115,11 @@ for (const row of rows) test(`lifecycle: ${row.name}`, async (t) => {
       const { daemon } = await harness(t, product); const expected = { ok: ["completed", "ok", false], interrupted: ["interrupted", "", false], fail: ["failed", "failed exactly", false], completed: ["completed", "", false], long: ["completed", "x".repeat(262144), true] };
       for (const [input, want] of Object.entries(expected)) { result = await daemon.call("turn.run", { ...target, input }); assert.deepEqual([result.outcome, result.result, !!result.truncated], want); } break;
     }
-    case "one-run": case "one-interrupt": case "full-duplex": case "callback-originated-method": case "close-during-run": case "run-done": {
+    case "one-run": case "one-interrupt": case "interrupt-error": case "full-duplex": case "callback-originated-method": case "close-during-run": case "run-done": {
       product.started = deferred(); product.release = deferred(); const { daemon } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "block" }); const run = await product.started.promise;
       if (row.name === "one-run") await errorCode(daemon.call("turn.run", { ...target, input: "again" }), -32003);
       if (row.name === "one-interrupt") { product.interrupted = deferred(); await Promise.all([daemon.call("turn.interrupt", target), daemon.call("turn.interrupt", target)]); await product.interrupted.promise; }
+      if (row.name === "interrupt-error") { product.interruptError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); await daemon.call("turn.interrupt", target); assert.equal(stderr(), 'agentbus: product interrupt: "first failure\\nsecond failure"\n'); }
       if (row.name === "full-duplex" || row.name === "callback-originated-method") { product.outbound = true; assert.equal((await daemon.call("message.deliver", delivery)).disposition, "injected"); }
       if (row.name === "run-done") { let done = false; run.Done.then(() => { done = true; }); await Promise.resolve(); assert.equal(done, false); }
       if (row.name === "close-during-run") {
@@ -146,10 +147,17 @@ for (const row of rows) test(`lifecycle: ${row.name}`, async (t) => {
     case "run-done-write-failure": {
       product.started = deferred(); product.release = deferred(); const { daemon, workerSocket, serving } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "block" }); const run = await product.started.promise; workerSocket.failNext = true; product.release.resolve(); await serving; await assert.rejects(running); await run.Done; break;
     }
+    case "close-error": {
+      product.closeError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); const { daemon } = await harness(t, product); assert.deepEqual(await daemon.call("session.close", target), {}); assert.equal(stderr(), 'agentbus: product close: "first failure\\nsecond failure"\n'); break;
+    }
     default: assert.fail(`unknown row ${row.name}`);
   }
   assert.deepEqual(product.calls, row.calls);
 });
+
+function captureStderr(t) {
+  const write = process.stderr.write; let output = ""; process.stderr.write = (chunk) => { output += chunk; return true; }; t.after(() => { process.stderr.write = write; }); return () => output;
+}
 
 async function peerLifetime() {
   const connections = [], scheduled = []; let scheduledReady = deferred(), holdHello; const env = { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }; let currentIdentity, deliveries = 0;
