@@ -165,13 +165,14 @@ test("peer delivery context aborts on EOF", async (t) => {
 });
 
 test("peer rehello cancellation keeps its late acknowledgement owned", async (t) => {
-  const endpoint = peerEndpoint(), admitted = deferred();
-  const peer = connectPeer({ product: "native-product", session_id: "session", name: "old", groups: [], info: {} }, async (_signal, _request, identity) => { admitted.resolve(identity); return { disposition: "injected" }; }, { SESSIONBUS_SOCKET: "/fixture/socket", SESSIONBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
+  const endpoint = peerEndpoint(), admitted = [];
+  const peer = connectPeer({ product: "native-product", session_id: "session", name: "old", groups: [], info: {} }, async (_signal, _request, identity) => { admitted.push(identity); return { disposition: "injected" }; }, { SESSIONBUS_SOCKET: "/fixture/socket", SESSIONBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
   t.after(() => { peer.shutdown(); endpoint.daemon.close(); }); await endpoint.daemon.result(await endpoint.next(), {}); await peer.ready;
+  await peer.rehello(undefined, "old", {}); const called = peer.call("session.list", {}), request = await endpoint.next(); assert.equal(request.method, "session.list"); await endpoint.daemon.result(request, { sessions: [], hosts: [] }); await called;
   const controller = new AbortController(), changed = peer.rehello(controller.signal, "renamed", { revision: 2 }), hello = await endpoint.next(); controller.abort(new Error("caller cancelled"));
+  assert.deepEqual(await endpoint.daemon.call("message.deliver", { ...delivery, message_id: "before" }), { disposition: "injected" }); assert.equal(admitted.shift().name, "old");
   await assert.rejects(changed, /caller cancelled/); await endpoint.daemon.result(hello, {});
-  const delivered = endpoint.daemon.call("message.deliver", delivery); assert.deepEqual(await admitted.promise, { product: "native-product", session_id: "session", name: "renamed", groups: [], info: { revision: 2 } });
-  assert.deepEqual(await delivered, { disposition: "injected" });
+  assert.deepEqual(await endpoint.daemon.call("message.deliver", { ...delivery, message_id: "after" }), { disposition: "injected" }); assert.deepEqual(admitted.shift(), { product: "native-product", session_id: "session", name: "renamed", groups: [], info: { revision: 2 } });
 });
 
 test("peer shutdown closes a held replacement hello", async (t) => {

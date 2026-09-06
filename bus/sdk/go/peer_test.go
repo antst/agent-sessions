@@ -49,6 +49,7 @@ func TestPeerDesiredIdentityAndDeepSnapshots(t *testing.T) {
 
 	fixtures = loadCallerFixtures(t)
 	first, second := fixtures.Sequences.CrossedRehello.First, fixtures.Sequences.CrossedRehello.Second
+	first.Name = "crossed first"
 	firstDone := make(chan error, 1)
 	go func() { firstDone <- peer.Rehello(context.Background(), first.Name, first.Info) }()
 	firstRequest := <-requests
@@ -76,7 +77,7 @@ func TestPeerRehelloCancellationKeepsLateAckOwned(t *testing.T) {
 	connections := make(chan net.Conn, 1)
 	connections <- client
 	usePeerDialer(t, func(string, string) (net.Conn, error) { return <-connections, nil })
-	admitted := make(chan PeerIdentity, 1)
+	admitted := make(chan PeerIdentity, 2)
 	peer, err := ConnectPeer(PeerIdentity{Product: "fixture-client", SessionID: "peer", Name: "initial", Groups: []string{}, Info: map[string]any{}}, func(_ context.Context, identity PeerIdentity, _ DeliveryRequest) (DeliveryReceipt, error) {
 		admitted <- identity
 		return DeliveryReceipt{Disposition: "injected"}, nil
@@ -86,18 +87,33 @@ func TestPeerRehelloCancellationKeepsLateAckOwned(t *testing.T) {
 	}
 	mustRPC(t, server.Result(<-requests, struct{}{}))
 	await(t, peer.Ready(), "peer ready")
+	if err = peer.Rehello(context.Background(), "initial", map[string]any{}); err != nil {
+		t.Fatalf("unchanged rehello = %v", err)
+	}
+	called := make(chan error, 1)
+	go func() { _, callErr := peer.Caller.List(context.Background(), SessionListRequest{}); called <- callErr }()
+	request := <-requests
+	if request.Method != "session.list" {
+		t.Fatalf("unchanged rehello sent %q", request.Method)
+	}
+	mustRPC(t, server.Result(request, SessionListResult{Sessions: []SessionSummary{}, Hosts: []HostProducts{}}))
+	mustRPC(t, <-called)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	renamed := make(chan error, 1)
 	go func() { renamed <- peer.Rehello(ctx, "renamed", map[string]any{"revision": 2}) }()
 	hello := <-requests
+	var receipt DeliveryReceipt
+	mustRPC(t, server.Call(context.Background(), "message.deliver", DeliveryRequest{MessageID: "before", From: DeliverySource{SessionID: "sender@local", Name: "sender@local", Product: "fixture", Groups: []string{}}, Body: "body"}, &receipt))
+	if identity := <-admitted; identity.Name != "initial" || len(identity.Info) != 0 {
+		t.Fatalf("pre-ack admitted identity = %#v", identity)
+	}
 	cancel()
 	if err = <-renamed; !errors.Is(err, context.Canceled) {
 		t.Fatalf("rehello cancellation = %v", err)
 	}
 	mustRPC(t, server.Result(hello, struct{}{}))
-	var receipt DeliveryReceipt
-	mustRPC(t, server.Call(context.Background(), "message.deliver", DeliveryRequest{MessageID: "message", From: DeliverySource{SessionID: "sender@local", Name: "sender@local", Product: "fixture", Groups: []string{}}, Body: "body"}, &receipt))
+	mustRPC(t, server.Call(context.Background(), "message.deliver", DeliveryRequest{MessageID: "after", From: DeliverySource{SessionID: "sender@local", Name: "sender@local", Product: "fixture", Groups: []string{}}, Body: "body"}, &receipt))
 	if identity := <-admitted; identity.Name != "renamed" || identity.Info["revision"] != float64(2) {
 		t.Fatalf("late ack identity = %#v", identity)
 	}
