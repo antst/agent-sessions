@@ -36,13 +36,67 @@ func AcquireSessionLock(socket, product, sessionID string) (*SessionLock, error)
 }
 
 func (l *SessionLock) File() *os.File { return l.file }
-func (l *SessionLock) Close() error   { return l.file.Close() }
+func (l *SessionLock) Close() error {
+	err := os.Remove(l.path)
+	if errors.Is(err, os.ErrNotExist) {
+		err = nil
+	}
+	return errors.Join(err, l.file.Close())
+}
 func (l *SessionLock) Rename(name string) error {
+	return l.rename(name, os.Link, os.SameFile)
+}
+
+func (l *SessionLock) rename(name string, link func(string, string) error, same func(os.FileInfo, os.FileInfo) bool) error {
 	if invalidPart(name) {
 		return errors.New("session lock path is invalid")
 	}
 	path := filepath.Join(filepath.Dir(l.path), name)
-	if err := os.Link(l.path, path); err != nil {
+	for {
+		err := link(l.path, path)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		stale, err := os.OpenFile(path, os.O_RDWR, 0o600)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err = syscall.Flock(int(stale.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			_ = stale.Close()
+			if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+				_ = os.Remove(l.path)
+				return errors.New("session busy")
+			}
+			return err
+		}
+		opened, openErr := stale.Stat()
+		current, pathErr := os.Stat(path)
+		if errors.Is(pathErr, os.ErrNotExist) || openErr == nil && pathErr == nil && !same(opened, current) {
+			_ = stale.Close()
+			continue
+		}
+		if openErr != nil || pathErr != nil {
+			_ = stale.Close()
+			return errors.Join(openErr, pathErr)
+		}
+		if err = os.Remove(path); err != nil {
+			_ = stale.Close()
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		err = link(l.path, path)
+		_ = stale.Close()
+		if err == nil {
+			break
+		}
 		if errors.Is(err, os.ErrExist) {
 			_ = os.Remove(l.path)
 			return errors.New("session busy")
