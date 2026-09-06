@@ -34,16 +34,9 @@ type streamTransport struct {
 	decoder *json.Decoder
 }
 
-func (s *streamTransport) Read(value any) error {
-	err := s.decoder.Decode(value)
-	if err != nil {
-		_ = s.output.Close()
-	}
-	return err
-}
+func (s *streamTransport) Read(value any) error  { return s.decoder.Decode(value) }
 func (s *streamTransport) Write(value any) error { return json.NewEncoder(s.input).Encode(value) }
 func (s *streamTransport) Close() error          { return s.input.Close() }
-func (s *streamTransport) closeRead() error      { return s.output.Close() }
 
 type appFrame struct {
 	ID     json.RawMessage `json:"id"`
@@ -135,7 +128,7 @@ func (c *appClient) write(value any) error {
 
 func (c *appClient) read() {
 	if stream, ok := c.transport.(*streamTransport); ok {
-		defer stream.closeRead()
+		defer stream.output.Close()
 	}
 	for {
 		var frame appFrame
