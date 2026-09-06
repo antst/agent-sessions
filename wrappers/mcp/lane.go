@@ -98,5 +98,5 @@ func wireFailure(err error) *failure {
 	if errors.As(err, &protocol) {
 		return &failure{Code: protocol.Code, Message: protocol.Message, Data: protocol.Data}
 	}
-	return &failure{Code: -32603, Message: "internal"}
+	return &failure{Code: -32603, Message: err.Error()}
 }
