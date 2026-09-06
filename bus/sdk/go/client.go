@@ -6,12 +6,21 @@ import (
 	"net"
 
 	"github.com/antst/agent-sessions/bus/internal/rpc"
+	"github.com/antst/agent-sessions/bus/internal/stateroot"
 )
 
 // Client is a framed connection without a session hello.
 type Client struct{ wire *rpc.Conn }
 
+func Socket() string {
+	socket, _ := stateroot.SessionSocket()
+	return socket
+}
+
 func Dial(socket string) (*Client, error) {
+	if socket == "" {
+		socket = Socket()
+	}
 	fd, err := net.Dial("unix", socket)
 	if err != nil {
 		return nil, err

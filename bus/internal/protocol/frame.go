@@ -103,7 +103,7 @@ func DecodeJSON(raw []byte, target any) error {
 	if err := decoder.Decode(target); err != nil {
 		return err
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+	if decoder.Decode(new(json.RawMessage)) != io.EOF {
 		return errInvalid
 	}
 	return nil
