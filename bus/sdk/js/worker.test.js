@@ -53,8 +53,8 @@ test("pre-aborted call has no pending request or write", async (t) => {
 });
 
 test("worker closed resolves when product close rejects", async (t) => {
-  const product = new FakeProduct(); product.closeError = new Error("close failed"); const { worker, daemon, serving } = await harness(t, product); daemon.close();
-  await worker.closed; await serving; assert.equal(product.calls[5], 1);
+  const product = new FakeProduct(); product.closeError = new Error("close failed"); const stderr = captureStderr(t); const { worker, daemon, serving } = await harness(t, product); daemon.close();
+  await worker.closed; await serving; assert.equal(product.calls[5], 1); assert.equal(stderr(), 'agentbus: product close: "close failed"\n');
 });
 
 test("one chunk is admitted before its first callback", async (t) => {
@@ -93,7 +93,7 @@ async function harness(t, product, options = {}) {
     if (request.method === "session.list") void (worker.opened ? daemon.result(request, { sessions: [] }) : daemon.error(request, -32011));
   });
   const serving = worker.serve().catch((error) => error); await hello.promise;
-  t.after(async () => { worker.shutdown(); daemon.close(); await serving; });
+  t.after(async () => { worker.Shutdown(); daemon.close(); await serving; });
   if (options.open !== false && options.acknowledge !== false) assert.deepEqual(await daemon.call("session.open", openRequest), { session_id: "product-session" });
   return { worker, daemon, workerSocket, serving };
 }
@@ -123,12 +123,12 @@ for (const row of rows) test(`lifecycle: ${row.name}`, async (t) => {
       if (row.name === "full-duplex" || row.name === "callback-originated-method") { product.outbound = true; assert.equal((await daemon.call("message.deliver", delivery)).disposition, "injected"); }
       if (row.name === "run-done") { let done = false; run.Done.then(() => { done = true; }); await Promise.resolve(); assert.equal(done, false); }
       if (row.name === "close-during-run") {
-        product.interrupted = deferred(); product.closeStart = deferred(); product.closeEnd = deferred(); product.hangInterrupt = true; const closing = daemon.call("session.close", target); await product.interrupted.promise; await daemon.call("turn.interrupt", target); product.release.resolve(); await running; await product.closeStart.promise; product.closeEnd.resolve(); await closing; break;
+        const stderr = captureStderr(t); product.interrupted = deferred(); product.closeStart = deferred(); product.closeEnd = deferred(); product.hangInterrupt = true; product.interruptError = new Error("first failure\nsecond failure"); const closing = daemon.call("session.close", target); await product.interrupted.promise; await daemon.call("turn.interrupt", target); product.release.resolve(); await running; await product.closeStart.promise; product.closeEnd.resolve(); await closing; assert.equal(stderr(), 'agentbus: product interrupt: "first failure\\nsecond failure"\n'); break;
       }
       product.release.resolve(); result = await running; await run.Done; if (row.name === "one-interrupt") assert.equal(run.Native, null); break;
     }
     case "eof-during-run": {
-      product.started = deferred(); const { daemon, worker, serving } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "eof" }); const run = await product.started.promise; daemon.close(); await serving; await assert.rejects(running); await run.Done; assert.equal(worker.controller.signal.aborted, true); break;
+      product.closeError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); product.started = deferred(); const { daemon, worker, serving } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "eof" }); const run = await product.started.promise; daemon.close(); await serving; await assert.rejects(running); await run.Done; assert.equal(worker.controller.signal.aborted, true); assert.equal(stderr(), 'agentbus: product close: "first failure\\nsecond failure"\n'); break;
     }
     case "peer-lifetime": { await peerLifetime(); const { daemon, serving } = await harness(t, product, { open: false }); await daemon.call("session.superseded", {}); await serving; break; }
     case "wrong-direction-request": { const { daemon, serving } = await harness(t, product, { open: false }); await errorCode(daemon.call("session.hello", { protocol: 1, product: "example-peer", launch_token: "again", supported_open_fields: [], extra_arguments: [] }), -32602); await serving; break; }
