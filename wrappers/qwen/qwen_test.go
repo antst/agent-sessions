@@ -94,7 +94,7 @@ func TestFreshOpenMintsV4AndRenames(t *testing.T) {
 	result, err := p.Open(context.Background(), sessionkit.OpenRequest{Name: "fresh@local", Open: sessionkit.OpenOptions{Cwd: directory}})
 	must(t, err)
 	check(t, len(result.SessionID) == 36 && result.SessionID[14] == '4' && strings.Contains("89ab", string(result.SessionID[19])), "session id = %q", result.SessionID)
-	must(t, p.Close(context.Background()))
+	must(t, p.Close(context.Background(), sessionkit.SessionCloseRequest{}))
 }
 
 func TestOpenValueAndArgumentErrors(t *testing.T) {
@@ -149,7 +149,7 @@ func TestOpenResumeUsesCapturedACPShapesAndScrubsBusEnv(t *testing.T) {
 	for _, name := range []string{host.SocketEnv, host.LocalKeyEnv, host.TokenEnv, host.SessionIDEnv, host.NameEnv, host.GroupsEnv} {
 		check(t, child[name] == "", "%s reached child: %#v", name, child)
 	}
-	must(t, p.Close(context.Background()))
+	must(t, p.Close(context.Background(), sessionkit.SessionCloseRequest{}))
 	t.Setenv("QWEN_TEST_RESUME_FRAME", "")
 	t.Setenv("QWEN_TEST_RESUME_ID", "22222222-3333-4444-8555-666666666666")
 	p = New(socket)
@@ -164,7 +164,7 @@ func TestRunDrainsPendingAndRestoresUndrained(t *testing.T) {
 	go func() { result, _ := p.Run(context.Background(), &sessionkit.Run{}, "first"); firstDone <- result }()
 	first := readRequest(t, productIn)
 	check(t, first.Method == "session/prompt", "request = %#v", first)
-	receipt, err := p.Deliver(context.Background(), delivery("MID"))
+	receipt, err := p.Deliver(context.Background(), delivery("MID"), nil)
 	must(t, err)
 	check(t, receipt.Disposition == "injected", "receipt = %#v", receipt)
 	writeFrame(t, productOut, `{"jsonrpc":"2.0","id":79,"method":"craft/drainMidTurnQueue","params":{"sessionId":"wrong"}}`)
@@ -181,7 +181,7 @@ func TestRunDrainsPendingAndRestoresUndrained(t *testing.T) {
 	go func() { result, _ := p.Run(context.Background(), &sessionkit.Run{}, "second"); secondDone <- result }()
 	second := readRequest(t, productIn)
 	check(t, !bytes.Contains(second.Raw, []byte("MID")), "claimed message replayed: %s", second.Raw)
-	receipt, err = p.Deliver(context.Background(), delivery("UNDRAINED"))
+	receipt, err = p.Deliver(context.Background(), delivery("UNDRAINED"), nil)
 	must(t, err)
 	check(t, receipt.Disposition == "injected", "receipt = %#v", receipt)
 	writeResult(t, productOut, second.ID, `{"stopReason":"end_turn"}`)
@@ -199,7 +199,7 @@ func TestDrainRequestIsHandledBeforeFollowingTerminal(t *testing.T) {
 	done := make(chan sessionkit.TurnResult, 1)
 	go func() { result, _ := p.Run(context.Background(), &sessionkit.Run{}, "turn"); done <- result }()
 	prompt := readRequest(t, productIn)
-	receipt, err := p.Deliver(context.Background(), delivery("ORDERED"))
+	receipt, err := p.Deliver(context.Background(), delivery("ORDERED"), nil)
 	must(t, err)
 	check(t, receipt.Disposition == "injected", "receipt = %#v", receipt)
 
@@ -245,7 +245,7 @@ func TestFailedPromptWriteRestoresPendingDelivery(t *testing.T) {
 		failed <- err
 	}()
 	<-writer.entered
-	receipt, err := p.Deliver(context.Background(), delivery("RESTORED"))
+	receipt, err := p.Deliver(context.Background(), delivery("RESTORED"), nil)
 	must(t, err)
 	check(t, receipt.Disposition == "injected", "receipt = %#v", receipt)
 	close(writer.release)
