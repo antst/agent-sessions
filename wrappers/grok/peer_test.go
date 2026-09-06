@@ -93,6 +93,7 @@ func TestProductHelperOwnsPeerAndLazilyObserves(t *testing.T) {
 	result := <-opened
 	must(t, result.err)
 	backend := result.backend
+	<-backend.peer.Ready()
 	check(t, backend.Caller() == backend.peer.Caller, "helper constructed a second Caller")
 	must(t, backend.Prepare(context.Background(), nil))
 	check(t, len(records(t, recordPath)) == 0, "tool preparation opened observer")
