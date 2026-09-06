@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -18,6 +19,7 @@ import (
 
 	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
 	"github.com/antst/sessionbus/wrappers/host"
+	"github.com/antst/sessionbus/wrappers/mcp"
 	"golang.org/x/sys/unix"
 )
 
@@ -134,6 +136,114 @@ func TestProductSessionIDsCreateDistinctPeers(t *testing.T) {
 		backend.Shutdown()
 		server.Close()
 	}
+}
+
+func TestPeerMCPServesWhileBusAdmissionIsHeld(t *testing.T) {
+	root := t.TempDir()
+	socket := filepath.Join(root, "sessionbus.sock")
+	server, hellos := fakeDaemon(t, socket)
+	defer server.Close()
+	t.Setenv(host.SocketEnv, socket)
+	environment := setEnvironment(setEnvironment(os.Environ(), grokSessionIDEnv, testSessionID), grokLeaderSocketEnv, filepath.Join(root, "leader.sock"))
+	backend, err := NewPeerBackend(context.Background(), environment)
+	must(t, err)
+	input, writeInput := io.Pipe()
+	readOutput, output := io.Pipe()
+	served := make(chan error, 1)
+	go func() {
+		served <- (&mcp.Server{Backend: backend}).Serve(context.Background(), input, output)
+		_ = output.Close()
+	}()
+	encoder := json.NewEncoder(writeInput)
+	must(t, encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": map[string]any{}}))
+	must(t, encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": map[string]any{}}))
+	scanner := bufio.NewScanner(readOutput)
+	seen := map[float64]bool{}
+	for len(seen) != 2 {
+		check(t, scanner.Scan(), "MCP response absent: %v", scanner.Err())
+		var response map[string]any
+		must(t, json.Unmarshal(scanner.Bytes(), &response))
+		seen[response["id"].(float64)] = response["result"] != nil
+	}
+	check(t, seen[1] && seen[2], "MCP admission responses = %#v", seen)
+	hello := <-hellos
+	hello.ack <- true
+	<-backend.peer.Ready()
+	check(t, backend.Caller() == backend.peer.Caller, "bus admission created a second Caller")
+	must(t, writeInput.Close())
+	must(t, <-served)
+	backend.Shutdown()
+}
+
+func TestPeerDeliveryOwnerShutdownCrossesBlockedRoster(t *testing.T) {
+	root := t.TempDir()
+	socket := filepath.Join(root, "sessionbus.sock")
+	server, hellos := fakeDaemon(t, socket)
+	defer server.Close()
+	t.Setenv(host.SocketEnv, socket)
+	recordPath := filepath.Join(root, "record")
+	t.Setenv("GROK_TEST_RECORD", recordPath)
+	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
+	t.Setenv("GROK_TEST_ROSTER_BLOCK", filepath.Join(root, "never"))
+	observerPID := filepath.Join(root, "observer.pid")
+	t.Setenv("GROK_TEST_OBSERVER_PID", observerPID)
+	environment := setEnvironment(setEnvironment(os.Environ(), grokSessionIDEnv, testSessionID), grokLeaderSocketEnv, filepath.Join(root, "leader.sock"))
+	backend, err := NewPeerBackend(context.Background(), environment)
+	must(t, err)
+	hello := <-hellos
+	hello.ack <- true
+	<-backend.peer.Ready()
+	delivered := make(chan peerDeliveryResult, 1)
+	go func() {
+		receipt, err := backend.deliver(context.Background(), backend.identity, delivery("blocked"))
+		delivered <- peerDeliveryResult{receipt: receipt, err: err}
+	}()
+	waitFrame(t, recordPath, "_x.ai/sessions/list", 1)
+	pidfd := interactivePidfd(t, observerPID)
+	defer unix.Close(pidfd)
+	closed := make(chan struct{})
+	go func() { backend.Shutdown(); close(closed) }()
+	<-closed
+	result := <-delivered
+	check(t, result.receipt.Reason == "shutting down" || errors.Is(result.err, context.Canceled), "blocked delivery = %#v / %v", result.receipt, result.err)
+	check(t, !processRunning(t, pidfd), "blocked observer survived helper shutdown")
+}
+
+func TestPeerDeliveryOwnerSerializesTwoReceipts(t *testing.T) {
+	root := t.TempDir()
+	socket := filepath.Join(root, "sessionbus.sock")
+	server, hellos := fakeDaemon(t, socket)
+	defer server.Close()
+	t.Setenv(host.SocketEnv, socket)
+	recordPath := filepath.Join(root, "record")
+	t.Setenv("GROK_TEST_RECORD", recordPath)
+	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
+	cwd, err := os.Getwd()
+	must(t, err)
+	t.Setenv("GROK_TEST_CWD", cwd)
+	environment := setEnvironment(setEnvironment(os.Environ(), grokSessionIDEnv, testSessionID), grokLeaderSocketEnv, filepath.Join(root, "leader.sock"))
+	backend, err := NewPeerBackend(context.Background(), environment)
+	must(t, err)
+	hello := <-hellos
+	hello.ack <- true
+	<-backend.peer.Ready()
+	results := make(chan peerDeliveryResult, 2)
+	for _, message := range []string{"first", "second"} {
+		go func(message string) {
+			request := delivery(message)
+			request.MessageID = message
+			receipt, err := backend.deliver(context.Background(), backend.identity, request)
+			results <- peerDeliveryResult{receipt: receipt, err: err}
+		}(message)
+	}
+	for range 2 {
+		result := <-results
+		must(t, result.err)
+		check(t, result.receipt.Disposition == "injected", "delivery receipt = %#v", result.receipt)
+	}
+	check(t, len(peerClientPIDs(t, records(t, recordPath))) == 1, "serialized deliveries opened more than one observer")
+	check(t, countFrames(records(t, recordPath), "_x.ai/interject") == 2, "serialized deliveries lost an interject")
+	backend.Shutdown()
 }
 
 func TestPeerHelperRequiresProductIdentity(t *testing.T) {
