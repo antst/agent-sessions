@@ -30,13 +30,18 @@ func run(ctx context.Context, arguments []string) error {
 		if len(arguments) == 1 && arguments[0] == "mcp" {
 			return runMCP(ctx)
 		}
-		plan, err := codex.InteractivePlan(arguments, os.Environ())
+		plan, coordinated, err := codex.InteractivePlan(arguments, os.Environ())
 		if err != nil {
 			return err
 		}
 		path, err := exec.LookPath(plan.Path)
 		if err != nil {
 			return err
+		}
+		if coordinated {
+			if err = codex.StartPeerDaemon(ctx, path); err != nil {
+				return err
+			}
 		}
 		return syscall.Exec(path, append([]string{path}, plan.Args...), plan.Env)
 	}

@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -70,15 +69,11 @@ func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
 }
 
 func startPeerApp() (*exec.Cmd, io.WriteCloser, io.Reader, error) {
-	home := strings.TrimSpace(os.Getenv("CODEX_HOME"))
-	if home == "" {
-		user, err := os.UserHomeDir()
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		home = filepath.Join(user, ".codex")
+	socket, err := appServerSocket()
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	command := exec.Command("codex", "app-server", "proxy", "--sock", filepath.Join(home, "app-server-control", "app-server-control.sock"))
+	command := exec.Command("codex", "app-server", "proxy", "--sock", socket)
 	command.Stderr = os.Stderr
 	command.Env = slices.DeleteFunc(os.Environ(), func(value string) bool {
 		key, _, _ := strings.Cut(value, "=")
@@ -216,14 +211,17 @@ func (b *PeerBackend) observe(ctx context.Context, id string) (sessionkit.PeerId
 	return sessionkit.PeerIdentity{Product: "codex", SessionID: id, Name: first(strings.TrimSpace(result.Thread.Name), id), Groups: append([]string{}, b.groups...), Info: map[string]any{"cwd": strings.TrimSpace(result.Thread.Cwd)}}, nil
 }
 
-func (b *PeerBackend) deliver(ctx context.Context, request sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
+func (b *PeerBackend) deliver(ctx context.Context, admitted sessionkit.PeerIdentity, request sessionkit.DeliveryRequest) (receipt sessionkit.DeliveryReceipt, err error) {
+	defer func() {
+		if ctx.Err() != nil {
+			receipt, err = sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "closing"}, nil
+		}
+	}()
 	message, err := host.RenderNativeMessage(request)
 	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
-	b.mu.Lock()
-	id := b.identity.SessionID
-	b.mu.Unlock()
+	id := admitted.SessionID
 	var read threadReply
 	if err = b.app.call(ctx, "thread/read", map[string]any{"threadId": id, "includeTurns": false}, &read); err != nil {
 		return sessionkit.DeliveryReceipt{}, err

@@ -1,7 +1,12 @@
 package codex
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -16,6 +21,8 @@ var processRules = []host.ArgumentRule{
 	{Name: "--disable", TakesValue: true},
 	{Name: "--search"},
 }
+
+var peerDaemonCommand = exec.CommandContext
 
 func processArguments(arguments []string) ([]string, error) {
 	return host.BuildArguments(arguments, processRules)
@@ -60,7 +67,7 @@ func namePart(name string) (string, error) {
 	return name[:index], nil
 }
 
-func InteractivePlan(arguments, environment []string) (host.ExecPlan, error) {
+func InteractivePlan(arguments, environment []string) (host.ExecPlan, bool, error) {
 	originalEnvironment := environment
 	if !slices.ContainsFunc(environment, func(value string) bool { return strings.HasPrefix(value, host.SocketEnv+"=") }) {
 		environment = append(environment, host.SocketEnv+"="+sessionkit.Socket())
@@ -77,15 +84,44 @@ func InteractivePlan(arguments, environment []string) (host.ExecPlan, error) {
 		return !attached && codexOptionTakesValue(key)
 	})
 	if err != nil {
-		return host.ExecPlan{}, err
+		return host.ExecPlan{}, false, err
 	}
 	if passthrough {
-		return host.ExecPlan{Path: "codex", Args: arguments, Env: originalEnvironment}, nil
+		return host.ExecPlan{Path: "codex", Args: arguments, Env: originalEnvironment}, false, nil
 	}
 	if remote {
-		return host.ExecPlan{}, errors.New("caller-controlled --remote options are not supported")
+		return host.ExecPlan{}, false, errors.New("caller-controlled --remote options are not supported")
 	}
-	return plan, nil
+	socket, err := appServerSocket()
+	if err != nil {
+		return host.ExecPlan{}, false, err
+	}
+	plan.Args = append([]string{"--remote", "unix://" + socket}, plan.Args...)
+	return plan, true, nil
+}
+
+func appServerSocket() (string, error) {
+	home := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if home == "" {
+		user, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		home = filepath.Join(user, ".codex")
+	}
+	return filepath.Join(home, "app-server-control", "app-server-control.sock"), nil
+}
+
+func StartPeerDaemon(ctx context.Context, path string) error {
+	command := peerDaemonCommand(ctx, path, "app-server", "daemon", "start")
+	command.Env = slices.DeleteFunc(os.Environ(), func(value string) bool {
+		key, _, _ := strings.Cut(value, "=")
+		return strings.HasPrefix(key, "AGENTBUS_")
+	})
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("start Codex App Server: %w", err)
+	}
+	return nil
 }
 
 func codexSubcommand(argument string) bool {

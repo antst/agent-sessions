@@ -123,13 +123,17 @@ func TestPeerDeliveryActiveAndIdle(t *testing.T) {
 	for _, status := range []string{"active", "idle"} {
 		t.Run(status, func(t *testing.T) {
 			b, app := testPeer(t)
-			b.identity.SessionID = "thread-1"
+			b.identity.SessionID = "replacement-thread"
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
 				decoder := json.NewDecoder(app)
 				var request appRequest
 				_ = decoder.Decode(&request)
+				if !strings.Contains(string(request.Params), `"threadId":"thread-1"`) {
+					t.Errorf("admitted identity = %s", request.Params)
+					return
+				}
 				writeApp(t, app, map[string]any{"id": request.ID, "result": map[string]any{"thread": map[string]any{"id": "thread-1", "status": map[string]string{"type": status}}}})
 				_ = decoder.Decode(&request)
 				if status == "active" {
@@ -152,7 +156,7 @@ func TestPeerDeliveryActiveAndIdle(t *testing.T) {
 					writeApp(t, app, map[string]any{"id": request.ID, "result": map[string]any{"turn": map[string]string{"id": "turn-2"}}})
 				}
 			}()
-			receipt, err := b.deliver(context.Background(), sessionkit.DeliveryRequest{MessageID: "message-1", From: sessionkit.DeliverySource{SessionID: "sender", Product: "example", Groups: []string{}}, Body: "hello"})
+			receipt, err := b.deliver(context.Background(), sessionkit.PeerIdentity{SessionID: "thread-1"}, sessionkit.DeliveryRequest{MessageID: "message-1", From: sessionkit.DeliverySource{SessionID: "sender", Product: "example", Groups: []string{}}, Body: "hello"})
 			if err != nil || receipt.Disposition != "injected" {
 				t.Fatalf("receipt = %#v, %v", receipt, err)
 			}
@@ -187,7 +191,7 @@ func TestPeerDeliveryRejectsUnverifiedThreadState(t *testing.T) {
 					writeApp(t, app, map[string]any{"id": request.ID, "result": response})
 				}
 			}()
-			_, err := b.deliver(context.Background(), sessionkit.DeliveryRequest{MessageID: "message-1", From: sessionkit.DeliverySource{SessionID: "sender", Product: "example", Groups: []string{}}, Body: "hello"})
+			_, err := b.deliver(context.Background(), sessionkit.PeerIdentity{SessionID: "thread-1"}, sessionkit.DeliveryRequest{MessageID: "message-1", From: sessionkit.DeliverySource{SessionID: "sender", Product: "example", Groups: []string{}}, Body: "hello"})
 			if err == nil {
 				t.Fatal("delivery succeeded")
 			}
@@ -198,6 +202,16 @@ func TestPeerDeliveryRejectsUnverifiedThreadState(t *testing.T) {
 				t.Fatalf("calls = %d", calls)
 			}
 		})
+	}
+}
+
+func TestPeerDeliveryRejectsCanceledIdentity(t *testing.T) {
+	b, _ := testPeer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	receipt, err := b.deliver(ctx, sessionkit.PeerIdentity{SessionID: "old-thread"}, sessionkit.DeliveryRequest{MessageID: "message-1", From: sessionkit.DeliverySource{SessionID: "sender", Product: "example", Groups: []string{}}, Body: "hello"})
+	if err != nil || receipt.Disposition != "rejected" || receipt.Reason != "closing" || b.app.next != 0 {
+		t.Fatalf("receipt = %#v, calls = %d, error = %v", receipt, b.app.next, err)
 	}
 }
 
