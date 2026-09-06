@@ -523,9 +523,13 @@ Each numbered gate completes before the next begins.
     >=11.5.1, tests the package, and publishes
     `@sessionbus/kit@0.1.0-pre.2` with provenance. Wait until
     `npm view @sessionbus/kit@0.1.0-pre.2` returns the expected version,
-    repository, provenance, and tarball integrity; download it and compare its
-    SHA-512/integrity and file list with the Step 8 candidate. This npm publish
-    is the first irreversible operation.
+    repository, and tarball integrity; download it and compare its
+    SHA-512/integrity and file list with the Step 8 candidate. Install that
+    exact version in an isolated fixture, run
+    `npm audit signatures --json --include-attestations`, and require a valid
+    attestation naming the GitHub `antst/sessionbus` repository, the candidate
+    root commit, and `.github/workflows/npm-publish.yml`. This npm publish is
+    the first irreversible operation.
 12. **Publish peers atomically.** After the kit registry verification, create
     `main` and `develop` at the one peers root commit on the truly empty GitHub
     and Forgejo repositories in atomic pushes. A nonempty target is an abort,
@@ -583,14 +587,25 @@ the rewrite window before contributors migrate clones. If the owner cannot
 confirm those actions, the repositories remain frozen even when their code
 gates are green.
 
+Temporary rewrite authority has unconditional owner cleanup. On every stop or
+abort after that authority is enabled—including a failed push, publication,
+verification, acceptance gate, or head deletion in Steps 9–15—the owner
+immediately disables force-push, restores required checks and reviews, and
+revokes every temporary rewrite credential or bypass before the executor
+returns. Resuming restoration or completion requires a fresh explicit owner
+decision to reopen the window; an earlier authorization is never reused.
+
 ## 10. Abort and rollback rule
 
-Before a force-push, rollback is local: discard the candidate root commits and
-leave all remotes untouched. After a force-push but before Step 11, do not
-improvise a partial history restoration: stop, preserve the observed remote
-refs, and have the owner choose either to complete the reviewed transaction or
-restore the frozen object IDs from verified `legacy-*` refs using the same
-explicit leases.
+The unconditional cleanup rule in Section 9 is a `finally` action on every
+exit from the rewrite sequence, successful or failed; no error path may leave
+force-push, a bypass, or a rewrite credential enabled. Before a force-push,
+rollback is local: discard the candidate root commits and leave all remotes
+untouched. After a force-push but before Step 11, do not improvise a partial
+history restoration: stop, preserve the observed remote refs, and have the
+owner choose either to complete the reviewed transaction or restore the frozen
+object IDs from verified `legacy-*` refs using the same explicit leases. That
+later action begins only after the owner explicitly opens a new rewrite window.
 
 Publishing `@sessionbus/kit@0.1.0-pre.2` in Step 11 is irreversible: npm may
 permit deprecation, but the version can never be reused or made unpublished by
