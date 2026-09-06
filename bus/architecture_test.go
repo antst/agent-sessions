@@ -135,6 +135,8 @@ func TestFormerBrandGuardAllowsOnlyHistoricalPaths(t *testing.T) {
 		{"@" + "agent" + "bus/kit", true},
 		{"agent" + "_sessions", true},
 		{"agent" + "-sessions", true},
+		{"Agent\nSessions", true},
+		{"List agent sessions", false},
 		{"ff81565:cmd/" + "agent" + "-sessions/main.go", true},
 		{"`ff81565:cmd/" + "agent" + "-sessions/main.go:12`", false},
 		{"`ff81565:" + "agent" + "-sessions prose`", true},
@@ -152,6 +154,7 @@ func TestFormerBrandGuardAllowsOnlyHistoricalPaths(t *testing.T) {
 
 func containsFormerBrandReferences(contents []byte) bool {
 	evidence := []byte("/home/antst/agent" + "bus-evidence/")
+	cleaned := make([]byte, 0, len(contents))
 	for _, line := range bytes.Split(contents, []byte{'\n'}) {
 		for start := bytes.Index(line, evidence); start >= 0; start = bytes.Index(line, evidence) {
 			end := start + len(evidence)
@@ -166,11 +169,11 @@ func containsFormerBrandReferences(contents []byte) bool {
 				parts[index] = nil
 			}
 		}
-		if containsFormerBrand(bytes.Join(parts, nil)) {
-			return true
-		}
+		cleaned = append(cleaned, bytes.Join(parts, nil)...)
+		cleaned = append(cleaned, ' ')
 	}
-	return false
+	words := bytes.Join(bytes.Fields(cleaned), []byte{' '})
+	return containsFormerBrand(cleaned) || bytes.Contains(words, []byte("Agent "+"Sessions"))
 }
 
 func containsFormerBrand(value []byte) bool {
