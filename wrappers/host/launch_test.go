@@ -18,6 +18,13 @@ func TestLaneModeUsesTokenPresence(t *testing.T) {
 	check(t, !LaneMode(), "absent token selected lane mode")
 }
 
+func TestLaunchTokenDigestLength(t *testing.T) {
+	got := LaunchTokenDigest("secret launch token")
+	check(t, len(got) == 32, "digest length = %d, want 32", len(got))
+	check(t, got == LaunchTokenDigest("secret launch token"), "digest is not stable")
+	check(t, got != "secret launch token", "digest exposed launch token")
+}
+
 func TestInteractivePlan(t *testing.T) {
 	plan, err := InteractivePlan("example", []string{
 		"--model", "-g", "-g", "project", "--group=review", "--", "-g", "literal",
