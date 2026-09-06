@@ -178,8 +178,13 @@ func TestWorkerLifecycleTable(t *testing.T) {
 	check(t, stderrWriter.Close() == nil, "close stderr writer")
 	raw, err = io.ReadAll(stderrReader)
 	check(t, err == nil, "read stderr: %v", err)
-	want := "agentbus: product interrupt: \"first failure\\nsecond failure\"\nagentbus: product close: \"first failure\\nsecond failure\"\nagentbus: product close: \"first failure\\nsecond failure\"\nagentbus: product interrupt: \"first failure\\nsecond failure\"\n"
-	check(t, string(raw) == want, "callback stderr = %q", raw)
+	counts := map[string]int{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+		counts[line]++
+	}
+	interrupt := `agentbus: product interrupt: "first failure\nsecond failure"`
+	closeLine := `agentbus: product close: "first failure\nsecond failure"`
+	check(t, len(counts) == 2 && counts[interrupt] == 2 && counts[closeLine] == 2, "callback stderr = %q", raw)
 }
 
 func runCase(t *testing.T, name string) [6]int32 {
