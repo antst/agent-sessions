@@ -93,7 +93,7 @@ async function harness(t, product, options = {}) {
     if (request.method === "session.list") void (worker.opened ? daemon.result(request, { sessions: [] }) : daemon.error(request, -32011));
   });
   const serving = worker.serve().catch((error) => error); await hello.promise;
-  t.after(async () => { worker.Shutdown(); daemon.close(); await serving; });
+  t.after(async () => { worker.shutdown(); daemon.close(); await serving; });
   if (options.open !== false && options.acknowledge !== false) assert.deepEqual(await daemon.call("session.open", openRequest), { session_id: "product-session" });
   return { worker, daemon, workerSocket, serving };
 }
@@ -143,7 +143,7 @@ for (const row of rows) test(`lifecycle: ${row.name}`, async (t) => {
       const reads = {}, env = new Proxy({ AGENTBUS_LAUNCH_TOKEN: "token", AGENTBUS_LOCAL_KEY: "key", AGENTBUS_SOCKET: "/fixture/socket" }, { get(object, name) { reads[name] = (reads[name] || 0) + 1; return object[name]; } }); product.env = env;
       const worker = new Worker(product, env); await assert.rejects(worker.serve(), /local key/); assert.deepEqual(reads, { AGENTBUS_LAUNCH_TOKEN: 1, AGENTBUS_LOCAL_KEY: 1, AGENTBUS_SOCKET: 1 }); assert.deepEqual(env, {}); break;
     }
-    case "shutdown": { const { worker, serving } = await harness(t, product, { open: false }); worker.Shutdown(); worker.Shutdown(); await serving; break; }
+    case "shutdown": { const { worker, serving } = await harness(t, product, { open: false }); worker.shutdown(); worker.shutdown(); await serving; break; }
     case "run-done-write-failure": {
       product.started = deferred(); product.release = deferred(); const { daemon, workerSocket, serving } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "block" }); const run = await product.started.promise; workerSocket.failNext = true; product.release.resolve(); await serving; await assert.rejects(running); await run.Done; break;
     }

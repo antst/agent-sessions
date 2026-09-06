@@ -41,9 +41,9 @@ class Worker {
     } finally { this.run?.finish?.(); try { await this._closeProduct(); } finally { this.finish(cause); } }
   }
   call(method, params, signal = this.controller.signal) { return this.connection.call(method, params, signal); }
-  Shutdown() { this.connection?.close(); }
+  shutdown() { this.connection?.close(); }
   _handle(request) {
-    if (request.method === "session.superseded") { void this.connection.result(request, {}).finally(() => this.Shutdown()); return; }
+    if (request.method === "session.superseded") { void this.connection.result(request, {}).finally(() => this.shutdown()); return; }
     if (request.method === "session.open") { queueMicrotask(() => void this._open(request)); return; }
     if (request.method === "turn.run") {
       if (!this.opened || this.run) { void this.connection.error(request, -32003); return; }
@@ -58,7 +58,7 @@ class Worker {
     if (request.method === "message.deliver") { if (this.run && !this.run.Done) void this.connection.result(request, { disposition: "rejected", reason: "closing" }); else queueMicrotask(() => void this._deliver(request)); return; }
     if (request.method === "session.close") {
       const run = this.run;
-      if (run && !run.Done) return this.Shutdown();
+      if (run && !run.Done) return this.shutdown();
       this.run = {};
       const call = run && !run.interrupted;
       if (run) run.interrupted = true;
@@ -67,28 +67,28 @@ class Worker {
   }
   async _open(request) {
     let result; try { result = await this.callbacks.open(this.controller.signal, request.params); } catch (error) { await this._replyError(request, -32009, { stderr_tail: [clean(error)] }); return; }
-    this.opened = true; try { await this.connection.result(request, result); } catch { this.Shutdown(); }
+    this.opened = true; try { await this.connection.result(request, result); } catch { this.shutdown(); }
   }
   async _run(request, run) {
     let result; try { result = await this.callbacks.run(run.controller.signal, run, request.params.input); } catch (error) { result = { outcome: "failed", result: clean(error) }; }
     run.controller.abort(); result = terminal(result);
-    try { await this.connection.result(request, result); if (this.run === run) this.run = null; } catch { this.Shutdown(); } finally { run.finish(); }
+    try { await this.connection.result(request, result); if (this.run === run) this.run = null; } catch { this.shutdown(); } finally { run.finish(); }
   }
   async _interrupt(request, run, call) {
     try { if (call && !run.controller.signal.aborted) await this.callbacks.interrupt(run.controller.signal, run); } catch (error) { callbackError("interrupt", error); }
-    try { await this.connection.result(request, {}); } catch { this.Shutdown(); }
+    try { await this.connection.result(request, {}); } catch { this.shutdown(); }
   }
   async _deliver(request) {
     let receipt; try { receipt = await this.callbacks.deliver(this.controller.signal, request.params); } catch (error) { receipt = { disposition: "rejected", reason: clean(error) }; }
-    try { await this.connection.result(request, receipt); } catch { this.Shutdown(); }
+    try { await this.connection.result(request, receipt); } catch { this.shutdown(); }
   }
   async _close(request, run, interrupt) {
     if (interrupt) void Promise.resolve().then(() => this.callbacks.interrupt(run.controller.signal, run)).catch((error) => callbackError("interrupt", error)); if (run) await run.Done; this.controller.abort();
     await this._closeProduct();
-    try { await this.connection.result(request, {}); } catch { this.Shutdown(); } finally { this.Shutdown(); }
+    try { await this.connection.result(request, {}); } catch { this.shutdown(); } finally { this.shutdown(); }
   }
   async _closeProduct() { if (!this.opened || this.closedProduct) return; this.closedProduct = true; try { await this.callbacks.close(this.controller.signal); } catch (error) { callbackError("close", error); } }
-  async _replyError(request, code, data) { try { await this.connection.error(request, code, data); } catch { this.Shutdown(); } }
+  async _replyError(request, code, data) { try { await this.connection.error(request, code, data); } catch { this.shutdown(); } }
 }
 
 class Peer {
