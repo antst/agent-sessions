@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Shared installed hook and MCP entry point. Product manifests pass the exact
-# multi-call command and product; this wrapper only selects the installed image.
-host_binary="${AGENT_SESSIONS_HOST_BINARY:-${HOME}/.local/bin/agent-sessions}"
-if [[ ! -x "$host_binary" ]]; then
-  printf 'agent-sessions: unified client is not installed; run make install-all first\n' >&2
+# Grok starts this stdio MCP entry in both peer and lane mode.
+peer_binary="${AGENTBUS_GROK_PEER_BINARY:-${HOME}/.local/bin/grok-peer}"
+if [[ ! -x "$peer_binary" ]]; then
+  printf 'agent-sessions: grok-peer is not installed\n' >&2
   exit 1
 fi
-exec "$host_binary" "$@"
+exec "$peer_binary" mcp
