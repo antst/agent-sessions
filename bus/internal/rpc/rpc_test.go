@@ -161,16 +161,6 @@ func TestInvalidRequestRepliesThenCloses(t *testing.T) {
 	}
 }
 
-func TestEOFFailsPendingOnce(t *testing.T) {
-	local, peer := net.Pipe()
-	c := New(local, true, nil)
-	returned := asyncCall(c, context.Background())
-	_ = readFrame(t, peer)
-	_, _ = peer.Write([]byte("{"))
-	_ = peer.Close()
-	check(t, <-returned != nil, "pending call succeeded after EOF")
-}
-
 func TestCloseIsIdempotent(t *testing.T) {
 	local, peer := net.Pipe()
 	counted := &signalWriteConn{Conn: local, entered: make(chan struct{})}
@@ -199,19 +189,31 @@ func TestOversizeFrameClosesAtBound(t *testing.T) {
 	check(t, <-written != nil, "oversize writer was not interrupted")
 }
 
-func TestMalformedPendingResponseClosesAllCalls(t *testing.T) {
-	local, peer := net.Pipe()
-	c := New(local, true, nil)
-	returned := make(chan error, 2)
-	for range 2 {
-		go func() {
-			returned <- c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{})
-		}()
+func TestBadInboundClosesPendingCalls(t *testing.T) {
+	tests := []struct {
+		name, body string
+	}{
+		{"partial frame EOF", `{`},
+		{"empty frame", "\n"},
+		{"result and error", `{"jsonrpc":"2.0","id":1,"result":{},"error":{"code":-32002,"message":"not_connected"}}` + "\n"},
+		{"trailing empty object", `{"jsonrpc":"2.0","id":1,"result":{"sessions":[]}}{}` + "\n"},
+		{"trailing null", `{"jsonrpc":"2.0","id":1,"result":{"sessions":[]}}null` + "\n"},
+		{"trailing second object", `{"jsonrpc":"2.0","id":1,"result":{"sessions":[]}}{"other":true}` + "\n"},
 	}
-	first, second := readFrame(t, peer), readFrame(t, peer)
-	bad := fmt.Sprintf("{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":null}\n", min(first.ID, second.ID))
-	_, _ = io.WriteString(peer, bad)
-	check(t, <-returned != nil && <-returned != nil, "malformed response left a pending call")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			local, peer := net.Pipe()
+			c := New(local, true, nil)
+			first, second := asyncCall(c, context.Background()), asyncCall(c, context.Background())
+			_, _ = readFrame(t, peer), readFrame(t, peer)
+			_, _ = io.WriteString(peer, test.body)
+			if !strings.HasSuffix(test.body, "\n") {
+				_ = peer.Close()
+			}
+			check(t, <-first != nil && <-second != nil, "malformed input left a pending call")
+			_ = peer.Close()
+		})
+	}
 }
 
 func TestCloseCancelsAdmittedHandler(t *testing.T) {

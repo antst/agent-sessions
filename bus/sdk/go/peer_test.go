@@ -89,7 +89,18 @@ func TestPeerReconnectsButSupersededStops(t *testing.T) {
 	hello := <-requests1
 	mustRPC(t, server1.Result(hello, struct{}{}))
 	await(t, peer.Ready(), "peer ready")
+	started, err := peer.Caller.Start(TurnRunRequest{SessionID: "lane@local", Input: "block"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request := <-requests1; request.Method != "turn.run" {
+		t.Fatalf("method = %s", request.Method)
+	}
 	mustRPC(t, server1.Close())
+	status, err := peer.Caller.Wait(WaitRequest{TurnID: started.TurnID})
+	if err != nil || status.State != "unavailable" || status.Reason != unavailableReason {
+		t.Fatalf("EOF status = %#v, %v", status, err)
+	}
 	awaitConnection(t, peer, false)
 	if _, err = peer.Call(context.Background(), "session.list", SessionListRequest{}); !isCode(err, protocol.NotConnected) {
 		t.Fatalf("disconnected call = %v", err)
@@ -328,7 +339,10 @@ func startPeer(t *testing.T, socket, id string) *Peer {
 		t.Fatal(err)
 	}
 	await(t, peer.Ready(), "peer ready")
-	t.Cleanup(peer.Shutdown)
+	t.Cleanup(func() {
+		peer.Shutdown()
+		await(t, peer.Closed(), "peer closed")
+	})
 	return peer
 }
 
