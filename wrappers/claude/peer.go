@@ -91,7 +91,7 @@ func (b *PeerBackend) Prepare(ctx context.Context, _ json.RawMessage) error {
 	if identity.SessionID != old.SessionID {
 		return b.peer.Replace(ctx, identity)
 	}
-	return b.peer.Rehello(identity.Name, identity.Info)
+	return b.peer.Rehello(ctx, identity.Name, identity.Info)
 }
 
 func (b *PeerBackend) Caller() *sessionkit.Caller { return b.caller }

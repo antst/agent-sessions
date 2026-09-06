@@ -115,7 +115,7 @@ func TestNewTreeContainsNoFormerBrand(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if containsFormerBrandReferences(contents) {
+			if containsFormerBrandReferences(path, contents) {
 				t.Errorf("former brand remains in %s", path)
 			}
 			return nil
@@ -146,16 +146,38 @@ func TestFormerBrandGuardAllowsOnlyHistoricalPaths(t *testing.T) {
 		{"`/home/antst/" + "agent" + "bus-evidence/run/frame.json`", false},
 		{"`/home/antst/" + "agent" + "bus-evidence/run/mcp-agent" + "bus-frame.json`", false},
 	} {
-		if got := containsFormerBrandReferences([]byte(test.value)); got != test.want {
+		if got := containsFormerBrandReferences("../docs/designs/test.md", []byte(test.value)); got != test.want {
 			t.Errorf("guard(%q) = %v, want %v", test.value, got, test.want)
+		}
+	}
+	for _, test := range []struct {
+		path  string
+		value string
+		want  bool
+	}{
+		{"../docs/products/test.md", "```json\nagent" + "bus-probe\n```", false},
+		{"../docs/products/test.md", "```json\nvalue\n```\nagent" + "bus prose", true},
+		{"../docs/designs/test.md", "```json\nagent" + "bus-probe\n```", true},
+	} {
+		if got := containsFormerBrandReferences(test.path, []byte(test.value)); got != test.want {
+			t.Errorf("guard(%q, %q) = %v, want %v", test.path, test.value, got, test.want)
 		}
 	}
 }
 
-func containsFormerBrandReferences(contents []byte) bool {
+func containsFormerBrandReferences(path string, contents []byte) bool {
 	evidence := []byte("/home/antst/agent" + "bus-evidence/")
 	cleaned := make([]byte, 0, len(contents))
+	productFacts := strings.Contains(filepath.ToSlash(path), "/docs/products/")
+	inFence := false
 	for _, line := range bytes.Split(contents, []byte{'\n'}) {
+		if productFacts && bytes.HasPrefix(bytes.TrimSpace(line), []byte("```")) {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
 		for start := bytes.Index(line, evidence); start >= 0; start = bytes.Index(line, evidence) {
 			end := start + len(evidence)
 			for end < len(line) && !bytes.ContainsRune([]byte(" \t`; )"), rune(line[end])) {
