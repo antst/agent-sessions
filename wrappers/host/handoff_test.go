@@ -123,6 +123,46 @@ func TestHandoffFailedCreationRestoresPendingDelivery(t *testing.T) {
 	check(t, strings.Count(prompt, "older") == 1 && strings.Count(prompt, "pending") == 1 && strings.Index(prompt, "older") < strings.Index(prompt, "pending") && h.queueSize == 0, "prompt/size = %q/%d", prompt, h.queueSize)
 }
 
+func TestHandoffFailedCreationPreservesAdmissionOrder(t *testing.T) {
+	h := &Handoff{}
+	creating, fail := make(chan struct{}), make(chan struct{})
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := h.Run(context.Background(), &sessionkit.Run{}, "input", func(context.Context, string) (Turn, error) {
+			close(creating)
+			<-fail
+			return nil, errors.New("failed")
+		})
+		runDone <- err
+	}()
+	<-creating
+
+	aStarted, releaseA := make(chan struct{}), make(chan struct{})
+	aDone := make(chan sessionkit.DeliveryReceipt, 1)
+	go func() {
+		receipt, _ := h.Deliver(context.Background(), delivery("A-pending"), func(context.Context, string) (Injection, error) {
+			close(aStarted)
+			<-releaseA
+			return Pending, nil
+		})
+		aDone <- receipt
+	}()
+	<-aStarted
+	b, err := h.Deliver(context.Background(), delivery("B-queued"), func(context.Context, string) (Injection, error) { return NotInjected, nil })
+	must(t, err)
+	check(t, b.Disposition == "queued_for_next_turn", "B receipt = %#v", b)
+	close(fail)
+	check(t, (<-runDone).Error() == "failed", "creation did not fail")
+	close(releaseA)
+	check(t, (<-aDone).Disposition == "queued_for_next_turn", "A receipt was acknowledged")
+
+	next, prompt := newFakeTurn(), ""
+	close(next.done)
+	_, err = h.Run(context.Background(), &sessionkit.Run{}, "next", func(_ context.Context, got string) (Turn, error) { prompt = got; return next, nil })
+	must(t, err)
+	check(t, strings.Count(prompt, "A-pending") == 1 && strings.Count(prompt, "B-queued") == 1 && strings.Index(prompt, "A-pending") < strings.Index(prompt, "B-queued") && h.queueSize == 0, "prompt/size = %q/%d", prompt, h.queueSize)
+}
+
 func TestHandoffClaimAndFinish(t *testing.T) {
 	h := &Handoff{}
 	started, release := make(chan struct{}), make(chan struct{})
