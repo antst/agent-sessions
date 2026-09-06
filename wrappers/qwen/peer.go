@@ -50,6 +50,22 @@ func NewPeerBackend() *PeerBackend {
 	return b
 }
 
+func (b *PeerBackend) Start() error {
+	if b.failed != nil || b.peer != nil {
+		return nil
+	}
+	identity := b.identity
+	if title := nativeTitle(identity.SessionID); title != "" {
+		identity.Name = title
+	}
+	peer, err := sessionkit.ConnectPeer(identity, b.deliver)
+	if err != nil {
+		return err
+	}
+	b.identity, b.peer = identity, peer
+	return nil
+}
+
 func (b *PeerBackend) Prepare(ctx context.Context, _ json.RawMessage) error {
 	b.prepare.Lock()
 	defer b.prepare.Unlock()
@@ -61,36 +77,8 @@ func (b *PeerBackend) Prepare(ctx context.Context, _ json.RawMessage) error {
 	}
 	peer, identity := b.peer, b.identity
 	b.mu.Unlock()
-	created := peer == nil
 	if peer == nil {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if title := nativeTitle(identity.SessionID); title != "" {
-			identity.Name = title
-		}
-		b.mu.Lock()
-		if b.failed != nil {
-			err := b.failed
-			b.mu.Unlock()
-			return err
-		}
-		b.identity = identity
-		b.mu.Unlock()
-		var err error
-		peer, err = sessionkit.ConnectPeer(identity, b.deliver)
-		if err != nil {
-			return err
-		}
-		b.mu.Lock()
-		if b.failed != nil {
-			err := b.failed
-			b.mu.Unlock()
-			peer.Shutdown()
-			return err
-		}
-		b.peer = peer
-		b.mu.Unlock()
+		return errors.New("Qwen peer is not connected")
 	}
 	select {
 	case <-ctx.Done():
@@ -101,9 +89,6 @@ func (b *PeerBackend) Prepare(ctx context.Context, _ json.RawMessage) error {
 			return err
 		}
 		return errors.New("Qwen peer closed before ready")
-	}
-	if created {
-		return nil
 	}
 	observed := identity
 	if title := nativeTitle(identity.SessionID); title != "" {

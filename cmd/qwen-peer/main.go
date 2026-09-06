@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -55,14 +56,21 @@ func run(ctx context.Context, arguments []string) error {
 }
 
 func runMCP(ctx context.Context) error {
+	return serveMCP(ctx, os.Stdin, os.Stdout)
+}
+
+func serveMCP(ctx context.Context, input io.Reader, output io.Writer) error {
 	if os.Getenv(mcp.LaneSocketEnv) != "" {
 		backend, err := mcp.NewLaneBackend()
 		if err != nil {
 			return err
 		}
-		return (&mcp.Server{Backend: backend}).Serve(ctx, os.Stdin, os.Stdout)
+		return (&mcp.Server{Backend: backend}).Serve(ctx, input, output)
 	}
 	backend := qwen.NewPeerBackend()
+	if err := backend.Start(); err != nil {
+		return err
+	}
 	defer backend.Shutdown()
-	return (&mcp.Server{Backend: backend}).Serve(ctx, os.Stdin, os.Stdout)
+	return (&mcp.Server{Backend: backend}).Serve(ctx, input, output)
 }

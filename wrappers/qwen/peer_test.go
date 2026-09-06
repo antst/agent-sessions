@@ -25,6 +25,7 @@ func TestMCPInitializeDoesNotRequirePeerIdentityOrBus(t *testing.T) {
 	}
 	backend := NewPeerBackend()
 	defer backend.Shutdown()
+	must(t, backend.Start())
 	input := bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n")
 	var output bytes.Buffer
 	must(t, (&mcp.Server{Backend: backend}).Serve(context.Background(), input, &output))
@@ -56,6 +57,7 @@ func TestPeerPrepareRehellosAndDeliveryUsesInputFile(t *testing.T) {
 	go servePeer(t, listener, events)
 	backend := NewPeerBackend()
 	defer backend.Shutdown()
+	must(t, backend.Start())
 	must(t, backend.Prepare(context.Background(), nil))
 	initial := <-events
 	params := initial["params"].(map[string]any)
@@ -138,6 +140,7 @@ func TestCancelledInitialPrepareKeepsResidentPeer(t *testing.T) {
 		}
 	}()
 	backend := NewPeerBackend()
+	must(t, backend.Start())
 	caller := backend.caller
 	ctx, cancel := context.WithCancel(context.Background())
 	prepared := make(chan error, 1)

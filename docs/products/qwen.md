@@ -150,9 +150,9 @@ Provenance and tag legend:
   source: bundle:lib/chunks/chunk-4F7GQGXB.js:160402;
   bundle:lib/chunks/acpAgent-2GTFCIEP.js:17827-17841;
   docs/products/qwen-0.23.0-help.txt:33)
-- Resume selector passes to the native resume flag unchanged; native name/title lookup is
-  cwd/project-scoped, so resume must use the original cwd. (verified: pin;
-  source: docs/PRODUCTS.md:34)
+- UNVERIFIED: the old catalog says native name/title lookup is cwd/project-scoped, so
+  resume must use the original cwd. (unverified: old catalog; source:
+  docs/PRODUCTS.md:34)
 - Current peer identity observer accepts any UUID shape (no version check) — looser than
   the product's v1–v5 rule. (verified: pin; source: cmd/agent-sessions/qwen_peer.go:23)
 
@@ -257,6 +257,10 @@ Provenance and tag legend:
   round — moves back to the shared FIFO for the next run; no delivery is dropped between
   the native queue and the wrapper FIFO. (verified: n/a (design); source: picture
   docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1570)
+- A restored pending delivery survives only within the resident wrapper's lifetime;
+  wrapper exit may lose its in-memory FIFO by the accepted loss boundary. (verified:
+  n/a (design); source: docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1504;
+  /home/antst/agentbus-evidence/qwen-20260906T164729Z/RUN-SUMMARY.md)
 - Product drain mechanics (0.23.0): agent→client ext method `craft/drainMidTurnQueue`
   with `{sessionId}`; pulled at tool-run boundaries, stop-inspection, and stopped-run
   preservation; drained content becomes user parts inside the same running turn.
@@ -322,6 +326,18 @@ Provenance and tag legend:
 - Hand-started qwen without launcher identity: the MCP entry never hellos; every Agent
   Sessions tool call returns an error naming the required launcher. (verified: n/a
   (design); source: picture docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1488)
+- In the sealed zero-turn peer cell, Qwen 0.23.0 spawned the exact `qwen-peer mcp`
+  helper with session id, title, groups, bus socket, and input-file environment before
+  any prompt. The pre-fix helper completed MCP initialize and tools/list but published
+  no peer because it deferred `ConnectPeer` until tools/call. (verified: 0.23.0 + host
+  finding; source:
+  /home/antst/agentbus-evidence/qwen-peer-20260906T172159Z/{RUN-SUMMARY.md,cells/02-peer-tui/mcp-agentbus-env.txt,cells/02-peer-tui/roster.json})
+- The corrected root helper creates one resident Peer and Caller before serving MCP;
+  initialize and tools/list require no action, and Prepare gates later actions on that
+  same connection. Missing launcher identity still serves MCP discovery and reports the
+  identity error on tools/call. (verified: implementation; source:
+  wrappers/qwen/peer.go:32-118; cmd/qwen-peer/main.go:58-75;
+  cmd/qwen-peer/main_test.go)
 
 ## Interrupt and close
 
@@ -367,9 +383,10 @@ Provenance and tag legend:
 - Section 1 code exceptions: 0. Wrapper-only state: the bounded idle and recovery FIFO;
   native mid-turn drain state remains Qwen-owned. (verified: n/a (design); source:
   picture docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1572)
-- Wrapper size cap: 520 production / 600 test logical lines including ACP framing,
-  excluding the shared host. (verified: n/a (design); source: picture
-  docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1573)
+- Wrapper size cap: 740 production / 600 test logical lines including the lane and peer
+  end state, excluding the shared host. (verified: n/a (design); source: picture
+  docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1573; accepted per-block review,
+  2026-09-06)
 - Deletion inventory at migration: internal/products/qwen (4 files / 1,031 lines),
   internal/launcher qwen_peer files (3 / 1,412), cmd/agent-sessions qwen_peer files
   (2 / 234), qwen/scripts/native-entry (11): 10 files / 2,688 lines. (verified: pin —
