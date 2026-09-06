@@ -99,6 +99,8 @@ class Peer {
     this.schedule = options.schedule || ((call) => setTimeout(call, 2000));
     this.socket = environment(env, false).socket;
     this.terminal = false;
+    this.admitted = null;
+    this.identityController = null;
     this.closed = new Promise((resolve) => { this.finish = resolve; });
     this.ready = this._open();
     this.caller = new Caller(this, options.caller);
@@ -113,23 +115,25 @@ class Peer {
     const connection = this.connection;
     this.identity = snapshot(desired);
     const identity = this.identity;
-    if (replacement) { this.connection = null; this.caller.disconnected(); }
+    if (replacement) { this.identityController?.abort(new Error("not connected")); this.identityController = null; this.admitted = null; this.connection = null; this.caller.disconnected(); }
     if (!connection || connection.signal.aborted) throw new Error("not connected");
-    try { const result = await this._hello(connection, identity); if (replacement && (this.wire !== connection || connection.signal.aborted)) throw new Error("not connected"); if (replacement) this.connection = connection; return result; }
+    try { const result = await this._hello(connection, identity); if (replacement && (this.wire !== connection || connection.signal.aborted)) throw new Error("not connected"); return result; }
     catch (error) { if (connection.signal.aborted) throw new Error("not connected"); if (replacement) connection.close(); throw error; }
   }
-  shutdown() { this.terminal = true; this.wire?.close(); this.finish(); }
+  shutdown() { this.terminal = true; this.connection = null; this.identityController?.abort(new Error("not connected")); this.caller.disconnected(); this.wire?.close(); this.finish(); }
   async _open() {
     if (this.terminal) return; let connection; try { connection = new Connection(this.connect(this.socket), true, (request) => this._handle(request, connection)); } catch { this.schedule(() => { this.ready = this._open(); }, 2000); return; } this.wire = connection;
     try { await this._hello(connection); } catch { connection.close(); }
-    if (!connection.signal.aborted && this.wire === connection) this.connection = connection;
     if (!connection.signal.aborted) void connection.done.then(() => this._lost(connection)); else this._lost(connection);
   }
-  async _hello(connection, identity = this.identity) { for (;;) { const result = await connection.call("session.hello", { protocol: 1, ...identity }); if (identity === this.identity) return result; identity = this.identity; } }
-  _lost(connection) { if (this.wire !== connection || this.terminal) return; this.wire = null; this.connection = null; this.schedule(() => { this.ready = this._open(); }, 2000); }
+  async _hello(connection, identity = this.identity) { for (;;) { let installed = false; const result = await connection.call("session.hello", { protocol: 1, ...identity }, undefined, () => {
+    if (this.wire !== connection || this.terminal) throw new Error("not connected");
+    if (identity === this.identity) { if (this.admitted?.session_id !== identity.session_id || !this.identityController || this.identityController.signal.aborted) this.identityController = new AbortController(); this.admitted = identity; this.connection = connection; installed = true; }
+  }); if (installed) return result; identity = this.identity; } }
+  _lost(connection) { if (this.wire !== connection || this.terminal) return; this.wire = null; this.connection = null; this.admitted = null; this.identityController?.abort(connection.signal.reason); this.identityController = null; this.caller.disconnected(); this.schedule(() => { this.ready = this._open(); }, 2000); }
   _handle(request, connection) {
-    if (request.method === "session.superseded") { this.terminal = true; void connection.result(request, {}).finally(() => { connection.close(); this.finish(); }); return; }
-    if (request.method === "message.deliver") void Promise.resolve().then(() => this.deliver(connection.signal, request.params)).then((result) => connection.result(request, result), (error) => connection.result(request, { disposition: "rejected", reason: clean(error) })).catch(() => connection.close());
+    if (request.method === "session.superseded") { this.terminal = true; this.connection = null; this.caller.disconnected(); void connection.result(request, {}).finally(() => { this.identityController?.abort(new Error("superseded")); connection.close(); this.finish(); }); return; }
+    if (request.method === "message.deliver") { const current = this.connection === connection && this.admitted && this.identityController && !this.identityController.signal.aborted; const admission = current ? { identity: snapshot(this.admitted), signal: this.identityController.signal } : null; void Promise.resolve().then(() => admission ? this.deliver(admission.signal, request.params, admission.identity) : { disposition: "rejected", reason: "closing" }).then((result) => connection.result(request, result), (error) => connection.result(request, { disposition: "rejected", reason: clean(error) })).catch(() => connection.close()); }
   }
 }
 

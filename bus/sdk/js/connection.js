@@ -24,9 +24,9 @@ class Connection {
     stream.on("data", (chunk) => this._data(chunk)); stream.on("error", (error) => this.close(error)); stream.on("close", () => this.close());
   }
   get signal() { return this.controller.signal; }
-  async call(method, params, signal) {
+  async call(method, params, signal, observed) {
     const spec = METHODS[method]; if (!spec) throw new Error("invalid method"); if (signal?.aborted) throw signal.reason || new Error("aborted"); const id = ++this.next; if (!Number.isSafeInteger(id)) throw new Error("request id space exhausted");
-    let accept, reject; const result = new Promise((yes, no) => { accept = yes; reject = no; }); this.pending.set(id, { method, accept, reject });
+    let accept, reject; const result = new Promise((yes, no) => { accept = yes; reject = no; }); this.pending.set(id, { method, accept, reject, observed });
     const response = result.then((value) => [true, value], (error) => [false, error]);
     const abort = () => { if (this.pending.delete(id)) reject(signal.reason || new Error("aborted")); }; signal?.addEventListener("abort", abort, { once: true });
     try { await this._send({ jsonrpc: "2.0", id, method, params: JSON.parse(encode(spec[0], params)) }); const [ok, value] = await response; if (!ok) throw value; return value; }
@@ -56,7 +56,9 @@ class Connection {
       if (frame.id <= this.last || !allowed || !validate(spec[0], frame.params)) return this._reject(frame, true); this.last = frame.id; this.handler({ id: frame.id, method: frame.method, params: frame.params }); return true;
     }
     const pending = this.pending.get(frame.id); if (!pending) return true; this.pending.delete(frame.id);
-    if (frame.error ? validate("RPCError", frame.error) : validate(METHODS[pending.method][1], frame.result)) (frame.error ? pending.reject : pending.accept)(frame.error ? new ProtocolError(frame.error) : frame.result); else { pending.reject(new Error("invalid frame")); return false; }
+    if (!(frame.error ? validate("RPCError", frame.error) : validate(METHODS[pending.method][1], frame.result))) { pending.reject(new Error("invalid frame")); return false; }
+    try { if (!frame.error) pending.observed?.(); } catch (error) { pending.reject(error); return false; }
+    (frame.error ? pending.reject : pending.accept)(frame.error ? new ProtocolError(frame.error) : frame.result);
     return true;
   }
   _reject(frame, request) {

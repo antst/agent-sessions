@@ -85,6 +85,45 @@ test("peer replace settles old runs and reconnects with the new identity", async
   const reconnect = await second.next(); assert.deepEqual(reconnect.params, corrective.params); await second.daemon.result(reconnect, {}); await peer.ready;
 });
 
+test("peer delivery keeps its admission identity across replace", async (t) => {
+  const endpoint = peerEndpoint(), entered = deferred();
+  const identity = { product: "native-product", session_id: "old", name: "old", groups: ["old"], info: { nested: { value: "old" } } };
+  const peer = connectPeer(identity, async (signal, _request, admitted) => {
+    const seen = structuredClone(admitted); admitted.groups[0] = "mutated"; admitted.info.nested.value = "mutated"; entered.resolve({ seen, signal }); await aborted(signal);
+    return { disposition: "rejected", reason: "closing" };
+  }, { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
+  t.after(() => { peer.shutdown(); endpoint.daemon.close(); });
+  await endpoint.daemon.result(await endpoint.next(), {}); await peer.ready;
+  const delivering = endpoint.daemon.call("message.deliver", delivery), admission = await entered.promise;
+  assert.deepEqual(admission.seen, identity); assert.deepEqual(peer.identity, identity);
+  const replacing = peer.replace({ product: "native-product", session_id: "new", name: "new", groups: ["new"], info: {} }), replacement = await endpoint.next();
+  assert.equal(admission.signal.aborted, true); assert.deepEqual(await delivering, { disposition: "rejected", reason: "closing" });
+  await endpoint.daemon.result(replacement, {}); await replacing;
+});
+
+test("peer installs delivery identity before reading the next frame", async (t) => {
+  const endpoint = peerEndpoint(), called = deferred();
+  const identity = { product: "native-product", session_id: "session", name: "peer", groups: [], info: {} };
+  const peer = connectPeer(identity, async (signal, _request, admitted) => { called.resolve({ identity: admitted, signal }); return { disposition: "injected" }; }, { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
+  t.after(() => { peer.shutdown(); endpoint.daemon.close(); });
+  const hello = await endpoint.next(), response = { jsonrpc: "2.0", id: hello.id, result: {} }, request = { jsonrpc: "2.0", id: 1, method: "message.deliver", params: delivery };
+  endpoint.daemon.stream.write(`${JSON.stringify(response)}\n${JSON.stringify(request)}\n`); await peer.ready;
+  const admission = await called.promise; assert.equal(admission.identity.session_id, "session"); assert.equal(admission.signal.aborted, false);
+});
+
+test("peer delivery context aborts on EOF", async (t) => {
+  const endpoint = peerEndpoint(), entered = deferred(), finished = deferred();
+  const peer = connectPeer({ product: "native-product", session_id: "session", name: "peer", groups: [], info: {} }, async (signal) => { entered.resolve(signal); await aborted(signal); finished.resolve(); return { disposition: "rejected", reason: "closing" }; }, { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
+  t.after(() => peer.shutdown()); await endpoint.daemon.result(await endpoint.next(), {}); await peer.ready;
+  void endpoint.daemon.call("message.deliver", delivery).catch(() => {}); const signal = await entered.promise; endpoint.daemon.close(); await finished.promise; assert.equal(signal.aborted, true);
+});
+
+test("peer shutdown closes a held replacement hello", async (t) => {
+  const endpoint = peerEndpoint(), peer = connectPeer({ product: "native-product", session_id: "old", name: "old", groups: [], info: {} }, async () => ({ disposition: "injected" }), { AGENTBUS_SOCKET: "/fixture/socket", AGENTBUS_LOCAL_KEY: "" }, { connect: () => endpoint.client, schedule: () => {} });
+  t.after(() => endpoint.daemon.close()); await endpoint.daemon.result(await endpoint.next(), {}); await peer.ready;
+  const replacing = peer.replace({ product: "native-product", session_id: "new", name: "new", groups: [], info: {} }); await endpoint.next(); peer.shutdown(); await assert.rejects(replacing, /not connected|closed/); await peer.closed;
+});
+
 async function harness(t, product, options = {}) {
   const [workerSocket, daemonSocket] = pair(); const hello = deferred(); const env = { AGENTBUS_LAUNCH_TOKEN: "token", AGENTBUS_LOCAL_KEY: "", AGENTBUS_SOCKET: "/fixture/socket" }; product.env = env;
   const worker = new Worker(product, env, { connect: (socket) => { assert.equal(socket, "/fixture/socket"); return workerSocket; } }); product.worker = worker;
