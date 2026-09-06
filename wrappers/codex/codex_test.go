@@ -12,9 +12,9 @@ import (
 	"strings"
 	"testing"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
-	"github.com/antst/agent-sessions/wrappers/mcp"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
+	"github.com/antst/sessionbus/wrappers/mcp"
 )
 
 type turnDone struct {
@@ -34,7 +34,7 @@ func TestWrapperFreshOpenAndClose(t *testing.T) {
 		return exec.Command(os.Args[0], append([]string{"-test.run=TestCodexProcess", "--"}, arguments...)...)
 	}
 	t.Cleanup(func() { laneCommand = original })
-	socket := filepath.Join(t.TempDir(), "agentbus.sock")
+	socket := filepath.Join(t.TempDir(), "sessionbus.sock")
 	p := New(socket, "provisional")
 	p.backend = mcp.BackendFunc(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
 	result, err := p.Open(context.Background(), sessionkit.OpenRequest{
@@ -67,7 +67,7 @@ func TestWrapperFreshOpenAndClose(t *testing.T) {
 	if slices.Contains(observed.Env, host.TokenEnv) || !slices.Contains(observed.Env, mcp.LaneSocketEnv) {
 		t.Fatalf("env names = %v", observed.Env)
 	}
-	if len(observed.Calls) < 7 || observed.Calls[2].Method != "thread/start" || !strings.Contains(string(observed.Calls[2].Params), `"agent_sessions"`) || !strings.Contains(string(observed.Calls[2].Params), `"code_mode_host":false`) {
+	if len(observed.Calls) < 7 || observed.Calls[2].Method != "thread/start" || !strings.Contains(string(observed.Calls[2].Params), `"sessionbus"`) || !strings.Contains(string(observed.Calls[2].Params), `"code_mode_host":false`) {
 		t.Fatalf("calls = %#v", observed.Calls)
 	}
 	if _, err = os.Stat(filepath.Join(filepath.Dir(socket), "locks", "codex", "thread-1")); err != nil {
@@ -120,7 +120,7 @@ func TestCodexProcess(t *testing.T) {
 }
 
 func TestLargeTerminalFrameDrainsAfterExit(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "agentbus.sock")
+	socket := filepath.Join(t.TempDir(), "sessionbus.sock")
 	lock, err := host.AcquireSessionLock(socket, "codex", "thread-1")
 	if err != nil {
 		t.Fatal(err)
@@ -280,7 +280,7 @@ func TestCompletedTurnRequiresFinalAnswer(t *testing.T) {
 }
 
 func TestCapturedFailedTurn(t *testing.T) {
-	raw := `{"method":"turn/completed","params":{"threadId":"01a075f0-66ba-7b52-87a7-5dca3de53066","turn":{"id":"01a075f0-6737-7b02-ae86-c9be43e17c19","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'agentbus-invalid-model' model is not supported when using Codex with a ChatGPT account.\"}}","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"startedAt":1788685084,"completedAt":1788685085,"durationMs":1261}},"emittedAtMs":1788685085742}`
+	raw := `{"method":"turn/completed","params":{"threadId":"01a075f0-66ba-7b52-87a7-5dca3de53066","turn":{"id":"01a075f0-6737-7b02-ae86-c9be43e17c19","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'sessionbus-invalid-model' model is not supported when using Codex with a ChatGPT account.\"}}","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"startedAt":1788685084,"completedAt":1788685085,"durationMs":1261}},"emittedAtMs":1788685085742}`
 	var frame appFrame
 	var event struct {
 		Turn nativeTurn `json:"turn"`
@@ -289,7 +289,7 @@ func TestCapturedFailedTurn(t *testing.T) {
 		t.Fatal("decode captured failed turn")
 	}
 	result, err := terminal(event.Turn)
-	if err != nil || result.Outcome != "failed" || result.NativeStopReason != "failed" || !strings.Contains(result.Result, "agentbus-invalid-model") {
+	if err != nil || result.Outcome != "failed" || result.NativeStopReason != "failed" || !strings.Contains(result.Result, "sessionbus-invalid-model") {
 		t.Fatalf("terminal = %#v, %v", result, err)
 	}
 }

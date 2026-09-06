@@ -148,7 +148,7 @@ func TestServerUsesBackendCallerAfterPrepare(t *testing.T) {
 
 func TestServerUsesStatelessActionBackend(t *testing.T) {
 	backend := &actionBackend{}
-	response, err := serveOne(&Server{Backend: backend}, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"send","arguments":{"target":"peer","message":"hello"}}}}`)
+	response, err := serveOne(&Server{Backend: backend}, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sessionbus","arguments":{"action":"send","arguments":{"target":"peer","message":"hello"}}}}`)
 	check(t, err == nil, "serve: %v", err)
 	result := response["result"].(map[string]any)
 	check(t, backend.action == "send" && backend.arguments == `{"target":"peer","message":"hello"}` && result["structuredContent"].(map[string]any)["message_id"] == "message", "action/result = %#v / %#v", backend, result)

@@ -12,9 +12,9 @@ import (
 	"strings"
 	"sync"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
-	"github.com/antst/agent-sessions/wrappers/mcp"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
+	"github.com/antst/sessionbus/wrappers/mcp"
 )
 
 const Product = "codex-peer"
@@ -122,7 +122,7 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 		return sessionkit.OpenResult{}, err
 	}
 	if p.backend == nil {
-		return sessionkit.OpenResult{}, closeLaunch(lock, endpoint, errors.New("Agentbus lane backend is unavailable"))
+		return sessionkit.OpenResult{}, closeLaunch(lock, endpoint, errors.New("Sessionbus lane backend is unavailable"))
 	}
 	go func() { _ = mcp.ServeLane(ctx, endpoint, p.backend) }()
 	command := laneCommand("codex", append(arguments, "app-server", "--stdio")...)
@@ -150,7 +150,7 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 		_ = child.Close(ctx, func(context.Context) error { return p.app.close() })
 		return sessionkit.OpenResult{}, err
 	}
-	if err = p.app.initialize(ctx, "Agentbus Codex Wrapper"); err != nil {
+	if err = p.app.initialize(ctx, "Sessionbus Codex Wrapper"); err != nil {
 		return cleanup(err)
 	}
 	config := laneConfig(endpoint.Path)
@@ -526,7 +526,7 @@ func (p *Wrapper) Close(ctx context.Context) error {
 }
 
 func laneConfig(socket string) map[string]any {
-	return map[string]any{"features": map[string]any{"code_mode_host": false}, "mcp_servers": map[string]any{"agent_sessions": map[string]any{
+	return map[string]any{"features": map[string]any{"code_mode_host": false}, "mcp_servers": map[string]any{"sessionbus": map[string]any{
 		"command": Product, "args": []string{"mcp"}, "env": map[string]string{mcp.LaneSocketEnv: socket},
 	}}}
 }

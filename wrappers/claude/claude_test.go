@@ -64,16 +64,16 @@ func fakeChild(mode string) {
 }
 
 func TestLaunchArgumentsTable(t *testing.T) {
-	mcp := `{"mcpServers":{"agent_sessions":{"args":["mcp"],"command":"claude-peer","env":{"SESSIONBUS_LANE_SOCKET":"/tmp/lane.sock"}}}}`
+	mcp := `{"mcpServers":{"sessionbus":{"args":["mcp"],"command":"claude-peer","env":{"SESSIONBUS_LANE_SOCKET":"/tmp/lane.sock"}}}}`
 	base := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages"}
 	for _, test := range []struct {
 		name    string
 		request sessionkit.OpenRequest
 		want    []string
 	}{
-		{"fresh typed", sessionkit.OpenRequest{Name: "parent/leaf@local", Open: sessionkit.OpenOptions{Model: "sonnet", ReasoningEffort: "high", Arguments: []string{"--agent", "reviewer"}}}, append(append([]string{}, base...), "--session-id", fixtureID, "--name", "parent/leaf", "--permission-mode", "dontAsk", "--model", "sonnet", "--effort", "high", "--mcp-config", mcp, "--allowedTools", "mcp__agent_sessions__*", "--agent", "reviewer")},
-		{"resume bypass", sessionkit.OpenRequest{Name: "ignored@local", ResumeSessionID: fixtureID, Open: sessionkit.OpenOptions{PermissionMode: "bypassPermissions"}}, append(append([]string{}, base...), "--resume", fixtureID, "--dangerously-skip-permissions", "--mcp-config", mcp, "--allowedTools", "mcp__agent_sessions__*")},
-		{"native permission", sessionkit.OpenRequest{Name: "leaf@local", Open: sessionkit.OpenOptions{PermissionMode: "acceptEdits"}}, append(append([]string{}, base...), "--session-id", fixtureID, "--name", "leaf", "--permission-mode", "acceptEdits", "--mcp-config", mcp, "--allowedTools", "mcp__agent_sessions__*")},
+		{"fresh typed", sessionkit.OpenRequest{Name: "parent/leaf@local", Open: sessionkit.OpenOptions{Model: "sonnet", ReasoningEffort: "high", Arguments: []string{"--agent", "reviewer"}}}, append(append([]string{}, base...), "--session-id", fixtureID, "--name", "parent/leaf", "--permission-mode", "dontAsk", "--model", "sonnet", "--effort", "high", "--mcp-config", mcp, "--allowedTools", "mcp__sessionbus__*", "--agent", "reviewer")},
+		{"resume bypass", sessionkit.OpenRequest{Name: "ignored@local", ResumeSessionID: fixtureID, Open: sessionkit.OpenOptions{PermissionMode: "bypassPermissions"}}, append(append([]string{}, base...), "--resume", fixtureID, "--dangerously-skip-permissions", "--mcp-config", mcp, "--allowedTools", "mcp__sessionbus__*")},
+		{"native permission", sessionkit.OpenRequest{Name: "leaf@local", Open: sessionkit.OpenOptions{PermissionMode: "acceptEdits"}}, append(append([]string{}, base...), "--session-id", fixtureID, "--name", "leaf", "--permission-mode", "acceptEdits", "--mcp-config", mcp, "--allowedTools", "mcp__sessionbus__*")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := launchArguments(test.request, fixtureID, "/tmp/lane.sock")

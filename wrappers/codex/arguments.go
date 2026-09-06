@@ -10,8 +10,8 @@ import (
 	"slices"
 	"strings"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
 )
 
 var processRules = []host.ArgumentRule{
@@ -39,7 +39,7 @@ func configConflict(value string) string {
 	for prefix, field := range map[string]string{
 		"cwd": "cwd", "model": "model", "model_reasoning_effort": "reasoning_effort",
 		"approval_policy": "permission_mode", "sandbox": "permission_mode", "sandbox_mode": "permission_mode",
-		"thread_id": "session_id", "thread_name": "name", "mcp_servers.agent_sessions": "mcp",
+		"thread_id": "session_id", "thread_name": "name", "mcp_servers.sessionbus": "mcp",
 	} {
 		if key == prefix || strings.HasPrefix(key, prefix+".") {
 			return field
@@ -87,7 +87,7 @@ func InteractivePlan(arguments, environment []string) (host.ExecPlan, bool, erro
 	if slices.ContainsFunc(plan.Env, func(value string) bool {
 		return strings.HasPrefix(value, host.GroupsEnv+"=") && value != host.GroupsEnv+"=[]"
 	}) {
-		return host.ExecPlan{}, false, errors.New("Codex peer groups are configured by the installed agent_sessions MCP entry; reinstall with --codex-groups")
+		return host.ExecPlan{}, false, errors.New("Codex peer groups are configured by the installed sessionbus MCP entry; reinstall with --codex-groups")
 	}
 	if remote {
 		return host.ExecPlan{}, false, errors.New("caller-controlled --remote options are not supported")
@@ -119,7 +119,7 @@ func StartPeerDaemon(ctx context.Context, path string) error {
 	command := peerDaemonCommand(ctx, path, "app-server", "daemon", "start")
 	command.Env = slices.DeleteFunc(os.Environ(), func(value string) bool {
 		key, _, _ := strings.Cut(value, "=")
-		return strings.HasPrefix(key, "AGENTBUS_")
+		return strings.HasPrefix(key, "SESSIONBUS_")
 	})
 	if err := command.Run(); err != nil {
 		return fmt.Errorf("start Codex App Server: %w", err)

@@ -5,7 +5,7 @@ description: Start, collect, message, resume, and archive durable local or remot
 
 # Qwen lanes from Qwen
 
-Use the attested `agent_sessions.lane` MCP tool. Set `product` to `qwen`, the
+Use the attested `sessionbus.lane` MCP tool. Set `product` to `qwen`, the
 lifecycle verb in `command`, native arguments in `arguments`, and the briefing in
 `input`. Add `host` only for a target advertising `qwen-lane`; federation owns
 lifecycle flags and never falls back locally.

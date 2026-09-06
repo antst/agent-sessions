@@ -13,9 +13,9 @@ import (
 	"strings"
 	"sync"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
-	"github.com/antst/agent-sessions/wrappers/mcp"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
+	"github.com/antst/sessionbus/wrappers/mcp"
 )
 
 const Product = "qwen-peer"
@@ -101,7 +101,7 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 		return sessionkit.OpenResult{}, err
 	}
 	if p.backend == nil {
-		return sessionkit.OpenResult{}, closeLaunch(lock, endpoint, errors.New("Agentbus lane backend is unavailable"))
+		return sessionkit.OpenResult{}, closeLaunch(lock, endpoint, errors.New("Sessionbus lane backend is unavailable"))
 	}
 	go func() { _ = mcp.ServeLane(ctx, endpoint, p.backend) }()
 	command := laneCommand("qwen", arguments...)
@@ -395,7 +395,7 @@ var qwenArgumentRules = func() []host.ArgumentRule {
 }()
 
 func mcpServer(socket string) map[string]any {
-	return map[string]any{"name": "agent_sessions", "command": Product, "args": []string{"mcp"}, "env": []any{map[string]string{"name": mcp.LaneSocketEnv, "value": socket}}}
+	return map[string]any{"name": "sessionbus", "command": Product, "args": []string{"mcp"}, "env": []any{map[string]string{"name": mcp.LaneSocketEnv, "value": socket}}}
 }
 
 func current(options []configOption, id string) string {

@@ -12,12 +12,12 @@ import (
 	"strings"
 	"sync"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
-	"github.com/antst/agent-sessions/wrappers/mcp"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
+	"github.com/antst/sessionbus/wrappers/mcp"
 )
 
-const InputFileEnv = "AGENTBUS_QWEN_INPUT_FILE"
+const InputFileEnv = "SESSIONBUS_QWEN_INPUT_FILE"
 
 type PeerBackend struct {
 	mu       sync.Mutex
@@ -34,7 +34,7 @@ func NewPeerBackend() *PeerBackend {
 	b := &PeerBackend{input: os.Getenv(InputFileEnv)}
 	b.caller = sessionkit.NewCaller(b.Call)
 	if raw := os.Getenv(host.GroupsEnv); raw != "" && json.Unmarshal([]byte(raw), &groups) != nil {
-		b.failed = errors.New("AGENTBUS_GROUPS must be a JSON array")
+		b.failed = errors.New("SESSIONBUS_GROUPS must be a JSON array")
 		return b
 	}
 	if groups == nil {
@@ -227,7 +227,7 @@ func InteractivePlan(arguments, environment []string) (host.ExecPlan, error) {
 	}) {
 		return host.ExecPlan{}, errors.New("Qwen session selectors are owned by qwen-peer")
 	}
-	file, err := os.CreateTemp("", "agentbus-qwen-*.jsonl")
+	file, err := os.CreateTemp("", "sessionbus-qwen-*.jsonl")
 	if err != nil {
 		return host.ExecPlan{}, err
 	}

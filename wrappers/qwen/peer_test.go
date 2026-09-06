@@ -14,9 +14,9 @@ import (
 	"strings"
 	"testing"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
-	"github.com/antst/agent-sessions/wrappers/mcp"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
+	"github.com/antst/sessionbus/wrappers/mcp"
 )
 
 func TestMCPInitializeDoesNotRequirePeerIdentityOrBus(t *testing.T) {
@@ -31,7 +31,7 @@ func TestMCPInitializeDoesNotRequirePeerIdentityOrBus(t *testing.T) {
 	must(t, (&mcp.Server{Backend: backend}).Serve(context.Background(), input, &output))
 	check(t, strings.Contains(output.String(), `"protocolVersion":"2025-06-18"`), "initialize = %s", output.String())
 	check(t, backend.peer == nil, "initialize connected the peer")
-	input = bytes.NewBufferString(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"list","arguments":{}}}}` + "\n")
+	input = bytes.NewBufferString(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sessionbus","arguments":{"action":"list","arguments":{}}}}` + "\n")
 	output.Reset()
 	must(t, (&mcp.Server{Backend: backend}).Serve(context.Background(), input, &output))
 	check(t, strings.Contains(output.String(), "Qwen peer identity is unavailable; start Qwen with qwen-peer") && backend.peer == nil, "tool error = %s", output.String())
@@ -70,7 +70,7 @@ func TestPeerPrepareRehellosAndDeliveryUsesInputFile(t *testing.T) {
 	receipt, err := backend.deliver(context.Background(), sessionkit.PeerIdentity{SessionID: fixtureID}, delivery("hello"))
 	must(t, err)
 	body := mustRead(t, input)
-	check(t, receipt.Disposition == "injected" && bytes.Contains(body, []byte(`"type":"submit"`)) && bytes.Contains(body, []byte("[agentbus-metadata:")) && bytes.Contains(body, []byte("hello")), "receipt/body = %#v/%s", receipt, body)
+	check(t, receipt.Disposition == "injected" && bytes.Contains(body, []byte(`"type":"submit"`)) && bytes.Contains(body, []byte("[sessionbus-metadata:")) && bytes.Contains(body, []byte("hello")), "receipt/body = %#v/%s", receipt, body)
 }
 
 func TestInteractivePlanFreshResumeAndPassthrough(t *testing.T) {

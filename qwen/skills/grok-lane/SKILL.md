@@ -5,7 +5,7 @@ description: Start, collect, message, resume, and archive durable local or remot
 
 # Grok lanes from Qwen
 
-Use the attested `agent_sessions.lane` MCP tool. Set `product` to `grok`, the
+Use the attested `sessionbus.lane` MCP tool. Set `product` to `grok`, the
 lifecycle verb in `command`, native arguments in `arguments`, and the briefing in
 `input`. Add `host` only for a target advertising `grok-lane`; never use SSH or
 local fallback.

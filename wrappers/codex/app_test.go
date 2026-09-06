@@ -22,7 +22,7 @@ func TestAppClientCapturedFrames(t *testing.T) {
 	go func() {
 		line, _ := bufio.NewReader(serverSide).ReadString('\n')
 		requests <- line
-		_, _ = serverSide.Write([]byte("{\"id\":1,\"result\":{\"userAgent\":\"agentbus-probe/0.153.4\"}}\n"))
+		_, _ = serverSide.Write([]byte("{\"id\":1,\"result\":{\"userAgent\":\"sessionbus-probe/0.153.4\"}}\n"))
 		_, _ = serverSide.Write([]byte("{\"method\":\"turn/started\",\"params\":{\"threadId\":\"thread-1\",\"turn\":{\"id\":\"turn-1\"}}}\n"))
 	}()
 	var result struct {
@@ -35,7 +35,7 @@ func TestAppClientCapturedFrames(t *testing.T) {
 	if got := <-requests; got != want {
 		t.Fatalf("request = %s, want %s", got, want)
 	}
-	if result.UserAgent != "agentbus-probe/0.153.4" {
+	if result.UserAgent != "sessionbus-probe/0.153.4" {
 		t.Fatalf("result = %#v", result)
 	}
 	if got := <-notified; got != `turn/started {"threadId":"thread-1","turn":{"id":"turn-1"}}` {

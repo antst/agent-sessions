@@ -16,8 +16,8 @@ import (
 	"strings"
 	"testing"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
-	"github.com/antst/agent-sessions/wrappers/host"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
+	"github.com/antst/sessionbus/wrappers/host"
 )
 
 const fixtureID = "11111111-2222-4333-8444-555555555555"
@@ -31,7 +31,7 @@ func TestMain(m *testing.M) {
 }
 
 func fakeChild() {
-	record := map[string]any{"args": os.Args[1:], "lane_socket": os.Getenv("AGENTBUS_LANE_SOCKET")}
+	record := map[string]any{"args": os.Args[1:], "lane_socket": os.Getenv("SESSIONBUS_LANE_SOCKET")}
 	for _, name := range []string{host.SocketEnv, host.LocalKeyEnv, host.TokenEnv, host.SessionIDEnv, host.NameEnv, host.GroupsEnv} {
 		record[name] = os.Getenv(name)
 	}
