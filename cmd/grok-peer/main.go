@@ -20,6 +20,15 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if err := run(ctx, os.Args[1:]); err != nil {
+		cancel()
+		var exited *exec.ExitError
+		if errors.As(err, &exited) {
+			if status, ok := exited.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+				signal.Reset(status.Signal())
+				_ = syscall.Kill(os.Getpid(), status.Signal())
+			}
+			os.Exit(exited.ExitCode())
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -34,11 +43,7 @@ func run(ctx context.Context, arguments []string) error {
 		if err != nil {
 			return err
 		}
-		path, err := exec.LookPath(plan.Path)
-		if err != nil {
-			return err
-		}
-		return syscall.Exec(path, append([]string{path}, plan.Args...), plan.Env)
+		return grok.RunInteractive(ctx, plan)
 	}
 	if len(arguments) != 0 {
 		return errors.New("lane mode accepts no arguments")
@@ -55,17 +60,12 @@ func run(ctx context.Context, arguments []string) error {
 }
 
 func runMCP(ctx context.Context) error {
-	if os.Getenv(mcp.LaneSocketEnv) != "" {
-		backend, err := mcp.NewLaneBackend()
-		if err != nil {
-			return err
-		}
-		return (&mcp.Server{Backend: backend}).Serve(ctx, os.Stdin, os.Stdout)
+	if os.Getenv(mcp.LaneSocketEnv) == "" {
+		return errors.New("Grok peer identity is unavailable; start Grok with grok-peer")
 	}
-	backend, err := grok.NewPeerBackend(ctx)
+	backend, err := mcp.NewLaneBackend()
 	if err != nil {
 		return err
 	}
-	defer backend.Shutdown()
 	return (&mcp.Server{Backend: backend}).Serve(ctx, os.Stdin, os.Stdout)
 }

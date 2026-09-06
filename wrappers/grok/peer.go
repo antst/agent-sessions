@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 
 	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
 	"github.com/antst/agent-sessions/wrappers/host"
+	"github.com/antst/agent-sessions/wrappers/mcp"
 )
 
 type peerSession struct {
@@ -35,14 +37,10 @@ type PeerBackend struct {
 	identity sessionkit.PeerIdentity
 }
 
-func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
-	id := strings.TrimSpace(os.Getenv(host.SessionIDEnv))
-	if id == "" {
-		return nil, errors.New("Grok peer identity is unavailable; start Grok with grok-peer")
-	}
-	groups := []string{}
-	if raw := os.Getenv(host.GroupsEnv); raw != "" && json.Unmarshal([]byte(raw), &groups) != nil {
-		return nil, errors.New("AGENTBUS_GROUPS must be a JSON array")
+func newPeerBackend(ctx context.Context, identity sessionkit.PeerIdentity) (*PeerBackend, error) {
+	id := identity.SessionID
+	if identity.Groups == nil {
+		identity.Groups = []string{}
 	}
 	cmd := command("grok", "--no-auto-update", "agent", "--leader", "stdio")
 	cmd.Env, cmd.Stderr, cmd.SysProcAttr = nativeEnvironment(), os.Stderr, &syscall.SysProcAttr{Setpgid: true}
@@ -52,7 +50,15 @@ func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
 	if err != nil {
 		return nil, err
 	}
-	observer := newACPClient(input, output, nil)
+	changed := make(chan struct{}, 1)
+	observer := newACPClient(input, output, func(frame acpFrame) {
+		if frame.Method == "_x.ai/sessions/changed" {
+			select {
+			case changed <- struct{}{}:
+			default:
+			}
+		}
+	})
 	stop := func(err error) (*PeerBackend, error) {
 		observer.close()
 		stopPeerProcess(process)
@@ -62,10 +68,21 @@ func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
 		return stop(err)
 	}
 	b := &PeerBackend{observer: observer, process: process}
-	wanted := strings.TrimSpace(os.Getenv(host.NameEnv))
-	row, err := roster(ctx, observer, id)
-	if err != nil {
-		return stop(err)
+	wanted := identity.Name
+	var row peerSession
+	for {
+		row, err = roster(ctx, observer, id)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, errNoLeader) {
+			return stop(err)
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return stop(ctx.Err())
+		}
 	}
 	if wanted != "" && wanted != id && wanted != row.Title {
 		var renamed struct {
@@ -78,7 +95,7 @@ func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
 			return stop(errors.New("Grok peer title was not confirmed"))
 		}
 	}
-	b.identity = sessionkit.PeerIdentity{Product: "grok", SessionID: id, Name: first(row.Title, wanted, id), Groups: groups, Info: map[string]any{"cwd": row.Cwd}}
+	b.identity = sessionkit.PeerIdentity{Product: "grok", SessionID: id, Name: first(row.Title, wanted, id), Groups: identity.Groups, Info: map[string]any{"cwd": row.Cwd}}
 	peer, err := sessionkit.ConnectPeer(b.identity, b.deliver)
 	if err != nil {
 		return stop(err)
@@ -93,7 +110,95 @@ func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
 	return b, nil
 }
 
+func RunInteractive(ctx context.Context, plan host.ExecPlan) error {
+	if environmentValue(plan.Env, host.SessionIDEnv) == "" {
+		path, err := exec.LookPath(plan.Path)
+		if err != nil {
+			return err
+		}
+		return syscall.Exec(path, append([]string{path}, plan.Args...), plan.Env)
+	}
+	identity, socket, err := peerIdentity(plan.Env)
+	if err != nil {
+		return err
+	}
+	endpoint, err := host.ListenPrivate(socket, host.LaunchTokenDigest(identity.SessionID))
+	if err != nil {
+		return err
+	}
+	plan.Env = setEnvironment(plan.Env, mcp.LaneSocketEnv, endpoint.Path)
+	child := command(plan.Path, plan.Args...)
+	child.Env, child.Stdin, child.Stdout, child.Stderr = plan.Env, os.Stdin, os.Stdout, os.Stderr
+	if err = child.Start(); err != nil {
+		_ = endpoint.Close()
+		return err
+	}
+	childCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var childErr error
+	childDone := make(chan struct{})
+	go func() { childErr = child.Wait(); close(childDone); cancel() }()
+	backend, err := newPeerBackend(childCtx, identity)
+	if err != nil {
+		select {
+		case <-childDone:
+			_ = endpoint.Close()
+			return childErr
+		default:
+		}
+		_ = child.Process.Kill()
+		<-childDone
+		_ = endpoint.Close()
+		return err
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- mcp.ServeLane(childCtx, endpoint, backend) }()
+	select {
+	case <-childDone:
+	case <-ctx.Done():
+		_ = child.Process.Signal(syscall.SIGTERM)
+		<-childDone
+	}
+	backend.Shutdown()
+	_ = endpoint.Close()
+	<-serveDone
+	return childErr
+}
+
+func peerIdentity(environment []string) (sessionkit.PeerIdentity, string, error) {
+	id, name := environmentValue(environment, host.SessionIDEnv), environmentValue(environment, host.NameEnv)
+	if id == "" {
+		return sessionkit.PeerIdentity{}, "", errors.New("Grok peer identity is unavailable; start Grok with grok-peer")
+	}
+	groups := []string{}
+	if raw := environmentValue(environment, host.GroupsEnv); raw != "" && json.Unmarshal([]byte(raw), &groups) != nil {
+		return sessionkit.PeerIdentity{}, "", errors.New("AGENTBUS_GROUPS must be a JSON array")
+	}
+	socket := first(environmentValue(environment, host.SocketEnv), sessionkit.Socket())
+	return sessionkit.PeerIdentity{Product: "grok", SessionID: id, Name: first(name, id), Groups: groups}, socket, nil
+}
+
+func environmentValue(environment []string, name string) string {
+	for _, value := range environment {
+		if key, body, found := strings.Cut(value, "="); found && key == name {
+			return body
+		}
+	}
+	return ""
+}
+
+func setEnvironment(environment []string, name, value string) []string {
+	result := slices.DeleteFunc(slices.Clone(environment), func(entry string) bool {
+		key, _, _ := strings.Cut(entry, "=")
+		return key == name
+	})
+	return append(result, name+"="+value)
+}
+
 func (b *PeerBackend) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	if err := b.Prepare(ctx, nil); err != nil {
+		return nil, err
+	}
 	b.mu.Lock()
 	peer := b.peer
 	b.mu.Unlock()
@@ -102,8 +207,6 @@ func (b *PeerBackend) Call(ctx context.Context, method string, params any) (json
 	}
 	return peer.Call(ctx, method, params)
 }
-
-func (b *PeerBackend) Caller() *sessionkit.Caller { return b.peer.Caller }
 
 func (b *PeerBackend) Prepare(ctx context.Context, _ json.RawMessage) error {
 	b.mu.Lock()

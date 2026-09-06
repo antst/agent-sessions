@@ -15,9 +15,18 @@ import (
 
 const ToolName, ProtocolVersion = "agent_sessions", "2025-06-18"
 
-type Backend interface {
-	Call(context.Context, string, any) (json.RawMessage, error)
+type PreparedBackend interface {
 	Prepare(context.Context, json.RawMessage) error
+}
+
+type Backend interface {
+	PreparedBackend
+	Call(context.Context, string, any) (json.RawMessage, error)
+}
+
+type ActionBackend interface {
+	PreparedBackend
+	Action(context.Context, string, json.RawMessage) (json.RawMessage, error)
 }
 
 type BackendFunc func(context.Context, string, any) (json.RawMessage, error)
@@ -28,7 +37,7 @@ func (call BackendFunc) Call(ctx context.Context, method string, params any) (js
 func (BackendFunc) Prepare(context.Context, json.RawMessage) error { return nil }
 
 type Server struct {
-	Backend  Backend
+	Backend  PreparedBackend
 	mu       sync.Mutex
 	writeErr error
 }
@@ -53,11 +62,15 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 		defer stop()
 	}
 	var caller *sessionkit.Caller
-	source, owned := s.Backend.(interface{ Caller() *sessionkit.Caller })
-	if owned {
+	if source, owned := s.Backend.(interface{ Caller() *sessionkit.Caller }); owned {
 		caller = source.Caller()
-	} else {
-		caller = sessionkit.NewCaller(s.Backend.Call)
+	} else if backend, ok := s.Backend.(Backend); ok {
+		caller = sessionkit.NewCaller(backend.Call)
+	}
+	if caller == nil {
+		if _, ok := s.Backend.(ActionBackend); !ok {
+			return errors.New("MCP backend cannot dispatch actions")
+		}
 	}
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 1<<20)
@@ -136,7 +149,13 @@ func (s *Server) callTool(ctx context.Context, caller *sessionkit.Caller, raw js
 	if err := s.Backend.Prepare(ctx, call.Meta); err != nil {
 		return nil, errorFailure(err)
 	}
-	result, err := caller.Action(ctx, call.Arguments.Action, arguments)
+	var result json.RawMessage
+	var err error
+	if backend, ok := s.Backend.(ActionBackend); ok {
+		result, err = backend.Action(ctx, call.Arguments.Action, arguments)
+	} else {
+		result, err = caller.Action(ctx, call.Arguments.Action, arguments)
+	}
 	if err != nil {
 		return nil, errorFailure(err)
 	}

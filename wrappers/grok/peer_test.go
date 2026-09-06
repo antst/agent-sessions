@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -15,7 +16,9 @@ import (
 	"testing"
 	"time"
 
+	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
 	"github.com/antst/agent-sessions/wrappers/host"
+	"github.com/antst/agent-sessions/wrappers/mcp"
 	"golang.org/x/sys/unix"
 )
 
@@ -66,12 +69,13 @@ func TestPeerMCPUsesRosterTitleAndDefaultLeader(t *testing.T) {
 	t.Setenv(host.NameEnv, testSessionID)
 	t.Setenv(host.GroupsEnv, `["peer-group"]`)
 	t.Setenv("GROK_TEST_TITLES", "product-title")
+	t.Setenv("GROK_TEST_ROSTER_DELAY", "1")
 	opened := make(chan struct {
 		backend *PeerBackend
 		err     error
 	}, 1)
 	go func() {
-		backend, err := NewPeerBackend(context.Background())
+		backend, err := newPeerBackend(context.Background(), sessionkit.PeerIdentity{Product: "grok", SessionID: testSessionID, Name: testSessionID, Groups: []string{"peer-group"}})
 		opened <- struct {
 			backend *PeerBackend
 			err     error
@@ -97,8 +101,54 @@ func TestPeerMCPUsesRosterTitleAndDefaultLeader(t *testing.T) {
 	receipt, err := backend.deliver(context.Background(), backend.identity, delivery("peer message"))
 	must(t, err)
 	check(t, receipt.Disposition == "injected", "peer delivery = %#v", receipt)
-	check(t, backend.Caller() != nil, "peer caller absent")
 	backend.Shutdown()
+}
+
+func TestInteractiveLauncherOwnsPeerAndLocalAction(t *testing.T) {
+	root := shortRoot(t)
+	recordPath := filepath.Join(root, "record")
+	socket := filepath.Join(root, "agentbus.sock")
+	server, hellos := fakeDaemon(t, socket)
+	defer server.Close()
+	t.Setenv(host.SocketEnv, socket)
+	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
+	t.Setenv("GROK_TEST_RECORD", recordPath)
+	started := filepath.Join(root, "interactive-started")
+	t.Setenv("GROK_TEST_INTERACTIVE_STARTED", started)
+	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
+	must(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- RunInteractive(ctx, plan) }()
+	hello := <-hellos
+	check(t, hello.SessionID == testSessionID, "hello = %#v", hello)
+	hello.ack <- true
+	path := filepath.Join(root, "lanes", host.LaunchTokenDigest(testSessionID)+".sock")
+	t.Setenv(mcp.LaneSocketEnv, path)
+	client, err := mcp.NewLaneBackend()
+	must(t, err)
+	result, err := client.Action(context.Background(), "interrupt", json.RawMessage(`{"session_id":"lane@local"}`))
+	must(t, err)
+	check(t, string(result) == `{}`, "local action = %s", result)
+	<-fileReady(started)
+	cancel()
+	check(t, <-done != nil, "signalled Grok child exited successfully")
+	check(t, !exists(path), "peer endpoint remains")
+	frames := records(t, recordPath)
+	check(t, containsStart(frames, "--leader", testSessionID), "managed child absent")
+	check(t, containsStart(frames, path), "child did not inherit local endpoint")
+}
+
+func TestInteractiveLauncherReturnsProductExit(t *testing.T) {
+	root := shortRoot(t)
+	t.Setenv(host.SocketEnv, filepath.Join(root, "agentbus.sock"))
+	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
+	t.Setenv("GROK_TEST_INTERACTIVE_EXIT", "7")
+	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
+	must(t, err)
+	err = RunInteractive(context.Background(), plan)
+	var exited *exec.ExitError
+	check(t, errors.As(err, &exited) && exited.ExitCode() == 7, "exit = %v", err)
 }
 
 func TestPrepareSerializesAndCommitsAcknowledgedTitles(t *testing.T) {
@@ -109,13 +159,26 @@ func TestPrepareSerializesAndCommitsAcknowledgedTitles(t *testing.T) {
 	t.Setenv(host.SessionIDEnv, testSessionID)
 	t.Setenv(host.NameEnv, testSessionID)
 	t.Setenv("GROK_TEST_TITLES", "first-title,second-title")
-	opened := make(chan *PeerBackend, 1)
+	opened := make(chan struct {
+		backend *PeerBackend
+		err     error
+	}, 1)
 	go func() {
-		backend, _ := NewPeerBackend(context.Background())
-		opened <- backend
+		backend, err := newPeerBackend(context.Background(), sessionkit.PeerIdentity{Product: "grok", SessionID: testSessionID, Name: testSessionID})
+		opened <- struct {
+			backend *PeerBackend
+			err     error
+		}{backend, err}
 	}()
-	(<-hellos).ack <- true
-	backend := <-opened
+	select {
+	case hello := <-hellos:
+		hello.ack <- true
+	case result := <-opened:
+		must(t, result.err)
+	}
+	result := <-opened
+	must(t, result.err)
+	backend := result.backend
 	first, second := make(chan error, 1), make(chan error, 1)
 	go func() { first <- backend.Prepare(context.Background(), nil) }()
 	firstHello := <-hellos
@@ -166,13 +229,26 @@ func TestPeerShutdownKillsItsProcessGroup(t *testing.T) {
 	t.Setenv(host.SocketEnv, filepath.Join(root, "agentbus.sock"))
 	t.Setenv(host.SessionIDEnv, testSessionID)
 	t.Setenv("GROK_TEST_DESCENDANT_PID", filepath.Join(root, "descendant.pid"))
-	opened := make(chan *PeerBackend, 1)
+	opened := make(chan struct {
+		backend *PeerBackend
+		err     error
+	}, 1)
 	go func() {
-		backend, _ := NewPeerBackend(context.Background())
-		opened <- backend
+		backend, err := newPeerBackend(context.Background(), sessionkit.PeerIdentity{Product: "grok", SessionID: testSessionID, Name: testSessionID})
+		opened <- struct {
+			backend *PeerBackend
+			err     error
+		}{backend, err}
 	}()
-	(<-hellos).ack <- true
-	backend := <-opened
+	select {
+	case hello := <-hellos:
+		hello.ack <- true
+	case result := <-opened:
+		must(t, result.err)
+	}
+	result := <-opened
+	must(t, result.err)
+	backend := result.backend
 	body, err := os.ReadFile(filepath.Join(root, "descendant.pid"))
 	must(t, err)
 	var pid int

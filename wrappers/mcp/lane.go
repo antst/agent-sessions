@@ -17,12 +17,14 @@ type LaneBackend struct{ path string }
 func (*LaneBackend) Prepare(context.Context, json.RawMessage) error { return nil }
 
 type laneFrame struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      int64           `json:"id"`
-	Method  string          `json:"method,omitempty"`
-	Params  json.RawMessage `json:"params,omitempty"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *failure        `json:"error,omitempty"`
+	JSONRPC   string          `json:"jsonrpc,omitempty"`
+	ID        int64           `json:"id,omitempty"`
+	Method    string          `json:"method,omitempty"`
+	Params    json.RawMessage `json:"params,omitempty"`
+	Action    string          `json:"action,omitempty"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	Error     *failure        `json:"error,omitempty"`
 }
 
 func NewLaneBackend() (*LaneBackend, error) {
@@ -33,35 +35,60 @@ func NewLaneBackend() (*LaneBackend, error) {
 	return &LaneBackend{path: path}, nil
 }
 
-func (b *LaneBackend) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	client, err := sessionkit.Dial(b.path)
+func (b *LaneBackend) Action(ctx context.Context, action string, arguments json.RawMessage) (json.RawMessage, error) {
+	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", b.path)
 	if err != nil {
 		return nil, err
 	}
-	defer client.Close()
-	return client.Call(ctx, method, params)
+	defer connection.Close()
+	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	defer stop()
+	if err = json.NewEncoder(connection).Encode(laneFrame{Action: action, Arguments: arguments}); err != nil {
+		return nil, err
+	}
+	var response laneFrame
+	if err = json.NewDecoder(connection).Decode(&response); err != nil {
+		return nil, err
+	}
+	if response.Error != nil {
+		return nil, &sessionkit.ProtocolError{Code: response.Error.Code, Message: response.Error.Message, Data: response.Error.Data}
+	}
+	return response.Result, nil
 }
 
 func ServeLane(ctx context.Context, listener net.Listener, backend Backend) error {
+	caller := sessionkit.NewCaller(backend.Call)
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
 			return err
 		}
-		go serveLaneCall(ctx, connection, backend)
+		go serveLaneCall(ctx, connection, caller, backend)
 	}
 }
 
-func serveLaneCall(ctx context.Context, connection net.Conn, backend Backend) {
+func serveLaneCall(ctx context.Context, connection net.Conn, caller *sessionkit.Caller, backend Backend) {
 	defer connection.Close()
 	var request laneFrame
-	response := laneFrame{JSONRPC: "2.0"}
-	if err := json.NewDecoder(connection).Decode(&request); err != nil || request.JSONRPC != "2.0" || request.ID < 1 || request.Method == "" {
+	response := laneFrame{}
+	if err := json.NewDecoder(connection).Decode(&request); err != nil {
 		response.Error = &failure{Code: -32600, Message: "invalid_frame"}
-	} else if result, err := backend.Call(ctx, request.Method, request.Params); err != nil {
-		response.ID, response.Error = request.ID, wireFailure(err)
+	} else if request.Action != "" && request.Method == "" {
+		if result, err := caller.Action(ctx, request.Action, request.Arguments); err != nil {
+			response.Error = wireFailure(err)
+		} else {
+			response.Result = result
+		}
+	} else if request.JSONRPC == "2.0" && request.ID > 0 && request.Method != "" && request.Action == "" {
+		response.JSONRPC, response.ID = "2.0", request.ID
+		if result, err := backend.Call(ctx, request.Method, request.Params); err != nil {
+			response.Error = wireFailure(err)
+		} else {
+			response.Result = result
+		}
 	} else {
-		response.ID, response.Result = request.ID, result
+		response.JSONRPC, response.ID = request.JSONRPC, request.ID
+		response.Error = &failure{Code: -32600, Message: "invalid_frame"}
 	}
 	_ = json.NewEncoder(connection).Encode(response)
 }

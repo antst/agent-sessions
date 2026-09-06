@@ -45,7 +45,10 @@ func fakeGrok() {
 	index := slices.Index(os.Args, "--")
 	arguments := os.Args[index+1:]
 	cwd, _ := os.Getwd()
-	record("START", map[string]any{"arguments": arguments, "cwd": cwd})
+	record("START", map[string]any{"arguments": arguments, "cwd": cwd, "laneSocket": os.Getenv("AGENTBUS_LANE_SOCKET")})
+	if path := os.Getenv("GROK_TEST_INTERACTIVE_STARTED"); path != "" && slices.Contains(arguments, "--leader") && !slices.Contains(arguments, "stdio") {
+		_ = os.WriteFile(path, []byte("started"), 0o600)
+	}
 	if slices.Contains(arguments, "leader") && !slices.Contains(arguments, "stdio") {
 		path := option(arguments, "--leader-socket")
 		listener, err := net.Listen("unix", path)
@@ -53,6 +56,12 @@ func fakeGrok() {
 			os.Exit(2)
 		}
 		defer listener.Close()
+		time.Sleep(24 * time.Hour)
+	}
+	if slices.Contains(arguments, "--leader") && !slices.Contains(arguments, "stdio") {
+		if code, _ := strconv.Atoi(os.Getenv("GROK_TEST_INTERACTIVE_EXIT")); code != 0 {
+			os.Exit(code)
+		}
 		time.Sleep(24 * time.Hour)
 	}
 	if path := os.Getenv("GROK_TEST_DESCENDANT_PID"); path != "" {
@@ -94,8 +103,17 @@ func fakeGrok() {
 			reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"success": true}})
 		case "_x.ai/sessions/list":
 			rosterCalls++
-			if rosterCalls > 1 && rosterCalls-2 < len(titles) && titles[rosterCalls-2] != "" {
-				title = titles[rosterCalls-2]
+			if os.Getenv("GROK_TEST_ROSTER_DELAY") != "" && rosterCalls == 1 {
+				reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"result": map[string]any{"sessions": []any{}}}})
+				reply(map[string]any{"jsonrpc": "2.0", "method": "_x.ai/sessions/changed", "params": map[string]any{}})
+				continue
+			}
+			titleIndex := rosterCalls - 2
+			if os.Getenv("GROK_TEST_ROSTER_DELAY") != "" {
+				titleIndex--
+			}
+			if titleIndex >= 0 && titleIndex < len(titles) && titles[titleIndex] != "" {
+				title = titles[titleIndex]
 			}
 			session := first(os.Getenv("GROK_TEST_SESSION_ID"), testSessionID)
 			reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"result": map[string]any{"sessions": []map[string]any{{"sessionId": session, "title": title, "cwd": os.TempDir(), "activity": "working", "resident": true, "yolo": true}}}}})
