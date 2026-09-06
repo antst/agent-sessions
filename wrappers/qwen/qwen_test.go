@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -105,6 +106,9 @@ func TestOpenValueAndArgumentErrors(t *testing.T) {
 		_, err := launchArguments(test.open)
 		check(t, err != nil && err.Error() == test.want, "error = %v", err)
 	}
+	arguments, err := launchArguments(sessionkit.OpenOptions{Arguments: []string{"--system-prompt", "--resume"}})
+	must(t, err)
+	check(t, reflect.DeepEqual(arguments, []string{"--acp", "--system-prompt", "--resume"}), "arguments = %#v", arguments)
 }
 
 func TestOpenResumeUsesCapturedACPShapesAndScrubsBusEnv(t *testing.T) {
@@ -147,6 +151,9 @@ func TestRunDrainsPendingAndRestoresUndrained(t *testing.T) {
 	receipt, err := p.Deliver(context.Background(), delivery("MID"))
 	must(t, err)
 	check(t, receipt.Disposition == "injected", "receipt = %#v", receipt)
+	writeFrame(t, productOut, `{"jsonrpc":"2.0","id":79,"method":"craft/drainMidTurnQueue","params":{"sessionId":"wrong"}}`)
+	wrong := readRequest(t, productIn)
+	check(t, bytes.Contains(wrong.Raw, []byte(`"code":-32602`)) && !bytes.Contains(wrong.Raw, []byte("MID")), "wrong-session drain = %s", wrong.Raw)
 	writeFrame(t, productOut, `{"jsonrpc":"2.0","id":80,"method":"craft/drainMidTurnQueue","params":{"sessionId":"`+fixtureID+`"}}`)
 	drain := readRequest(t, productIn)
 	check(t, bytes.Contains(drain.Raw, []byte(`"hasQueuedPrompt":true`)) && bytes.Contains(drain.Raw, []byte("MID")), "drain = %s", drain.Raw)
@@ -169,6 +176,78 @@ func TestRunDrainsPendingAndRestoresUndrained(t *testing.T) {
 	check(t, bytes.Contains(third.Raw, []byte("UNDRAINED")), "undrained message lost: %s", third.Raw)
 	writeResult(t, productOut, third.ID, `{"stopReason":"end_turn"}`)
 	<-thirdDone
+}
+
+func TestDrainRequestIsHandledBeforeFollowingTerminal(t *testing.T) {
+	p, productIn, productOut := newFixtureClient(t)
+	done := make(chan sessionkit.TurnResult, 1)
+	go func() { result, _ := p.Run(context.Background(), &sessionkit.Run{}, "turn"); done <- result }()
+	prompt := readRequest(t, productIn)
+	receipt, err := p.Deliver(context.Background(), delivery("ORDERED"))
+	must(t, err)
+	check(t, receipt.Disposition == "injected", "receipt = %#v", receipt)
+
+	drain := p.client.drain
+	entered, release := make(chan struct{}), make(chan struct{})
+	p.client.drain = func(sessionID string) ([]string, error) {
+		close(entered)
+		<-release
+		return drain(sessionID)
+	}
+	writeFrame(t, productOut, `{"jsonrpc":"2.0","id":90,"method":"craft/drainMidTurnQueue","params":{"sessionId":"`+fixtureID+`"}}`)
+	writeResult(t, productOut, prompt.ID, `{"stopReason":"end_turn"}`)
+	<-entered
+	select {
+	case result := <-done:
+		t.Fatalf("terminal passed held drain: %#v", result)
+	default:
+	}
+	close(release)
+	response := readRequest(t, productIn)
+	check(t, bytes.Count(response.Raw, []byte("ORDERED")) == 1, "drain response = %s", response.Raw)
+	<-done
+
+	next := make(chan sessionkit.TurnResult, 1)
+	go func() { result, _ := p.Run(context.Background(), &sessionkit.Run{}, "next"); next <- result }()
+	nextPrompt := readRequest(t, productIn)
+	check(t, !bytes.Contains(nextPrompt.Raw, []byte("ORDERED")), "claimed delivery replayed: %s", nextPrompt.Raw)
+	writeResult(t, productOut, nextPrompt.ID, `{"stopReason":"end_turn"}`)
+	<-next
+}
+
+func TestFailedPromptWriteRestoresPendingDelivery(t *testing.T) {
+	writer := &blockedWriteCloser{entered: make(chan struct{}), release: make(chan struct{})}
+	clientOutput, productOut, err := os.Pipe()
+	must(t, err)
+	p := New("")
+	p.id = fixtureID
+	p.client = newACPClient(writer, clientOutput, p.receive, p.drain)
+	t.Cleanup(func() { _ = productOut.Close(); <-p.client.done })
+	failed := make(chan error, 1)
+	go func() {
+		_, err := p.Run(context.Background(), &sessionkit.Run{}, "turn")
+		failed <- err
+	}()
+	<-writer.entered
+	receipt, err := p.Deliver(context.Background(), delivery("RESTORED"))
+	must(t, err)
+	check(t, receipt.Disposition == "injected", "receipt = %#v", receipt)
+	close(writer.release)
+	check(t, (<-failed).Error() == "prompt write failed", "prompt start did not fail")
+
+	next, prompt := &immediateTurn{}, ""
+	_, err = p.handoff.Run(context.Background(), &sessionkit.Run{}, "next", func(_ context.Context, input string) (host.Turn, error) {
+		prompt = input
+		return next, nil
+	})
+	must(t, err)
+	check(t, strings.Count(prompt, "RESTORED") == 1 && len(p.handoff.Claim()) == 0, "prompt = %q", prompt)
+	_, err = p.handoff.Run(context.Background(), &sessionkit.Run{}, "again", func(_ context.Context, input string) (host.Turn, error) {
+		prompt = input
+		return next, nil
+	})
+	must(t, err)
+	check(t, !strings.Contains(prompt, "RESTORED"), "delivery replayed twice: %q", prompt)
 }
 
 func TestInterruptIgnoresCancelledBooleanAndUsesTerminal(t *testing.T) {
@@ -210,6 +289,25 @@ type wireRequest struct {
 	Method string
 	Raw    []byte
 }
+
+type blockedWriteCloser struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (w *blockedWriteCloser) Write([]byte) (int, error) {
+	close(w.entered)
+	<-w.release
+	return 0, errors.New("prompt write failed")
+}
+func (*blockedWriteCloser) Close() error { return nil }
+
+type immediateTurn struct{}
+
+func (*immediateTurn) Wait(context.Context) (sessionkit.TurnResult, error) {
+	return sessionkit.TurnResult{Outcome: "completed"}, nil
+}
+func (*immediateTurn) Interrupt(context.Context) error { return nil }
 
 func newFixtureClient(t *testing.T) (*Wrapper, *bufio.Reader, *os.File) {
 	productIn, clientInput, err := os.Pipe()

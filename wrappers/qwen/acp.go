@@ -40,10 +40,10 @@ type acpClient struct {
 	failed      error
 	done        chan struct{}
 	notify      func(string, json.RawMessage)
-	drain       func() []string
+	drain       func(string) ([]string, error)
 }
 
-func newACPClient(input io.WriteCloser, output io.ReadCloser, notify func(string, json.RawMessage), drain func() []string) *acpClient {
+func newACPClient(input io.WriteCloser, output io.ReadCloser, notify func(string, json.RawMessage), drain func(string) ([]string, error)) *acpClient {
 	c := &acpClient{input: input, output: output, decoder: json.NewDecoder(output), pending: map[int64]chan acpReply{}, done: make(chan struct{}), notify: notify, drain: drain}
 	go c.read()
 	return c
@@ -121,7 +121,7 @@ func (c *acpClient) read() {
 					c.notify(frame.Method, frame.Params)
 				}
 			} else {
-				go c.answer(frame)
+				c.answer(frame)
 			}
 			continue
 		}
@@ -153,8 +153,16 @@ func (c *acpClient) answer(frame acpFrame) {
 	case "session/request_permission":
 		result = map[string]any{"outcome": map[string]string{"outcome": "cancelled"}}
 	case "craft/drainMidTurnQueue":
-		messages := c.drain()
-		result = map[string]any{"messages": messages, "hasQueuedPrompt": len(messages) > 0}
+		var params struct {
+			SessionID string `json:"sessionId"`
+		}
+		if json.Unmarshal(frame.Params, &params) != nil {
+			failure = &acpError{Code: -32602, Message: "invalid Qwen ACP drain request"}
+		} else if messages, err := c.drain(params.SessionID); err != nil {
+			failure = &acpError{Code: -32602, Message: err.Error()}
+		} else {
+			result = map[string]any{"messages": messages, "hasQueuedPrompt": len(messages) > 0}
+		}
 	default:
 		failure = &acpError{Code: -32601, Message: "unsupported Qwen ACP client request " + frame.Method}
 	}

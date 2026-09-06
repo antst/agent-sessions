@@ -302,18 +302,21 @@ func (p *Wrapper) receive(method string, raw json.RawMessage) {
 	p.mu.Unlock()
 }
 
-func (p *Wrapper) drain() []string {
+func (p *Wrapper) drain(sessionID string) ([]string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if sessionID != p.id {
+		return nil, errors.New("Qwen ACP drain requested the wrong session")
+	}
 	if p.active == nil {
-		return []string{}
+		return []string{}, nil
 	}
 	claimed := p.handoff.Claim()
 	messages := make([]string, len(claimed))
 	for index := range claimed {
 		messages[index] = string(claimed[index])
 	}
-	return messages
+	return messages, nil
 }
 
 func (p *Wrapper) watch(child *host.Child, drained <-chan struct{}) {
@@ -343,6 +346,10 @@ func launchArguments(open sessionkit.OpenOptions) ([]string, error) {
 	if open.ReasoningEffort != "" && !slices.Contains([]string{"none", "low", "medium", "xhigh"}, open.ReasoningEffort) {
 		return nil, fmt.Errorf("unsupported value reasoning_effort=%s", open.ReasoningEffort)
 	}
+	extra, err := host.BuildArguments(open.Arguments, qwenArgumentRules)
+	if err != nil {
+		return nil, err
+	}
 	arguments := []string{"--acp"}
 	if open.PermissionMode == "bypassPermissions" {
 		arguments = append(arguments, "--yolo")
@@ -350,22 +357,42 @@ func launchArguments(open sessionkit.OpenOptions) ([]string, error) {
 	if open.Model != "" {
 		arguments = append(arguments, "-m", open.Model)
 	}
-	for _, argument := range open.Arguments {
-		name, _, _ := strings.Cut(argument, "=")
-		if field := argumentConflicts[name]; field != "" || argument == "--" {
-			return nil, errors.New("argument conflicts with typed field " + first(field, "arguments"))
-		}
-	}
-	return append(arguments, open.Arguments...), nil
+	return append(arguments, extra...), nil
 }
 
 var argumentConflicts = map[string]string{
-	"--acp": "arguments", "--approval-mode": "permission_mode", "--yolo": "permission_mode",
+	"--acp": "arguments", "--approval-mode": "permission_mode", "-y": "permission_mode", "--yolo": "permission_mode",
 	"-m": "model", "--model": "model", "-r": "session_id", "--resume": "session_id",
 	"-c": "session_id", "--continue": "session_id", "--session-id": "session_id",
 	"-p": "arguments", "--prompt": "arguments", "-i": "arguments", "--prompt-interactive": "arguments",
-	"-o": "arguments", "--output-format": "arguments", "-n": "name", "--name": "name",
+	"-o": "arguments", "--output-format": "arguments", "-n": "name", "--name": "name", "--": "arguments",
+	"--safe-mode": "mcp", "--allowed-mcp-server-names": "mcp", "--mcp-config": "mcp", "--allowed-tools": "mcp",
+	"--chat-recording": "session_id", "--json-fd": "stream", "--json-file": "stream", "--input-file": "stream",
+	"--fork-session": "session_id", "--worktree": "cwd",
 }
+
+var qwenFlagOptions = []string{
+	"--telemetry-enabled", "--telemetry-log-prompts", "-d", "--debug", "--bare", "--safe-mode", "--insecure", "--chat-recording", "-s", "--sandbox", "-y", "--yolo", "--acp", "--experimental-lsp", "--restore-ask-user-question", "--openai-logging", "--screen-reader", "--include-partial-messages", "-c", "--continue", "--fork-session",
+}
+
+var qwenArgumentRules = func() []host.ArgumentRule {
+	names := append(append([]string(nil), qwenValueOptions...), qwenFlagOptions...)
+	rules := []host.ArgumentRule{
+		{Name: "-r", TakesValue: true, ConflictField: "session_id"},
+		{Name: "--resume", TakesValue: true, ConflictField: "session_id"},
+		{Name: "-n", TakesValue: true, ConflictField: "name"},
+		{Name: "--name", TakesValue: true, ConflictField: "name"},
+		{Name: "--", ConflictField: "arguments"},
+	}
+	seen := map[string]bool{"-r": true, "--resume": true, "-n": true, "--name": true, "--": true}
+	for _, name := range names {
+		if !seen[name] {
+			rules = append(rules, host.ArgumentRule{Name: name, TakesValue: slices.Contains(qwenValueOptions, name), ConflictField: argumentConflicts[name]})
+			seen[name] = true
+		}
+	}
+	return rules
+}()
 
 func mcpServer(socket string) map[string]any {
 	return map[string]any{"name": "agent_sessions", "command": Product, "args": []string{"mcp"}, "env": []any{map[string]string{"name": mcp.LaneSocketEnv, "value": socket}}}

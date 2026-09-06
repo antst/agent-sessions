@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -58,37 +59,62 @@ func (b *PeerBackend) Prepare(ctx context.Context, _ json.RawMessage) error {
 		b.mu.Unlock()
 		return err
 	}
-	if b.peer == nil {
-		identity := b.identity
+	peer, identity := b.peer, b.identity
+	b.mu.Unlock()
+	created := peer == nil
+	if peer == nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if title := nativeTitle(identity.SessionID); title != "" {
+			identity.Name = title
+		}
+		b.mu.Lock()
+		if b.failed != nil {
+			err := b.failed
+			b.mu.Unlock()
+			return err
+		}
+		b.identity = identity
 		b.mu.Unlock()
-		peer, err := sessionkit.ConnectPeer(identity, b.deliver)
+		var err error
+		peer, err = sessionkit.ConnectPeer(identity, b.deliver)
 		if err != nil {
 			return err
 		}
 		b.mu.Lock()
+		if b.failed != nil {
+			err := b.failed
+			b.mu.Unlock()
+			peer.Shutdown()
+			return err
+		}
 		b.peer = peer
 		b.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			peer.Shutdown()
-			return ctx.Err()
-		case <-peer.Ready():
-			return nil
-		case <-peer.Closed():
-			if err := peer.Err(); err != nil {
-				return err
-			}
-			return errors.New("Qwen peer closed before ready")
-		}
 	}
-	peer, identity := b.peer, b.identity
-	b.mu.Unlock()
-	if title := nativeTitle(identity.SessionID); title != "" && title != identity.Name {
-		if err := peer.Rehello(title, identity.Info); err != nil {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-peer.Ready():
+	case <-peer.Closed():
+		if err := peer.Err(); err != nil {
+			return err
+		}
+		return errors.New("Qwen peer closed before ready")
+	}
+	if created {
+		return nil
+	}
+	observed := identity
+	if title := nativeTitle(identity.SessionID); title != "" {
+		observed.Name = title
+	}
+	if observed.Name != identity.Name {
+		if err := peer.Rehello(observed.Name, observed.Info); err != nil {
 			return err
 		}
 		b.mu.Lock()
-		b.identity.Name = title
+		b.identity = observed
 		b.mu.Unlock()
 	}
 	return nil
@@ -111,6 +137,10 @@ func (b *PeerBackend) Caller() *sessionkit.Caller { return b.caller }
 func (b *PeerBackend) Shutdown() {
 	b.mu.Lock()
 	peer := b.peer
+	b.peer = nil
+	if b.failed == nil {
+		b.failed = errors.New("Qwen peer is closed")
+	}
 	b.mu.Unlock()
 	if peer != nil {
 		peer.Shutdown()
@@ -253,6 +283,9 @@ func qwenResume(arguments []string) (string, bool, error) {
 			if !attached && index+1 < len(arguments) && !strings.HasPrefix(arguments[index+1], "-") {
 				value = arguments[index+1]
 			}
+			if !qwenSessionID.MatchString(value) {
+				return "", true, errors.New("qwen-peer --resume requires an exact Qwen session UUID; native titles and the picker are unavailable in managed peer mode")
+			}
 			return value, true, nil
 		}
 		if !attached && qwenOptionTakesValue(name) {
@@ -264,6 +297,8 @@ func qwenResume(arguments []string) (string, bool, error) {
 	}
 	return "", false, nil
 }
+
+var qwenSessionID = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 func environmentValue(environment []string, name string) string {
 	for _, entry := range environment {
@@ -281,10 +316,12 @@ func qwenPassthrough(argument string) bool {
 
 func qwenOptionTakesValue(argument string) bool {
 	name, _, attached := strings.Cut(argument, "=")
-	return !attached && slices.Contains([]string{
-		"--telemetry-target", "--telemetry-otlp-endpoint", "--telemetry-otlp-protocol", "--telemetry-outfile", "--proxy",
-		"-m", "--model", "--fallback-model", "-p", "--prompt", "-i", "--prompt-interactive", "--system-prompt", "--append-system-prompt", "--output-style", "--sandbox-image", "--approval-mode", "--channel", "--allowed-mcp-server-names", "--mcp-config", "--allowed-tools", "-e", "--extensions", "--include-directories", "--add-dir", "--openai-logging-dir", "--openai-api-key", "--openai-base-url", "--input-format", "-o", "--output-format", "--json-fd", "--json-file", "--json-schema", "--input-file", "--session-id", "--worktree", "--max-session-turns", "--max-wall-time", "--max-tool-calls", "--max-subagent-depth", "--core-tools", "--exclude-tools", "--disabled-slash-commands", "--auth-type",
-	}, name)
+	return !attached && slices.Contains(qwenValueOptions, name)
+}
+
+var qwenValueOptions = []string{
+	"--telemetry-target", "--telemetry-otlp-endpoint", "--telemetry-otlp-protocol", "--telemetry-outfile", "--proxy",
+	"-m", "--model", "--fallback-model", "-p", "--prompt", "-i", "--prompt-interactive", "--system-prompt", "--append-system-prompt", "--output-style", "--sandbox-image", "--approval-mode", "--channel", "--allowed-mcp-server-names", "--mcp-config", "--allowed-tools", "-e", "--extensions", "--include-directories", "--add-dir", "--openai-logging-dir", "--openai-api-key", "--openai-base-url", "--input-format", "-o", "--output-format", "--json-fd", "--json-file", "--json-schema", "--input-file", "--session-id", "--worktree", "--max-session-turns", "--max-wall-time", "--max-tool-calls", "--max-subagent-depth", "--core-tools", "--exclude-tools", "--disabled-slash-commands", "--auth-type",
 }
 
 var _ mcp.Backend = (*PeerBackend)(nil)
