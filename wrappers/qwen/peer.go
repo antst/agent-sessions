@@ -95,7 +95,7 @@ func (b *PeerBackend) Prepare(ctx context.Context, _ json.RawMessage) error {
 		observed.Name = title
 	}
 	if observed.Name != identity.Name {
-		if err := peer.Rehello(observed.Name, observed.Info); err != nil {
+		if err := peer.Rehello(ctx, observed.Name, observed.Info); err != nil {
 			return err
 		}
 		b.mu.Lock()
