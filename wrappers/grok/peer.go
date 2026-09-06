@@ -237,7 +237,6 @@ func (b *PeerBackend) serveDeliveries(ctx context.Context) {
 	defer close(b.done)
 	var observer *acpClient
 	var process *nativeProcess
-	identity := b.identity
 	defer func() { stopPeerClient(observer, process) }()
 	for {
 		select {
@@ -251,7 +250,7 @@ func (b *PeerBackend) serveDeliveries(ctx context.Context) {
 					continue
 				}
 			}
-			receipt, err := b.deliverOne(delivery.ctx, observer, &identity, delivery)
+			receipt, err := b.deliverOne(delivery.ctx, observer, delivery)
 			if ctx.Err() != nil {
 				receipt, err = sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "shutting down"}, nil
 			}
@@ -269,17 +268,12 @@ func (b *PeerBackend) serveDeliveries(ctx context.Context) {
 	}
 }
 
-func (b *PeerBackend) deliverOne(ctx context.Context, observer *acpClient, identity *sessionkit.PeerIdentity, delivery peerDelivery) (sessionkit.DeliveryReceipt, error) {
+func (b *PeerBackend) deliverOne(ctx context.Context, observer *acpClient, delivery peerDelivery) (sessionkit.DeliveryReceipt, error) {
 	row, err := roster(ctx, observer, delivery.identity.SessionID)
 	if err == nil {
 		name := first(row.Title, row.SessionID)
 		info := map[string]any{"cwd": row.Cwd}
-		if name != identity.Name || row.Cwd != identity.Info["cwd"] {
-			err = b.peer.Rehello(ctx, name, info)
-			if err == nil {
-				identity.Name, identity.Info = name, info
-			}
-		}
+		err = b.peer.Rehello(ctx, name, info)
 	}
 	if errors.Is(err, errNoLeader) {
 		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "no_leader"}, nil

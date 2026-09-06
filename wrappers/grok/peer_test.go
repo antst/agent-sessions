@@ -107,9 +107,19 @@ func TestProductHelperOwnsPeerAndLazilyObserves(t *testing.T) {
 	request := delivery("again")
 	request.MessageID = "again"
 	delivered = deliverPeer(backend, context.Background(), request)
+	corrected := <-hellos
+	check(t, corrected.Name == testSessionID, "corrective title re-hello = %#v", corrected)
+	corrected.ack <- true
 	answer := <-delivered
 	check(t, answer.err == nil && answer.receipt.Disposition == "injected" && len(peerClientPIDs(t, records(t, recordPath))) == 1, "observer was not retained: %#v", answer)
 	rehello.ack <- true
+	converged := <-hellos
+	check(t, converged.Name == testSessionID, "late-ack convergence hello = %#v", converged)
+	converged.ack <- true
+	<-converged.done
+	listed, err := backend.Caller().List(context.Background(), sessionkit.SessionListRequest{})
+	must(t, err)
+	check(t, len(listed.Sessions) == 1 && listed.Sessions[0].Name == testSessionID+"@local", "final bus identity = %#v", listed.Sessions)
 	backend.Shutdown()
 }
 
@@ -378,10 +388,13 @@ func TestPeerShutdownKillsItsObserverProcessGroup(t *testing.T) {
 }
 
 type hello struct {
-	SessionID string   `json:"session_id"`
-	Name      string   `json:"name"`
-	Groups    []string `json:"groups"`
+	SessionID string         `json:"session_id"`
+	Name      string         `json:"name"`
+	Product   string         `json:"product"`
+	Groups    []string       `json:"groups"`
+	Info      map[string]any `json:"info"`
 	ack       chan bool
+	done      chan struct{}
 }
 
 type testSignal struct{ os.Signal }
@@ -402,6 +415,7 @@ func fakeDaemon(t *testing.T, path string) (net.Listener, <-chan hello) {
 		defer connection.Close()
 		scanner := bufio.NewScanner(connection)
 		var write sync.Mutex
+		var admitted hello
 		for scanner.Scan() {
 			var frame struct {
 				ID     int64           `json:"id"`
@@ -415,17 +429,27 @@ func fakeDaemon(t *testing.T, path string) (net.Listener, <-chan hello) {
 				var value hello
 				_ = json.Unmarshal(frame.Params, &value)
 				value.ack = make(chan bool, 1)
+				value.done = make(chan struct{})
 				hellos <- value
 				go func(id int64, value hello) {
+					defer close(value.done)
 					accepted := <-value.ack
 					write.Lock()
 					if accepted {
+						admitted = value
 						_ = json.NewEncoder(connection).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{}})
 					} else {
 						_ = json.NewEncoder(connection).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32602, "message": "invalid_hello"}})
 					}
 					write.Unlock()
 				}(frame.ID, value)
+				continue
+			}
+			if frame.Method == "session.list" {
+				write.Lock()
+				row := sessionkit.SessionSummary{SessionID: admitted.SessionID + "@local", Kind: "peer", Product: admitted.Product, Name: admitted.Name + "@local", Groups: admitted.Groups, Connected: true, Info: admitted.Info}
+				_ = json.NewEncoder(connection).Encode(map[string]any{"jsonrpc": "2.0", "id": frame.ID, "result": sessionkit.SessionListResult{Sessions: []sessionkit.SessionSummary{row}}})
+				write.Unlock()
 				continue
 			}
 			if frame.Method != "" {
