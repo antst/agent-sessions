@@ -1245,7 +1245,9 @@ connection-bound client supplies `list`, `send`, `describe`, `spawn`, `resume`,
 `run`, `interrupt`, and `close(forget)` and is usable from every callback
 without blocking the reader. Go also exports one thin no-hello client:
 `Dial(socket)`, `Call(ctx, method, params)`, and `Close`; the caller kit and a
-wrapper's private lane socket use that one framed implementation.
+wrapper's private lane socket use that one framed implementation. `Socket()`
+returns `AGENTBUS_SOCKET` when set and otherwise the documented state-root
+socket; `Dial("")`, peer connections, and worker connections use that value.
 Go exports `NewCaller(call)` to place the same typed methods and caller
 conveniences over that no-hello client's call function; workers and peers are
 the other two uses of the same caller.

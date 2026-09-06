@@ -258,7 +258,7 @@ func (w *Worker) reply(err error) {
 
 func sessionEnvironment(worker bool) (string, string, error) {
 	token, ok := os.LookupEnv("AGENTBUS_LAUNCH_TOKEN")
-	key, endpoint := os.Getenv("AGENTBUS_LOCAL_KEY"), os.Getenv("AGENTBUS_SOCKET")
+	key, endpoint := os.Getenv("AGENTBUS_LOCAL_KEY"), Socket()
 	for _, name := range []string{"AGENTBUS_LAUNCH_TOKEN", "AGENTBUS_LOCAL_KEY", "AGENTBUS_SOCKET"} {
 		_ = os.Unsetenv(name)
 	}

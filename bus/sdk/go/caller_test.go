@@ -129,7 +129,16 @@ func TestCallerSugarMatchesJavaScriptShapes(t *testing.T) {
 }
 
 func TestDialIsOneShotFramedClient(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "agentbus.sock")
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", root)
+	t.Setenv("AGENTBUS_SOCKET", "")
+	path := filepath.Join(root, "agentbus", "run", "presence.sock")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if got := Socket(); got != path {
+		t.Fatalf("socket = %q, want %q", got, path)
+	}
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +150,7 @@ func TestDialIsOneShotFramedClient(t *testing.T) {
 		server := rpc.New(fd, false, func(_ context.Context, request *rpc.Request) { requests <- request })
 		_ = server.Result(<-requests, SessionListResult{Sessions: []SessionSummary{}})
 	}()
-	client, err := Dial(path)
+	client, err := Dial("")
 	if err != nil {
 		t.Fatal(err)
 	}
