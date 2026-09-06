@@ -1,17 +1,17 @@
 {
   "mcpServers": {
-    "agent_sessions": {
+    "sessionbus": {
       "command": "codex-peer",
       "args": [
         "mcp"
       ],
       "default_tools_approval_mode": "approve",
       "env_vars": [
-        "AGENTBUS_SOCKET",
-        "AGENTBUS_LOCAL_KEY",
-        "AGENTBUS_SESSION_ID",
-        "AGENTBUS_SESSION_NAME",
-        "AGENTBUS_GROUPS",
+        "SESSIONBUS_SOCKET",
+        "SESSIONBUS_LOCAL_KEY",
+        "SESSIONBUS_SESSION_ID",
+        "SESSIONBUS_SESSION_NAME",
+        "SESSIONBUS_GROUPS",
         "CODEX_HOME"
       ],
       "tool_timeout_sec": 86520

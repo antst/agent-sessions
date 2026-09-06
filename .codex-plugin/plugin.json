@@ -1,15 +1,15 @@
 {
-  "name": "agent-sessions",
+  "name": "sessionbus",
   "version": "0.4.0",
   "description": "Give grouped Codex, Claude, Grok, and Qwen sessions a durable lifecycle, all-target lanes, and local or federated messaging.",
   "author": {
-    "name": "Agent Sessions contributors"
+    "name": "Sessionbus contributors"
   },
   "interface": {
-    "displayName": "Agent Sessions",
+    "displayName": "Sessionbus",
     "shortDescription": "Run and message durable agent sessions",
     "longDescription": "Runs explicitly owned Codex, Claude, Grok, and Qwen sessions with durable lane lifecycle, local discovery, and bidirectional messaging while ordinary sessions remain inactive.",
-    "developerName": "Agent Sessions contributors",
+    "developerName": "Sessionbus contributors",
     "category": "Productivity",
     "capabilities": [
       "Interactive"
