@@ -14,17 +14,20 @@ cat >"$codex" <<'EOF'
 set -eu
 printf '%s\n' "$*" >>"$TEST_CODEX_RECORD"
 case "$1 $2" in
-  "mcp get")
+  "mcp remove")
     [ -f "$TEST_CODEX_STATE" ] || exit 1
-    if [ "$(cat "$TEST_CODEX_STATE")" = current ]; then command=codex-peer; args='["mcp"]'; else command=old-peer; args='["old"]'; fi
-    printf '{"transport":{"type":"stdio","command":"%s","args":%s,"env":null,"env_vars":[],"cwd":null}}\n' "$command" "$args"
+    rm -f -- "$TEST_CODEX_STATE"
     ;;
   "mcp add")
     [ "${TEST_CODEX_FAIL_ADD:-0}" = 0 ] || exit 42
-    [ "$*" = "mcp add agent_sessions -- codex-peer mcp" ] || exit 91
-    printf '%s\n' current >"$TEST_CODEX_STATE"
+    if [ "$*" = "mcp add agent_sessions -- codex-peer mcp" ]; then
+      printf '%s\n' current >"$TEST_CODEX_STATE"
+    elif [ "$1 $2 $3 $5 $6 $7 $8" = "mcp add --env agent_sessions -- codex-peer mcp" ]; then
+      printf 'socket=%s\n' "${4#AGENTBUS_SOCKET=}" >"$TEST_CODEX_STATE"
+    else
+      exit 91
+    fi
     ;;
-  "mcp remove") rm -f -- "$TEST_CODEX_STATE" ;;
   "app-server daemon") [ "$*" = "app-server daemon restart" ] || exit 92 ;;
   *) exit 93 ;;
 esac
@@ -32,29 +35,33 @@ EOF
 chmod 0700 "$codex"
 export TEST_CODEX_RECORD="$record" TEST_CODEX_STATE="$state"
 
-printf '%s\n' stale >"$state"
-install_codex_mcp "$codex"
-grep -Fxq 'mcp add agent_sessions -- codex-peer mcp' "$record"
-[[ $(grep -Fxc 'app-server daemon restart' "$record") -eq 1 ]]
+for prior in disabled plugin-backed; do
+  printf '%s\n' "$prior" >"$state"
+  : >"$record"
+  install_codex_mcp "$codex"
+  grep -Fxq 'mcp remove agent_sessions' "$record"
+  grep -Fxq 'mcp add agent_sessions -- codex-peer mcp' "$record"
+  grep -Fxq 'app-server daemon restart' "$record"
+  [[ $(cat "$state") = current ]]
+done
 
 : >"$record"
+export AGENTBUS_SOCKET=/tmp/agentbus-test.sock
 install_codex_mcp "$codex"
-[[ $(wc -l <"$record") -eq 1 ]]
-grep -Fxq 'mcp get agent_sessions --json' "$record"
+grep -Fxq 'mcp add --env AGENTBUS_SOCKET=/tmp/agentbus-test.sock agent_sessions -- codex-peer mcp' "$record"
+[[ $(grep -Fxc 'app-server daemon restart' "$record") -eq 1 && $(cat "$state") = socket=/tmp/agentbus-test.sock ]]
+unset AGENTBUS_SOCKET
 
+rm -f -- "$state"
 : >"$record"
 remove_codex_mcp "$codex"
 grep -Fxq 'mcp remove agent_sessions' "$record"
-[[ $(grep -Fxc 'app-server daemon restart' "$record") -eq 1 ]]
+grep -Fxq 'app-server daemon restart' "$record"
 
-: >"$record"
-remove_codex_mcp "$codex"
-[[ $(wc -l <"$record") -eq 1 ]]
-
-printf '%s\n' stale >"$state"
+printf '%s\n' current >"$state"
 : >"$record"
 export TEST_CODEX_FAIL_ADD=1
 if install_codex_mcp "$codex"; then exit 1; else status=$?; fi
 unset TEST_CODEX_FAIL_ADD
-[[ $status -eq 42 && $(grep -Fc 'app-server daemon restart' "$record") -eq 0 && $(cat "$state") = stale ]]
+[[ $status -eq 42 && $(grep -Fc 'app-server daemon restart' "$record") -eq 0 && ! -e "$state" ]]
 printf '%s\n' 'Codex MCP install transaction: PASS'

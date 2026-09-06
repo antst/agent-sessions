@@ -33,39 +33,47 @@ type PeerBackend struct {
 
 var _ mcp.Backend = (*PeerBackend)(nil)
 
-func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
+func NewPeerBackend(_ context.Context) (*PeerBackend, error) {
 	groups := []string{}
 	if raw := os.Getenv(host.GroupsEnv); raw != "" && json.Unmarshal([]byte(raw), &groups) != nil {
 		return nil, errors.New("AGENTBUS_GROUPS must be a JSON array")
 	}
-	b := &PeerBackend{groups: groups, fixedID: strings.TrimSpace(os.Getenv(host.SessionIDEnv)), requestedName: strings.TrimSpace(os.Getenv(host.NameEnv)), processDone: make(chan error, 1)}
-	command, input, output, err := startPeerApp()
-	if err != nil {
-		return nil, err
-	}
-	b.app = newAppClient(input, output, nil, b.nativeFailure)
+	b := &PeerBackend{groups: groups, fixedID: strings.TrimSpace(os.Getenv(host.SessionIDEnv)), requestedName: strings.TrimSpace(os.Getenv(host.NameEnv))}
 	b.caller = sessionkit.NewCaller(b.Call)
-	go func() { b.processDone <- command.Wait() }()
-	if err = b.app.initialize(ctx, "Agentbus Codex Peer"); err != nil {
-		b.Shutdown()
-		return nil, err
-	}
-	if b.fixedID != "" {
-		if err = b.applyName(ctx, b.fixedID); err != nil {
-			b.Shutdown()
-			return nil, err
-		}
-		identity, observeErr := b.observe(ctx, b.fixedID)
-		if observeErr != nil {
-			b.Shutdown()
-			return nil, observeErr
-		}
-		if err = b.connect(ctx, identity); err != nil {
-			b.Shutdown()
-			return nil, err
-		}
-	}
 	return b, nil
+}
+
+var peerAppStart = startPeerApp
+
+func (b *PeerBackend) start(ctx context.Context) error {
+	b.mu.Lock()
+	started := b.app != nil
+	b.mu.Unlock()
+	if started {
+		return nil
+	}
+	command, input, output, err := peerAppStart()
+	if err != nil {
+		return err
+	}
+	app, done := newAppClient(input, output, nil, b.nativeFailure), make(chan error, 1)
+	b.mu.Lock()
+	b.app, b.processDone = app, done
+	b.mu.Unlock()
+	go func() {
+		done <- command.Wait()
+		close(done)
+	}()
+	if err = app.initialize(ctx, "Agentbus Codex Peer"); err != nil {
+		_ = app.close()
+		<-done
+		b.mu.Lock()
+		if b.app == app {
+			b.app, b.processDone = nil, nil
+		}
+		b.mu.Unlock()
+	}
+	return err
 }
 
 func startPeerApp() (*exec.Cmd, io.WriteCloser, io.Reader, error) {
@@ -118,6 +126,9 @@ func (b *PeerBackend) Prepare(ctx context.Context, meta json.RawMessage) error {
 	b.mu.Unlock()
 	if id == "" {
 		return errors.New("Codex peer identity is unavailable; start Codex with codex-peer")
+	}
+	if err := b.start(ctx); err != nil {
+		return err
 	}
 	if err := b.applyName(ctx, id); err != nil {
 		return err
