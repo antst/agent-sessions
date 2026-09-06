@@ -61,7 +61,7 @@ func (s *session) finishOpen(frame protocol.Frame) {
 	}
 	opened := decoded.(*protocol.OpenResult)
 	item := s.launch.entry
-	if !validPart(opened.SessionID) || !s.launch.fresh && opened.SessionID != unqualify(item.row.SessionID) {
+	if !validIDPart(opened.SessionID) || !s.launch.fresh && opened.SessionID != unqualify(item.row.SessionID) {
 		s.abortLaunch(answer{code: protocol.SpawnFailed, data: failure(s.child, "worker returned an invalid session id")})
 		s.orderlyStop()
 		return

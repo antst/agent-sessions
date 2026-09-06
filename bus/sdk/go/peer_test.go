@@ -66,6 +66,9 @@ func TestPeerDesiredIdentityAndDeepSnapshots(t *testing.T) {
 	mustRPC(t, <-firstDone)
 	peer.Shutdown()
 	await(t, peer.Closed(), "peer closed")
+	if peer.Err() != nil {
+		t.Fatalf("shutdown terminal error = %v", peer.Err())
+	}
 }
 
 func TestPeerReconnectsButSupersededStops(t *testing.T) {
@@ -126,8 +129,45 @@ func TestPeerReconnectsButSupersededStops(t *testing.T) {
 	}()
 	mustRPC(t, <-superseded)
 	await(t, peer.Closed(), "superseded peer closed")
+	if !isCode(peer.Err(), protocol.Superseded) {
+		t.Fatalf("superseded terminal error = %v", peer.Err())
+	}
 	if attempts.Load() != attemptsBeforeSupersession {
 		t.Fatal("superseded peer retried")
+	}
+}
+
+func TestPeerRejectedHelloIsTerminal(t *testing.T) {
+	var attempts atomic.Int32
+	requests, server, client := peerPipe(t)
+	connections := make(chan net.Conn, 1)
+	connections <- client
+	usePeerDialer(t, func(string, string) (net.Conn, error) {
+		attempts.Add(1)
+		select {
+		case fd := <-connections:
+			return fd, nil
+		default:
+			return nil, errors.New("offline")
+		}
+	})
+	peer, err := ConnectPeer(PeerIdentity{Product: "fixture-client", SessionID: "peer", Name: "peer title", Groups: []string{}, Info: map[string]any{}}, acceptDelivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := <-requests
+	mustRPC(t, server.Error(hello, protocol.InvalidHello, nil))
+	await(t, peer.Closed(), "rejected peer closed")
+	if !isCode(peer.Err(), protocol.InvalidHello) {
+		t.Fatalf("rejected hello error = %v", peer.Err())
+	}
+	select {
+	case <-peer.Ready():
+		t.Fatal("rejected peer became ready")
+	default:
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("rejected hello retried %d times", attempts.Load())
 	}
 }
 
