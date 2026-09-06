@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,8 +43,7 @@ func run(ctx context.Context, arguments []string) error {
 	if len(arguments) != 0 {
 		return errors.New("lane mode accepts no arguments")
 	}
-	digest := sha256.Sum256([]byte(os.Getenv(host.TokenEnv)))
-	product := codex.New(os.Getenv(host.SocketEnv), hex.EncodeToString(digest[:]))
+	product := codex.New(os.Getenv(host.SocketEnv), host.LaunchTokenDigest(os.Getenv(host.TokenEnv)))
 	worker := sessionkit.NewWorker(product)
 	product.SetShutdown(worker.Shutdown)
 	product.SetCall(func(ctx context.Context, method string, params any) (json.RawMessage, error) {
