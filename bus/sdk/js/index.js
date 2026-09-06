@@ -15,8 +15,11 @@ class Run {
     this.controller = new AbortController();
     parent?.addEventListener("abort", () => this.controller.abort(parent.reason), { once: true });
     this.Done = new Promise((resolve) => { this.finish = resolve; });
+    this.AdmittedDone = new Promise((resolve) => { this.admit = resolve; });
+    this.admitted = false;
   }
   Interrupted() { return this.interrupted; }
+  Admitted() { if (!this.admitted) { this.admitted = true; this.admit(); } }
 }
 
 class Worker {
@@ -57,7 +60,7 @@ class Worker {
       if (this.run.controller.signal.aborted) { void this.connection.error(request, -32004); return; }
       const run = this.run, call = !run.interrupted; run.interrupted = true; queueMicrotask(() => void this._interrupt(request, run, call)); return;
     }
-    if (request.method === "message.deliver") { if (this.run && !this.run.Done) void this.connection.result(request, { disposition: "rejected", reason: "closing" }); else queueMicrotask(() => void this._deliver(request)); return; }
+    if (request.method === "message.deliver") { const run = this.run; if (run && !run.Done) void this.connection.result(request, { disposition: "rejected", reason: "closing" }); else queueMicrotask(() => void this._deliver(request, run)); return; }
     if (request.method === "session.close") {
       const run = this.run;
       if (run && !run.Done) return this.shutdown();
@@ -81,8 +84,8 @@ class Worker {
     try { if (call && !run.controller.signal.aborted) await this.callbacks.interrupt(run.controller.signal, run); } catch (error) { callbackError("interrupt", error); }
     try { await this.connection.result(request, {}); } catch { this.shutdown(); }
   }
-  async _deliver(request) {
-    let receipt; try { receipt = await this.callbacks.deliver(this.controller.signal, request.params); } catch (error) { receipt = { disposition: "rejected", reason: clean(error) }; }
+  async _deliver(request, run) {
+    let receipt; try { receipt = await this.callbacks.deliver(this.controller.signal, request.params, undefined, run); } catch (error) { receipt = { disposition: "rejected", reason: clean(error) }; }
     try { await this.connection.result(request, receipt); } catch { this.shutdown(); }
   }
   async _close(request, run, interrupt) {

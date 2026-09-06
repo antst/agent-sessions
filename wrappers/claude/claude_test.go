@@ -150,7 +150,7 @@ func TestStreamRunDeliveryAndInterrupt(t *testing.T) {
 	preserved := <-writes.wrote
 	check(t, string(preserved) == `{"message":{"content":[{"text":"  preserved \n","type":"text"}],"role":"user"},"type":"user"}`, "user frame = %s", preserved)
 	p.writes, p.replays = 0, 0
-	receipt, err := p.Deliver(context.Background(), delivery("queued"))
+	receipt, err := p.Deliver(context.Background(), delivery("queued"), nil)
 	must(t, err)
 	check(t, receipt.Disposition == "queued_for_next_turn", "idle receipt = %#v", receipt)
 	done := make(chan sessionkit.TurnResult, 1)
@@ -167,7 +167,7 @@ func TestStreamRunDeliveryAndInterrupt(t *testing.T) {
 	native, err := p.start(context.Background(), "next")
 	must(t, err)
 	<-writes.wrote
-	receipt, err = p.Deliver(context.Background(), delivery("steer"))
+	receipt, err = p.Deliver(context.Background(), delivery("steer"), nil)
 	must(t, err)
 	check(t, receipt.Disposition == "injected" && strings.Contains(prompt(<-writes.wrote), "steer"), "active receipt = %#v", receipt)
 	p.receive(frame{Type: "user", IsReplay: true})
@@ -175,7 +175,7 @@ func TestStreamRunDeliveryAndInterrupt(t *testing.T) {
 	p.receive(frame{Type: "result", Subtype: "success", SessionID: fixtureID})
 	_, err = native.Wait(context.Background())
 	must(t, err)
-	receipt, err = p.Deliver(context.Background(), delivery("after"))
+	receipt, err = p.Deliver(context.Background(), delivery("after"), nil)
 	must(t, err)
 	check(t, receipt.Disposition == "queued_for_next_turn", "terminal receipt = %#v", receipt)
 
@@ -203,7 +203,7 @@ func TestPreReplayResultIsIgnored(t *testing.T) {
 	must(t, err)
 	<-writes.wrote
 	p.receive(frame{Type: "user", IsReplay: true})
-	receipt, err := p.Deliver(context.Background(), delivery("injected"))
+	receipt, err := p.Deliver(context.Background(), delivery("injected"), nil)
 	must(t, err)
 	check(t, receipt.Disposition == "injected", "receipt = %#v", receipt)
 	<-writes.wrote

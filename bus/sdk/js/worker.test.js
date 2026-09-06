@@ -27,17 +27,44 @@ class FakeProduct {
     if (input === "admission") { assert.equal(this.admitted, true); this.started.resolve(); return { outcome: "completed", result: "" }; }
     if (input === "block") { this.started.resolve(run); await this.release.promise; if (run.Interrupted()) return { outcome: "interrupted", result: "" }; run.Native = "native"; return { outcome: "completed", result: "" }; }
     if (input === "eof") { this.started.resolve(run); await aborted(cancel); throw cancel.reason; }
+    if (input === "admit") { this.nativeEvents.push("input"); this.started.resolve(run); await this.admit.promise; run.Admitted(); run.Admitted(); await this.release.promise; return { outcome: "completed", result: "" }; }
     if (input === "fail") return Promise.reject(new Error("failed exactly"));
     if (input === "long") return { outcome: "completed", result: "x".repeat(262145) };
     return { outcome: input === "interrupted" ? "interrupted" : "completed", result: input === "completed" || input === "interrupted" ? "" : input };
   }
   async interrupt(cancel, run) { this.calls[3]++; assert.equal(run.Interrupted(), true); this.interrupted?.resolve(); if (this.hangInterrupt) await aborted(cancel); if (this.interruptError) throw this.interruptError; }
-  async deliver(cancel) {
+  async deliver(cancel, _request, _identity, run) {
     this.calls[4]++; if (this.deliverStart) { this.deliverStart.resolve(); await aborted(cancel); throw cancel.reason; }
+    if (this.deliverRun) {
+      this.deliverRun.resolve(run);
+      if (this.deliverRelease) await this.deliverRelease.promise;
+      if (!run) return { disposition: "queued_for_next_turn" };
+      const state = await Promise.race([run.Done.then(() => "done"), run.AdmittedDone.then(() => "admitted")]);
+      if (state === "done") return { disposition: "queued_for_next_turn" };
+      this.nativeEvents?.push("steer"); this.steered?.resolve(); return { disposition: "injected" };
+    }
     if (this.outbound) await this.worker.caller.list({}); return { disposition: "injected" };
   }
   async close(cancel, request) { this.calls[5]++; this.closeSignal = cancel; this.closeRequest = request; this.closeAborted = cancel.aborted; this.closeStart?.resolve(); if (this.closeEnd) await this.closeEnd.promise; if (this.closeError) throw this.closeError; }
 }
+
+test("worker passes nil run to idle delivery", async (t) => {
+  const product = new FakeProduct(); product.deliverRun = deferred(); const { daemon } = await harness(t, product); const delivered = daemon.call("message.deliver", delivery);
+  assert.equal(await product.deliverRun.promise, null); assert.equal((await delivered).disposition, "queued_for_next_turn");
+});
+
+test("worker delivery keeps its admission run across terminal", async (t) => {
+  const product = new FakeProduct(); product.started = deferred(); product.release = deferred(); product.deliverRun = deferred(); product.deliverRelease = deferred(); const { daemon } = await harness(t, product);
+  const running = daemon.call("turn.run", { ...target, input: "block" }); const run = await product.started.promise, delivered = daemon.call("message.deliver", delivery); assert.equal(await product.deliverRun.promise, run);
+  product.release.resolve(); await running; await run.Done; let admitted = false; run.AdmittedDone.then(() => { admitted = true; }); await Promise.resolve(); assert.equal(admitted, false);
+  product.deliverRelease.resolve(); assert.equal((await delivered).disposition, "queued_for_next_turn");
+});
+
+test("run admission orders active delivery", async (t) => {
+  const product = new FakeProduct(); product.started = deferred(); product.release = deferred(); product.admit = deferred(); product.deliverRun = deferred(); product.nativeEvents = []; product.steered = deferred(); const { daemon } = await harness(t, product);
+  const running = daemon.call("turn.run", { ...target, input: "admit" }); const run = await product.started.promise, delivered = daemon.call("message.deliver", delivery); assert.equal(await product.deliverRun.promise, run); assert.deepEqual(product.nativeEvents, ["input"]);
+  product.admit.resolve(); await product.steered.promise; assert.deepEqual(product.nativeEvents, ["input", "steer"]); assert.equal((await delivered).disposition, "injected"); product.release.resolve(); await running;
+});
 
 test("connection write failure rejects once", async (t) => {
   const [clientSocket, daemonSocket] = pair(); clientSocket.failNext = true; const connection = new Connection(clientSocket, true);
@@ -219,7 +246,10 @@ for (const row of rows) test(`lifecycle: ${row.name}`, async (t) => {
     case "close-error": {
       product.closeError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); const { daemon } = await harness(t, product); assert.deepEqual(await daemon.call("session.close", target), {}); assert.equal(product.closeAborted, false); assert.deepEqual(product.closeRequest, target); assert.equal(stderr(), 'agentbus: product close: "first failure\\nsecond failure"\n'); break;
     }
-    case "close-forget": { const { daemon } = await harness(t, product); const request = { ...target, forget: true }; assert.deepEqual(await daemon.call("session.close", request), {}); assert.deepEqual(product.closeRequest, request); break; }
+    case "close-forget": {
+      product.started = deferred(); product.release = deferred(); product.interrupted = deferred(); const { worker, daemon, serving } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "block" }).catch((error) => error); await product.started.promise;
+      const request = { ...target, forget: true }, closing = daemon.call("session.close", request).catch((error) => error); await product.interrupted.promise; daemon.close(); await worker.closed; assert.deepEqual(product.closeRequest, request); assert.equal(product.closeAborted, true); product.release.resolve(); await Promise.all([serving, running, closing]); break;
+    }
     default: assert.fail(`unknown row ${row.name}`);
   }
   assert.deepEqual(product.calls, row.calls);
