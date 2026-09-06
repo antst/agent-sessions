@@ -15,3 +15,15 @@ func TestSessionLockStaleFileAndContention(t *testing.T) {
 	must(t, err)
 	must(t, lock.Close())
 }
+
+func TestSessionLockRenamePreservesClaim(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "bus.sock")
+	lock, err := AcquireSessionLock(socket, "example", "provisional")
+	must(t, err)
+	must(t, lock.Rename("session"))
+	_, err = AcquireSessionLock(socket, "example", "session")
+	check(t, err != nil && err.Error() == "session busy", "renamed lock contention = %v", err)
+	_, err = os.Stat(filepath.Join(filepath.Dir(socket), "locks", "example", "provisional"))
+	check(t, os.IsNotExist(err), "provisional lock remains: %v", err)
+	must(t, lock.Close())
+}
