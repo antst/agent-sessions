@@ -128,7 +128,7 @@ func (s *session) describe(frame protocol.Frame, input *protocol.LaneDescribeReq
 	start.entry = &entry{row: row{Product: input.Product}, claimed: true, done: make(chan struct{})}
 	if code := s.daemon.directory.reserveDescribe(start); code != 0 {
 		start.timer.Stop()
-		s.error(frame, code, nil)
+		s.error(frame, code, internalData(code))
 		return
 	}
 	s.launchRequest(frame, start)
@@ -153,7 +153,7 @@ func (s *session) spawn(frame protocol.Frame, input *protocol.LaneSpawnRequest) 
 		_, code = s.daemon.directory.reserveResume(id, s.identity.row.Groups, start)
 		if code != 0 {
 			start.timer.Stop()
-			s.error(frame, code, nil)
+			s.error(frame, code, internalData(code))
 			return
 		}
 		s.launchRequest(frame, start)
@@ -177,7 +177,7 @@ func (s *session) spawn(frame protocol.Frame, input *protocol.LaneSpawnRequest) 
 	_, code := s.daemon.directory.reserveFresh(value, start)
 	if code != 0 {
 		start.timer.Stop()
-		s.error(frame, code, nil)
+		s.error(frame, code, internalData(code))
 		return
 	}
 	s.launchRequest(frame, start)
@@ -354,6 +354,13 @@ func reason(code int, fallback string) string {
 	default:
 		return fallback
 	}
+}
+
+func internalData(code int) any {
+	if code == protocol.Internal {
+		return "daemon shutting down"
+	}
+	return nil
 }
 
 func unique(values []string) []string {
