@@ -1,0 +1,29 @@
+# Codex product facts
+
+- `codex app-server --stdio` accepts newline-delimited JSON-RPC requests and emits response objects without a `jsonrpc` member. — verified: 0.153.4 — source: `/home/antst/agentbus-evidence/codex-p3-20260906T074029Z/P3-appserver.jsonl`
+- An App Server client initializes with `initialize`, then sends the `initialized` notification. — verified: 0.153.4 — source: `/home/antst/agentbus-evidence/codex-p3-20260906T074029Z/P3-appserver.jsonl`
+- `thread/start` with `ephemeral:false`, `serviceName:"codex-peer"`, and `historyMode:"legacy"` returns the product-owned thread UUID. — verified: 0.153.4 — source: `/home/antst/agentbus-evidence/codex-p3-20260906T074029Z/P3-appserver.jsonl`
+- `thread/start` reports the effective model, cwd, approval policy, sandbox, reasoning effort, and thread record at the top level. — verified: 0.153.2 — source: `/home/antst/agentbus-evidence/codex-20260906T071535Z/P0-appserver.jsonl`
+- A newly created and named zero-turn legacy thread is materialized by `thread/resume` with `excludeTurns:true`. — verified: 0.153.4 — source: `/home/antst/agentbus-evidence/codex-p3-20260906T074029Z/P3-appserver.jsonl`
+- `thread/resume` reports the effective model, cwd, approval policy, sandbox, reasoning effort, and thread record at the top level. — verified: 0.153.4 — source: `/home/antst/agentbus-evidence/codex-p3-20260906T074029Z/P3-appserver.jsonl`
+- `turn/start` returns a turn ID before the matching `turn/started` notification. — verified: 0.153.4 — source: `/home/antst/agentbus-evidence/codex-p3-20260906T074029Z/P3-appserver.jsonl`
+- `turn/started` carries `threadId` and a turn object whose running status is `inProgress`. — verified: 0.153.4 — source: `/home/antst/agentbus-evidence/codex-p3-20260906T074029Z/P3-appserver.jsonl`
+- `turn/steer` accepts `threadId`, `expectedTurnId`, and input, then returns the same `turnId`; the steered text affects the final answer. — verified: 0.153.2 — source: `/home/antst/agentbus-evidence/codex-p1-20260906T071721Z/P1-appserver.jsonl`
+- `turn/interrupt` before `turn/started` fails with code `-32600` and message `no active turn to interrupt`. — verified: 0.153.4 — source: `/home/antst/agentbus-evidence/codex-p3-20260906T074006Z/P3-appserver.jsonl`
+- `turn/interrupt` after `turn/started` returns `{}`, then `turn/completed` reports status `interrupted`. — verified: 0.153.4 — source: `/home/antst/agentbus-evidence/codex-p3-20260906T074029Z/P3-appserver.jsonl`
+- A completed `turn/completed` notification carries summary items, timestamps, nullable error, and an `agentMessage` item with phase `final_answer`. — verified: 0.153.2 — source: `/home/antst/agentbus-evidence/codex-20260906T071535Z/P0-appserver.jsonl`
+- Per-thread `config.mcp_servers.<name>.url` starts a streamable HTTP MCP client that sends initialize, initialized, tools/list, and tools/call without a session header. — verified: 0.153.2 — source: `/home/antst/agentbus-evidence/codex-20260906T071535Z/P0-http.jsonl`
+- MCP `tools/call` metadata includes `_meta.threadId` and `x-codex-turn-metadata.thread_id`, both equal to the native thread UUID. — verified: 0.153.2 — source: `/home/antst/agentbus-evidence/codex-20260906T071535Z/P0-http.jsonl`
+- The 0.4.0 connector takes Codex identity from MCP `_meta.threadId`, never from tool arguments. — verified: 0.4.0 — source: `cmd/agent-sessions/connector.go:247`
+- The 0.4.0 connector delivers to an active interactive thread with `turn/steer` and wakes an idle thread with `turn/start`. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:479`
+- The 0.4.0 launcher starts `codex app-server daemon` and runs the TUI through `--remote unix://<control-socket>`. — verified: 0.4.0 — source: `internal/launcher/codex_peer.go:129`
+- The 0.4.0 lane validates effective approval after `thread/start`, validates effective cwd and approval after `thread/resume`, and applies approval and sandbox through `thread/settings/update`. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:224`
+- The 0.4.0 lane disables `features.code_mode_host` so headless tool calls stay in the App Server. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:713`
+- The 0.4.0 App Server bridge handles `mcpServer/elicitation/request` and `item/tool/call`; it rejects other headless server requests with `-32601`. — verified: 0.4.0 — source: `internal/bridge/dynamic_tools.go:26`
+- The 0.4.0 observer recognizes `thread/started`, `turn/started`, `turn/completed`, `thread/status/changed`, and `thread/name/updated`. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:904`
+- The 0.4.0 resume path avoids a second `thread/resume` while its exact App Server client already owns the loaded thread. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:355`
+- The 0.4.0 recovery path can unarchive a thread, restore loaded subscriptions after reconnect, and resolve a durable active turn with `thread/turns/list`. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:409`
+- The 0.4.0 close path archives the exact thread and unsubscribes so its stdio MCP child is released. — verified: 0.4.0 — source: `internal/bridge/codex_native.go:759`
+- `UNVERIFIED:` A plain current-version `codex-peer` launch, without the old daemon-start and `--remote` steps, provides the control socket used by its resident MCP backend.
+- `UNVERIFIED:` The exact `turn/completed` error object and status emitted by Codex 0.153.x for a failed native turn have not been captured.
+- `UNVERIFIED:` Per-thread stdio `mcp_servers.agent_sessions` deterministically overrides the installed same-name plugin entry in Codex 0.153.x.
