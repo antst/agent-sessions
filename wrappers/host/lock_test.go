@@ -27,3 +27,19 @@ func TestSessionLockRenamePreservesClaim(t *testing.T) {
 	check(t, os.IsNotExist(err), "provisional lock remains: %v", err)
 	must(t, lock.Close())
 }
+
+func TestSessionLockRenameDoesNotReplaceHolder(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "bus.sock")
+	holder, err := AcquireSessionLock(socket, "example", "session")
+	must(t, err)
+	provisional, err := AcquireSessionLock(socket, "example", "provisional")
+	must(t, err)
+	err = provisional.Rename("session")
+	check(t, err != nil && err.Error() == "session busy", "rename collision = %v", err)
+	_, err = os.Stat(filepath.Join(filepath.Dir(socket), "locks", "example", "provisional"))
+	check(t, os.IsNotExist(err), "provisional lock remains: %v", err)
+	_, err = AcquireSessionLock(socket, "example", "session")
+	check(t, err != nil && err.Error() == "session busy", "holder was replaced: %v", err)
+	must(t, provisional.Close())
+	must(t, holder.Close())
+}

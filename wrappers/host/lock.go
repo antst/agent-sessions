@@ -42,7 +42,15 @@ func (l *SessionLock) Rename(name string) error {
 		return errors.New("session lock path is invalid")
 	}
 	path := filepath.Join(filepath.Dir(l.path), name)
-	if err := os.Rename(l.path, path); err != nil {
+	if err := os.Link(l.path, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			_ = os.Remove(l.path)
+			return errors.New("session busy")
+		}
+		return err
+	}
+	if err := os.Remove(l.path); err != nil {
+		_ = os.Remove(path)
 		return err
 	}
 	l.path = path
