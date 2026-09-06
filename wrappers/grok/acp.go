@@ -33,6 +33,7 @@ type interjectionNotice struct{ SessionID, InterjectionID string }
 
 type acpClient struct {
 	input       io.WriteCloser
+	output      io.ReadCloser
 	requests    sync.Mutex
 	writes      sync.Mutex
 	next        int64
@@ -44,7 +45,7 @@ type acpClient struct {
 }
 
 func newACPClient(input io.WriteCloser, output io.ReadCloser, notify func(acpFrame)) *acpClient {
-	c := &acpClient{input: input, responses: make(chan acpFrame, 16), interjected: make(chan interjectionNotice, 16), done: make(chan struct{}), notify: notify}
+	c := &acpClient{input: input, output: output, responses: make(chan acpFrame, 16), interjected: make(chan interjectionNotice, 16), done: make(chan struct{}), notify: notify}
 	go c.read(output)
 	return c
 }
@@ -169,4 +170,4 @@ func (c *acpClient) interject(ctx context.Context, sessionID, messageID, text st
 	}
 }
 
-func (c *acpClient) close() { _ = c.input.Close() }
+func (c *acpClient) close() { _ = c.input.Close(); _ = c.output.Close() }

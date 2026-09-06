@@ -43,6 +43,7 @@ type PeerBackend struct {
 }
 
 type peerDelivery struct {
+	ctx      context.Context
 	identity sessionkit.PeerIdentity
 	request  sessionkit.DeliveryRequest
 	reply    chan peerDeliveryResult
@@ -53,10 +54,10 @@ type peerDeliveryResult struct {
 	err     error
 }
 
-func startPeerClient(ctx context.Context, leaderPath, cwd string, notify func(acpFrame)) (*acpClient, *nativeProcess, error) {
+func startPeerClient(lifetimeCtx, requestCtx context.Context, leaderPath, cwd string, notify func(acpFrame)) (*acpClient, *nativeProcess, error) {
 	cmd := command("grok", "--no-auto-update", "--permission-mode", "default", "--leader-socket", leaderPath, "agent", "--leader", "stdio")
 	cmd.Dir, cmd.Env, cmd.Stderr, cmd.SysProcAttr = cwd, nativeEnvironment(), os.Stderr, &syscall.SysProcAttr{Setpgid: true}
-	return startObserverClient(ctx, cmd, notify)
+	return startObserverClient(lifetimeCtx, requestCtx, cmd, notify)
 }
 
 func NewPeerBackend(ctx context.Context, environment []string) (*PeerBackend, error) {
@@ -118,7 +119,7 @@ func RunInteractive(ctx context.Context, plan host.ExecPlan) error {
 	}
 	childCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	hold, holdProcess, err := startPeerClient(childCtx, leaderPath, cwd, nil)
+	hold, holdProcess, err := startPeerClient(childCtx, childCtx, leaderPath, cwd, nil)
 	if err != nil {
 		return errors.Join(err, closeNative("leader", leader))
 	}
@@ -211,10 +212,10 @@ func (b *PeerBackend) Call(ctx context.Context, method string, params any) (json
 
 func (b *PeerBackend) Caller() *sessionkit.Caller { return b.peer.Caller }
 
-func (*PeerBackend) Prepare(context.Context, json.RawMessage) error { return nil }
+func (b *PeerBackend) Prepare(context.Context, json.RawMessage) error { return b.peer.Err() }
 
 func (b *PeerBackend) deliver(ctx context.Context, identity sessionkit.PeerIdentity, request sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
-	delivery := peerDelivery{identity: identity, request: request, reply: make(chan peerDeliveryResult, 1)}
+	delivery := peerDelivery{ctx: ctx, identity: identity, request: request, reply: make(chan peerDeliveryResult, 1)}
 	select {
 	case b.deliveries <- delivery:
 	case <-ctx.Done():
@@ -236,21 +237,23 @@ func (b *PeerBackend) serveDeliveries(ctx context.Context) {
 	defer close(b.done)
 	var observer *acpClient
 	var process *nativeProcess
-	identity := b.identity
 	defer func() { stopPeerClient(observer, process) }()
 	for {
 		select {
 		case delivery := <-b.deliveries:
 			if observer == nil {
 				var err error
-				observer, process, err = startPeerClient(ctx, b.leader, b.cwd, nil)
+				observer, process, err = startPeerClient(ctx, delivery.ctx, b.leader, b.cwd, nil)
 				if err != nil {
 					delivery.reply <- peerDeliveryResult{err: fmt.Errorf("start Grok observer: %w", err)}
 					observer, process = nil, nil
 					continue
 				}
 			}
-			receipt, err := b.deliverOne(ctx, observer, &identity, delivery)
+			receipt, err := b.deliverOne(delivery.ctx, observer, delivery)
+			if ctx.Err() != nil {
+				receipt, err = sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "shutting down"}, nil
+			}
 			delivery.reply <- peerDeliveryResult{receipt: receipt, err: err}
 		case <-ctx.Done():
 			for {
@@ -265,17 +268,12 @@ func (b *PeerBackend) serveDeliveries(ctx context.Context) {
 	}
 }
 
-func (b *PeerBackend) deliverOne(ctx context.Context, observer *acpClient, identity *sessionkit.PeerIdentity, delivery peerDelivery) (sessionkit.DeliveryReceipt, error) {
+func (b *PeerBackend) deliverOne(ctx context.Context, observer *acpClient, delivery peerDelivery) (sessionkit.DeliveryReceipt, error) {
 	row, err := roster(ctx, observer, delivery.identity.SessionID)
 	if err == nil {
 		name := first(row.Title, row.SessionID)
 		info := map[string]any{"cwd": row.Cwd}
-		if name != identity.Name || row.Cwd != identity.Info["cwd"] {
-			err = b.peer.Rehello(name, info)
-			if err == nil {
-				identity.Name, identity.Info = name, info
-			}
-		}
+		err = b.peer.Rehello(ctx, name, info)
 	}
 	if errors.Is(err, errNoLeader) {
 		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "no_leader"}, nil

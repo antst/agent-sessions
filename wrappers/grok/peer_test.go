@@ -67,7 +67,9 @@ func TestProductHelperOwnsPeerAndLazilyObserves(t *testing.T) {
 	recordPath := filepath.Join(root, "record")
 	t.Setenv("GROK_TEST_RECORD", recordPath)
 	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
-	t.Setenv("GROK_TEST_TITLES", "product title")
+	t.Setenv("GROK_TEST_TITLES", "product title,"+testSessionID)
+	blocked := filepath.Join(root, "interject-release")
+	t.Setenv("GROK_TEST_INTERJECT_BLOCK", blocked)
 	cwd, err := os.Getwd()
 	must(t, err)
 	t.Setenv("GROK_TEST_CWD", cwd)
@@ -91,31 +93,34 @@ func TestProductHelperOwnsPeerAndLazilyObserves(t *testing.T) {
 	result := <-opened
 	must(t, result.err)
 	backend := result.backend
+	<-backend.peer.Ready()
 	check(t, backend.Caller() == backend.peer.Caller, "helper constructed a second Caller")
 	must(t, backend.Prepare(context.Background(), nil))
 	check(t, len(records(t, recordPath)) == 0, "tool preparation opened observer")
 
-	delivered := make(chan struct {
-		receipt sessionkit.DeliveryReceipt
-		err     error
-	}, 1)
-	go func() {
-		receipt, err := backend.deliver(context.Background(), backend.identity, delivery("peer message"))
-		delivered <- struct {
-			receipt sessionkit.DeliveryReceipt
-			err     error
-		}{receipt, err}
-	}()
+	deliveryCtx, cancel := context.WithCancel(context.Background())
+	delivered := deliverPeer(backend, deliveryCtx, delivery("peer message"))
 	rehello := <-hellos
 	check(t, rehello.SessionID == testSessionID && rehello.Name == "product title", "title re-hello = %#v", rehello)
-	rehello.ack <- true
+	cancel()
+	check(t, errors.Is((<-delivered).err, context.Canceled), "cancelled delivery did not return its context error")
+	publishTestFile(blocked, []byte("ready"))
+	request := delivery("again")
+	request.MessageID = "again"
+	delivered = deliverPeer(backend, context.Background(), request)
+	corrected := <-hellos
+	check(t, corrected.Name == testSessionID, "corrective title re-hello = %#v", corrected)
+	corrected.ack <- true
 	answer := <-delivered
-	must(t, answer.err)
-	check(t, answer.receipt.Disposition == "injected", "peer delivery = %#v", answer.receipt)
-	check(t, len(peerClientPIDs(t, records(t, recordPath))) == 1, "first delivery did not open exactly one observer")
-	receipt, err := backend.deliver(context.Background(), backend.identity, delivery("again"))
+	check(t, answer.err == nil && answer.receipt.Disposition == "injected" && len(peerClientPIDs(t, records(t, recordPath))) == 1, "observer was not retained: %#v", answer)
+	rehello.ack <- true
+	converged := <-hellos
+	check(t, converged.Name == testSessionID, "late-ack convergence hello = %#v", converged)
+	converged.ack <- true
+	<-converged.done
+	listed, err := backend.Caller().List(context.Background(), sessionkit.SessionListRequest{})
 	must(t, err)
-	check(t, receipt.Disposition == "injected" && len(peerClientPIDs(t, records(t, recordPath))) == 1, "observer was not retained: %#v", receipt)
+	check(t, len(listed.Sessions) == 1 && listed.Sessions[0].Name == testSessionID+"@local", "final bus identity = %#v", listed.Sessions)
 	backend.Shutdown()
 }
 
@@ -155,27 +160,21 @@ func TestPeerMCPServesWhileBusAdmissionIsHeld(t *testing.T) {
 		_ = output.Close()
 	}()
 	encoder := json.NewEncoder(writeInput)
-	must(t, encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": map[string]any{}}))
-	must(t, encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": map[string]any{}}))
 	scanner := bufio.NewScanner(readOutput)
-	seen := map[float64]bool{}
-	for len(seen) != 2 {
-		check(t, scanner.Scan(), "MCP response absent: %v", scanner.Err())
-		var response map[string]any
-		must(t, json.Unmarshal(scanner.Bytes(), &response))
-		seen[response["id"].(float64)] = response["result"] != nil
-	}
-	check(t, seen[1] && seen[2], "MCP admission responses = %#v", seen)
+	check(t, mcpResponse(t, encoder, scanner, 1, "initialize", map[string]any{})["result"] != nil, "MCP initialize failed")
+	check(t, mcpResponse(t, encoder, scanner, 2, "tools/list", map[string]any{})["result"] != nil, "MCP tools/list failed")
 	hello := <-hellos
-	hello.ack <- true
-	<-backend.peer.Ready()
-	check(t, backend.Caller() == backend.peer.Caller, "bus admission created a second Caller")
+	hello.ack <- false
+	<-backend.peer.Closed()
+	terminal := mcpResponse(t, encoder, scanner, 3, "tools/call", map[string]any{"name": "sessionbus", "arguments": map[string]any{"action": "list"}})
+	failed := terminal["error"].(map[string]any)
+	check(t, failed["code"] == float64(-32602) && failed["message"] == "invalid_hello", "terminal tools/call = %#v", terminal)
 	must(t, writeInput.Close())
 	must(t, <-served)
 	backend.Shutdown()
 }
 
-func TestPeerDeliveryOwnerShutdownCrossesBlockedRoster(t *testing.T) {
+func TestPeerDeliveryOwnerShutdownCrossesBlockedInterject(t *testing.T) {
 	root := t.TempDir()
 	socket := filepath.Join(root, "sessionbus.sock")
 	server, hellos := fakeDaemon(t, socket)
@@ -184,7 +183,7 @@ func TestPeerDeliveryOwnerShutdownCrossesBlockedRoster(t *testing.T) {
 	recordPath := filepath.Join(root, "record")
 	t.Setenv("GROK_TEST_RECORD", recordPath)
 	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
-	t.Setenv("GROK_TEST_ROSTER_BLOCK", filepath.Join(root, "never"))
+	t.Setenv("GROK_TEST_INTERJECT_BLOCK", filepath.Join(root, "never"))
 	observerPID := filepath.Join(root, "observer.pid")
 	t.Setenv("GROK_TEST_OBSERVER_PID", observerPID)
 	environment := setEnvironment(setEnvironment(os.Environ(), grokSessionIDEnv, testSessionID), grokLeaderSocketEnv, filepath.Join(root, "leader.sock"))
@@ -193,19 +192,15 @@ func TestPeerDeliveryOwnerShutdownCrossesBlockedRoster(t *testing.T) {
 	hello := <-hellos
 	hello.ack <- true
 	<-backend.peer.Ready()
-	delivered := make(chan peerDeliveryResult, 1)
-	go func() {
-		receipt, err := backend.deliver(context.Background(), backend.identity, delivery("blocked"))
-		delivered <- peerDeliveryResult{receipt: receipt, err: err}
-	}()
-	waitFrame(t, recordPath, "_x.ai/sessions/list", 1)
+	delivered := deliverPeer(backend, context.Background(), delivery("blocked"))
+	waitFrame(t, recordPath, "_x.ai/interject", 1)
 	pidfd := interactivePidfd(t, observerPID)
 	defer unix.Close(pidfd)
 	closed := make(chan struct{})
 	go func() { backend.Shutdown(); close(closed) }()
 	<-closed
 	result := <-delivered
-	check(t, result.receipt.Reason == "shutting down" || errors.Is(result.err, context.Canceled), "blocked delivery = %#v / %v", result.receipt, result.err)
+	check(t, result.err == nil && result.receipt.Reason == "shutting down", "blocked delivery = %#v / %v", result.receipt, result.err)
 	check(t, !processRunning(t, pidfd), "blocked observer survived helper shutdown")
 }
 
@@ -394,10 +389,13 @@ func TestPeerShutdownKillsItsObserverProcessGroup(t *testing.T) {
 }
 
 type hello struct {
-	SessionID string   `json:"session_id"`
-	Name      string   `json:"name"`
-	Groups    []string `json:"groups"`
+	SessionID string         `json:"session_id"`
+	Name      string         `json:"name"`
+	Product   string         `json:"product"`
+	Groups    []string       `json:"groups"`
+	Info      map[string]any `json:"info"`
 	ack       chan bool
+	done      chan struct{}
 }
 
 type testSignal struct{ os.Signal }
@@ -418,6 +416,7 @@ func fakeDaemon(t *testing.T, path string) (net.Listener, <-chan hello) {
 		defer connection.Close()
 		scanner := bufio.NewScanner(connection)
 		var write sync.Mutex
+		var admitted hello
 		for scanner.Scan() {
 			var frame struct {
 				ID     int64           `json:"id"`
@@ -431,17 +430,27 @@ func fakeDaemon(t *testing.T, path string) (net.Listener, <-chan hello) {
 				var value hello
 				_ = json.Unmarshal(frame.Params, &value)
 				value.ack = make(chan bool, 1)
+				value.done = make(chan struct{})
 				hellos <- value
 				go func(id int64, value hello) {
+					defer close(value.done)
 					accepted := <-value.ack
 					write.Lock()
 					if accepted {
+						admitted = value
 						_ = json.NewEncoder(connection).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{}})
 					} else {
 						_ = json.NewEncoder(connection).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32602, "message": "invalid_hello"}})
 					}
 					write.Unlock()
 				}(frame.ID, value)
+				continue
+			}
+			if frame.Method == "session.list" {
+				write.Lock()
+				row := sessionkit.SessionSummary{SessionID: admitted.SessionID + "@local", Kind: "peer", Product: admitted.Product, Name: admitted.Name + "@local", Groups: admitted.Groups, Connected: true, Info: admitted.Info}
+				_ = json.NewEncoder(connection).Encode(map[string]any{"jsonrpc": "2.0", "id": frame.ID, "result": sessionkit.SessionListResult{Sessions: []sessionkit.SessionSummary{row}}})
+				write.Unlock()
 				continue
 			}
 			if frame.Method != "" {
@@ -452,6 +461,25 @@ func fakeDaemon(t *testing.T, path string) (net.Listener, <-chan hello) {
 		}
 	}()
 	return listener, hellos
+}
+
+func deliverPeer(backend *PeerBackend, ctx context.Context, request sessionkit.DeliveryRequest) <-chan peerDeliveryResult {
+	result := make(chan peerDeliveryResult, 1)
+	go func() {
+		receipt, err := backend.deliver(ctx, backend.identity, request)
+		result <- peerDeliveryResult{receipt: receipt, err: err}
+	}()
+	return result
+}
+
+func mcpResponse(t *testing.T, encoder *json.Encoder, scanner *bufio.Scanner, id int, method string, params any) map[string]any {
+	t.Helper()
+	must(t, encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+	check(t, scanner.Scan(), "MCP response absent: %v", scanner.Err())
+	var response map[string]any
+	must(t, json.Unmarshal(scanner.Bytes(), &response))
+	check(t, response["id"] == float64(id), "MCP response id = %#v", response)
+	return response
 }
 
 func interactivePidfd(t *testing.T, path string) int {
