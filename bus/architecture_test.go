@@ -142,6 +142,7 @@ func TestFormerBrandGuardAllowsOnlyHistoricalPaths(t *testing.T) {
 		{"`ff81565:docs/" + "agent" + "-sessions.md\u00a0prose`", true},
 		{"`ff81565:docs/../" + "agent" + "-sessions.md`", true},
 		{"`/home/antst/" + "agent" + "bus-evidence/run/frame.json`", false},
+		{"`/home/antst/" + "agent" + "bus-evidence/run/mcp-agent" + "bus-frame.json`", false},
 	} {
 		if got := containsFormerBrandReferences([]byte(test.value)); got != test.want {
 			t.Errorf("guard(%q) = %v, want %v", test.value, got, test.want)
@@ -152,7 +153,13 @@ func TestFormerBrandGuardAllowsOnlyHistoricalPaths(t *testing.T) {
 func containsFormerBrandReferences(contents []byte) bool {
 	evidence := []byte("/home/antst/agent" + "bus-evidence/")
 	for _, line := range bytes.Split(contents, []byte{'\n'}) {
-		line = bytes.ReplaceAll(line, evidence, nil)
+		for start := bytes.Index(line, evidence); start >= 0; start = bytes.Index(line, evidence) {
+			end := start + len(evidence)
+			for end < len(line) && !bytes.ContainsRune([]byte(" \t`; )"), rune(line[end])) {
+				end++
+			}
+			line = append(line[:start], line[end:]...)
+		}
 		parts := bytes.Split(line, []byte{'`'})
 		for index := 1; index < len(parts); index += 2 {
 			if commitQualified(parts[index]) {
