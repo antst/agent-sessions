@@ -85,22 +85,37 @@ func TestBusSourceContainsNoProductNames(t *testing.T) {
 	}
 }
 
-func TestBusAndWrappersContainNoFormerBrand(t *testing.T) {
+func TestNewTreeContainsNoFormerBrand(t *testing.T) {
 	repository := filepath.Clean("..")
-	former := []byte("agent" + "bus")
-	for _, root := range []string{filepath.Join(repository, "bus"), filepath.Join(repository, "wrappers")} {
+	roots := []string{
+		filepath.Join(repository, "go.mod"),
+		filepath.Join(repository, "bus"),
+		filepath.Join(repository, "wrappers"),
+		filepath.Join(repository, "docs", "products"),
+		filepath.Join(repository, "docs", "designs"),
+	}
+	commands, err := os.ReadDir(filepath.Join(repository, "cmd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range commands {
+		if command.IsDir() && strings.HasSuffix(command.Name(), "-peer") {
+			roots = append(roots, filepath.Join(repository, "cmd", command.Name()))
+		}
+	}
+	for _, root := range roots {
 		if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil || entry.IsDir() {
 				return err
 			}
-			if bytes.Contains(bytes.ToLower([]byte(path)), former) {
+			if containsFormerBrand([]byte(path)) {
 				t.Errorf("former brand remains in path %s", path)
 			}
 			contents, err := os.ReadFile(path)
 			if err != nil {
 				return err
 			}
-			if bytes.Contains(bytes.ToLower(contents), former) {
+			if containsFormerBrandReferences(contents) {
 				t.Errorf("former brand remains in %s", path)
 			}
 			return nil
@@ -108,6 +123,72 @@ func TestBusAndWrappersContainNoFormerBrand(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+}
+
+func TestFormerBrandGuardAllowsOnlyHistoricalPaths(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  bool
+	}{
+		{"agent" + "bus", true},
+		{"AGENT" + "BUS_SOCKET", true},
+		{"@" + "agent" + "bus/kit", true},
+		{"agent" + "_sessions", true},
+		{"agent" + "-sessions", true},
+		{"ff81565:cmd/" + "agent" + "-sessions/main.go", true},
+		{"`ff81565:cmd/" + "agent" + "-sessions/main.go`", false},
+		{"`/home/antst/" + "agent" + "bus-evidence/run/frame.json`", false},
+	} {
+		if got := containsFormerBrandReferences([]byte(test.value)); got != test.want {
+			t.Errorf("guard(%q) = %v, want %v", test.value, got, test.want)
+		}
+	}
+}
+
+func containsFormerBrandReferences(contents []byte) bool {
+	evidence := []byte("/home/antst/agent" + "bus-evidence/")
+	for _, line := range bytes.Split(contents, []byte{'\n'}) {
+		line = bytes.ReplaceAll(line, evidence, nil)
+		parts := bytes.Split(line, []byte{'`'})
+		for index := 1; index < len(parts); index += 2 {
+			if commitQualified(parts[index]) {
+				parts[index] = nil
+			}
+		}
+		if containsFormerBrand(bytes.Join(parts, nil)) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsFormerBrand(value []byte) bool {
+	lower := bytes.ToLower(value)
+	for _, former := range [][]byte{
+		[]byte("agent" + "bus"),
+		[]byte("agent" + "_sessions"),
+		[]byte("agent" + "-sessions"),
+	} {
+		if bytes.Contains(lower, former) {
+			return true
+		}
+	}
+	return false
+}
+
+func commitQualified(value []byte) bool {
+	colon := bytes.IndexByte(value, ':')
+	if colon < 7 || colon > 40 {
+		return false
+	}
+	for _, character := range value[:colon] {
+		if character < '0' || character > '9' {
+			if character < 'a' || character > 'f' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func checkGoImports(t *testing.T, root string, check func(string, string)) {

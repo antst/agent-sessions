@@ -1,0 +1,36 @@
+name: Publish npm kit
+
+on:
+  push:
+    tags:
+      - "kit-v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Verify tag
+        run: |
+          version="$(node -p "require('./bus/package.json').version")"
+          test "$GITHUB_REF_NAME" = "kit-v${version}" || {
+            echo "tag $GITHUB_REF_NAME does not match bus/package.json version $version" >&2
+            exit 1
+          }
+      - name: Install
+        working-directory: bus
+        run: npm ci --ignore-scripts || npm install --no-package-lock
+      - name: Test
+        working-directory: bus
+        run: npm test
+      - name: Publish
+        working-directory: bus
+        run: npm publish --provenance

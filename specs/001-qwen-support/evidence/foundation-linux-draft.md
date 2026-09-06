@@ -45,7 +45,7 @@ All commands ran from `/home/antst/agent-sessions` with `-count=1`.
 
 ```text
 go test ./internal/federator -run 'Test(ProductDescriptors|SessionCatalog|Grouped|PrepareRemoteLane|PeerRegistration|Reconcile|CommittedClaudePeerCleanupDebt|CurrentRegistryFormat)' -count=1
-ok github.com/antst/sessionbus/internal/federator 0.415s
+ok github.com/antst/agent-sessions/internal/federator 0.415s
 ```
 
 This covers the authoritative four-product inventory, exact group/catalog behavior, grouped routing,
@@ -56,14 +56,14 @@ format.
 
 ```text
 go test ./internal/launcher -run 'Test(LauncherProductProjection|PeerLaunchContext|CleanupClaudePeerArtifacts|ReadClaudeNativePeerRecord|GenericResumeInvocation)' -count=1
-ok github.com/antst/sessionbus/internal/launcher 0.009s
+ok github.com/antst/agent-sessions/internal/launcher 0.009s
 ```
 
 ### Bridge help, lifecycle, stable socket, and cleanup
 
 ```text
 go test ./internal/bridge -run 'Test(BridgeProductProjection|ExistingLaneParsedGroupOptions|.*LaneUsageAdvertisesGroupOptions|NativeShimPublishesPrivateStablePeerAndQueuesMessage|CleanupPreservesNativeClaudeAndUnownedFiles|CleanupRemovesOrphanedBridgeSocketAliases|.*LaneCleanup|.*OwnerDeath|ToolRootLedgerCrashRetryRetainsCleanupDebt)' -count=1
-ok github.com/antst/sessionbus/internal/bridge 2.395s
+ok github.com/antst/agent-sessions/internal/bridge 2.395s
 ```
 
 `TestNativeShimPublishesPrivateStablePeerAndQueuesMessage` created a real Linux Unix listener and

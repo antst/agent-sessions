@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/antst/sessionbus/specs/001-qwen-support/contracts/release-evidence.schema.json",
+  "$id": "https://github.com/antst/agent-sessions/specs/001-qwen-support/contracts/release-evidence.schema.json",
   "title": "Agent Sessions v0.2.4 release evidence",
   "type": "object",
   "additionalProperties": false,

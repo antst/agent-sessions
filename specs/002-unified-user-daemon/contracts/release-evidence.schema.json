@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/antst/sessionbus/specs/002-unified-user-daemon/contracts/release-evidence.schema.json",
+  "$id": "https://github.com/antst/agent-sessions/specs/002-unified-user-daemon/contracts/release-evidence.schema.json",
   "title": "Agent Sessions v0.4.0 release evidence",
   "type": "object",
   "additionalProperties": false,
