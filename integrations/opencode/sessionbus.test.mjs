@@ -28,7 +28,7 @@ function peerFactory(records) {
     const peer = {
       identity, deliver, environment, rehellos: [], stopped: false,
       caller: { async action(action, argumentsValue) { records.actions.push({ identity, action, argumentsValue }); return { ok: true }; } },
-      async rehello(signal, name, info) { assert.equal(signal, undefined); if (!this.stopped) this.rehellos.push({ name, info }); },
+      async rehello(signal, name, info) { assert.equal(signal, undefined); if (this.stopped) throw new Error("superseded"); this.rehellos.push({ name, info }); },
       shutdown() { this.stopped = true; },
     };
     records.peers.push(peer);

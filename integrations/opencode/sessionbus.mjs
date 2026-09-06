@@ -144,8 +144,9 @@ export function createPlugin(dependencies = {}) {
         if (updated?.error != null || updated?.response?.status !== 200 || updated.data?.id !== id || updated.data?.title !== requestedName) throw new Error("OpenCode did not confirm the requested session title");
       }
       if (current && (current.identity.name !== requestedIdentity.name || current.identity.info.cwd !== requestedIdentity.info.cwd)) {
-        await current.peer.rehello(undefined, requestedIdentity.name, requestedIdentity.info);
-        current.identity = requestedIdentity;
+        try { await current.peer.rehello(undefined, requestedIdentity.name, requestedIdentity.info); }
+        catch (error) { if (sessions.get(id) === current) throw error; return; }
+        if (sessions.get(id) === current) current.identity = requestedIdentity;
       }
     };
     const caller = (id) => laneSocket ? { action: (action, args, signal) => callLane(laneSocket, action, args, signal) } : sessions.get(id)?.peer?.caller;
