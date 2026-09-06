@@ -233,6 +233,7 @@ func runCase(t *testing.T, name string) [6]int32 {
 	case "peer-lifetime":
 		h := startHarness(t, p, true, false)
 		check(t, h.Call(context.Background(), "session.superseded", struct{}{}, &struct{}{}) == nil, "superseded call failed")
+		<-p.worker.Closed()
 		check(t, p.worker.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}) != nil, "expected error")
 	case "wrong-direction-request":
 		h := startHarness(t, p, true, false)
