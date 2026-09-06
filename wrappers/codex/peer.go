@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ type PeerBackend struct {
 	fixedID       string
 	requestedName string
 	named         string
+	shutdown      func()
 }
 
 var _ mcp.Backend = (*PeerBackend)(nil)
@@ -69,6 +71,11 @@ func (b *PeerBackend) start(ctx context.Context) error {
 }
 
 func (b *PeerBackend) Caller() *sessionkit.Caller { return b.caller }
+func (b *PeerBackend) SetShutdown(shutdown func()) {
+	b.mu.Lock()
+	b.shutdown = shutdown
+	b.mu.Unlock()
+}
 
 func (b *PeerBackend) Prepare(ctx context.Context, meta json.RawMessage) error {
 	b.prepareMu.Lock()
@@ -93,6 +100,9 @@ func (b *PeerBackend) Prepare(ctx context.Context, meta json.RawMessage) error {
 	if id == "" {
 		return errors.New("Codex peer identity is unavailable; start Codex with codex-peer")
 	}
+	if current != "" && id != current {
+		return errors.New("Codex peer thread identity changed")
+	}
 	if err := b.start(ctx); err != nil {
 		return err
 	}
@@ -108,15 +118,6 @@ func (b *PeerBackend) Prepare(ctx context.Context, meta json.RawMessage) error {
 	b.mu.Unlock()
 	if peer == nil {
 		return b.connect(ctx, identity)
-	}
-	if current != identity.SessionID {
-		if err = peer.Replace(ctx, identity); err != nil {
-			return err
-		}
-		b.mu.Lock()
-		b.identity = identity
-		b.mu.Unlock()
-		return nil
 	}
 	if old.Name == identity.Name && old.Info["cwd"] == identity.Info["cwd"] {
 		return nil
@@ -189,6 +190,15 @@ func (b *PeerBackend) observe(ctx context.Context, id string) (sessionkit.PeerId
 	}
 	if result.Thread.ID != id {
 		return sessionkit.PeerIdentity{}, fmt.Errorf("Codex App Server returned thread %q, expected %q", result.Thread.ID, id)
+	}
+	if filepath.Base(filepath.Dir(result.Thread.Path)) == "archived_sessions" {
+		b.mu.Lock()
+		shutdown := b.shutdown
+		b.mu.Unlock()
+		if shutdown != nil {
+			shutdown()
+		}
+		return sessionkit.PeerIdentity{}, errors.New("Codex peer thread is archived")
 	}
 	return sessionkit.PeerIdentity{Product: "codex", SessionID: id, Name: first(strings.TrimSpace(result.Thread.Name), id), Groups: append([]string{}, b.groups...), Info: map[string]any{"cwd": strings.TrimSpace(result.Thread.Cwd)}}, nil
 }

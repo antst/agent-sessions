@@ -55,8 +55,8 @@ type nativeTurn struct {
 
 type nativeItem struct{ Type, Text, Phase string }
 type nativeThread struct {
-	ID, Name, Cwd string
-	Status        json.RawMessage
+	ID, Name, Cwd, Path string
+	Status              json.RawMessage
 }
 type threadReply struct {
 	Thread         nativeThread `json:"thread"`

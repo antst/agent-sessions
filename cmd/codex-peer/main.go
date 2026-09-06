@@ -72,5 +72,12 @@ func runMCP(ctx context.Context) error {
 		return err
 	}
 	defer backend.Shutdown()
-	return (&mcp.Server{Backend: backend}).Serve(ctx, os.Stdin, os.Stdout)
+	serveCtx, shutdown := context.WithCancel(ctx)
+	defer shutdown()
+	backend.SetShutdown(shutdown)
+	err = (&mcp.Server{Backend: backend}).Serve(serveCtx, os.Stdin, os.Stdout)
+	if serveCtx.Err() != nil && ctx.Err() == nil {
+		return nil
+	}
+	return err
 }

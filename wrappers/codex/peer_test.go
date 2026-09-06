@@ -140,7 +140,7 @@ func TestPeerPrepareRejectsMissingOrFixedIdentityChange(t *testing.T) {
 	}
 }
 
-func TestPeerPrepareReplacesAfterClear(t *testing.T) {
+func TestPeerPrepareRejectsDifferentThread(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bus.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
@@ -148,7 +148,7 @@ func TestPeerPrepareReplacesAfterClear(t *testing.T) {
 	}
 	defer listener.Close()
 	t.Setenv(host.SocketEnv, path)
-	events := make(chan map[string]any, 2)
+	events := make(chan map[string]any, 1)
 	go servePeerBus(listener, events)
 	b, app := testPeer(t)
 	go func() {
@@ -171,13 +171,38 @@ func TestPeerPrepareReplacesAfterClear(t *testing.T) {
 	if hello := <-events; hello["params"].(map[string]any)["session_id"] != "thread-1" {
 		t.Fatalf("hello = %#v", hello)
 	}
-	if err = b.Prepare(context.Background(), json.RawMessage(`{"threadId":"thread-2"}`)); err != nil {
-		t.Fatal(err)
+	if err = b.Prepare(context.Background(), json.RawMessage(`{"threadId":"thread-2"}`)); err == nil || err.Error() != "Codex peer thread identity changed" {
+		t.Fatalf("changed identity = %v", err)
 	}
-	if replacement := <-events; replacement["params"].(map[string]any)["session_id"] != "thread-2" {
-		t.Fatalf("replacement = %#v", replacement)
+	b.app.mu.Lock()
+	calls := b.app.next
+	b.app.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("native calls = %d", calls)
 	}
 	b.Shutdown()
+}
+
+func TestPeerPrepareShutsDownArchivedThread(t *testing.T) {
+	b, app := testPeer(t)
+	stopped := make(chan struct{})
+	b.SetShutdown(func() { close(stopped) })
+	go func() {
+		var request appRequest
+		_ = json.NewDecoder(app).Decode(&request)
+		writeApp(t, app, map[string]any{"id": request.ID, "result": map[string]any{"thread": map[string]any{
+			"id": "thread-1", "name": "old thread", "cwd": "/work", "path": "/codex/archived_sessions/rollout.jsonl",
+		}}})
+	}()
+	err := b.Prepare(context.Background(), json.RawMessage(`{"threadId":"thread-1"}`))
+	if err == nil || err.Error() != "Codex peer thread is archived" {
+		t.Fatalf("prepare = %v", err)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("helper did not shut down")
+	}
 }
 
 func TestPeerDeliveryActiveAndIdle(t *testing.T) {
