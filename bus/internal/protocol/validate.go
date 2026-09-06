@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -129,7 +130,7 @@ var errorMessages = map[int]string{InvalidFrame: "invalid_frame", InvalidHello: 
 type schemaNode map[string]any
 
 var schemaDefinitions = loadSchema()
-var schemaKeywords = map[string]bool{"$ref": true, "const": true, "enum": true, "type": true, "required": true, "additionalProperties": true, "minProperties": true, "properties": true, "items": true, "uniqueItems": true, "minLength": true, "maxLength": true, "minimum": true, "exclusiveMinimum": true, "allOf": true, "if": true, "then": true, "else": true, "not": true}
+var schemaKeywords = map[string]bool{"$ref": true, "const": true, "enum": true, "type": true, "required": true, "additionalProperties": true, "minProperties": true, "properties": true, "items": true, "uniqueItems": true, "minLength": true, "maxLength": true, "pattern": true, "minimum": true, "exclusiveMinimum": true, "allOf": true, "if": true, "then": true, "else": true, "not": true}
 
 func loadSchema() map[string]any {
 	var root map[string]any
@@ -163,6 +164,11 @@ func checkSchemaNode(defs map[string]any, value schemaNode) error {
 		}
 		if key == "$ref" && (!strings.HasPrefix(raw.(string), "#/$defs/") || defs[strings.TrimPrefix(raw.(string), "#/$defs/")] == nil) {
 			return errInvalid
+		}
+		if key == "pattern" {
+			if _, err := regexp.Compile(raw.(string)); err != nil {
+				return errInvalid
+			}
 		}
 		if key == "properties" {
 			for _, child := range raw.(map[string]any) {
@@ -209,8 +215,16 @@ func validSchemaNode(rule schemaNode, value any) bool {
 	if values, ok := rule["enum"].([]any); ok && !contains(values, value) {
 		return false
 	}
-	if text, ok := value.(string); ok && (!utf8.ValidString(text) || number(rule, "minLength") > float64(utf8.RuneCountInString(text)) || has(rule, "maxLength") && float64(utf8.RuneCountInString(text)) > number(rule, "maxLength")) {
-		return false
+	if text, ok := value.(string); ok {
+		if !utf8.ValidString(text) || number(rule, "minLength") > float64(utf8.RuneCountInString(text)) || has(rule, "maxLength") && float64(utf8.RuneCountInString(text)) > number(rule, "maxLength") {
+			return false
+		}
+		if pattern, ok := rule["pattern"].(string); ok {
+			matched, _ := regexp.MatchString(pattern, text)
+			if !matched {
+				return false
+			}
+		}
 	}
 	if value, ok := value.(float64); ok && (has(rule, "minimum") && value < number(rule, "minimum") || has(rule, "exclusiveMinimum") && value <= number(rule, "exclusiveMinimum")) {
 		return false
