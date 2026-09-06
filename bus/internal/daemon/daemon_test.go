@@ -47,7 +47,7 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	if strings.HasPrefix(name, "stderr-parent") {
-		child := exec.Command("sh", "-c", `while [ ! -e "$STDERR_DESCENDANT_RELEASE" ]; do sleep 0.01; done`)
+		child := exec.Command("sh", "-c", `while [ ! -e "$STDERR_DESCENDANT_RELEASE" ]; do sleep 0.01; done; : > "$STDERR_DESCENDANT_DONE"`)
 		child.Stderr = os.Stderr
 		_ = child.Start()
 		fmt.Fprintln(os.Stderr, "parent exited while descendant held stderr")
@@ -447,27 +447,35 @@ func TestDaemonCloseEndsRawAndActiveSpawnConnections(t *testing.T) {
 func TestProcessWaitDoesNotDependOnDescendantStderr(t *testing.T) {
 	directory := t.TempDir()
 	installFixture(t, directory, "stderr-parent")
-	ready, release := filepath.Join(directory, "parent-ready"), filepath.Join(directory, "release-descendant")
+	ready := filepath.Join(directory, "parent-ready")
+	release := filepath.Join(directory, "release-descendant")
+	descendantDone := filepath.Join(directory, "descendant-done")
 	t.Setenv("STDERR_PARENT_READY", ready)
 	t.Setenv("STDERR_DESCENDANT_RELEASE", release)
+	t.Setenv("STDERR_DESCENDANT_DONE", descendantDone)
 	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0o600) })
 	child, err := structuredprocess.Start(filepath.Join(directory, "stderr-parent"), os.Environ())
 	must(t, err)
-	for {
-		if _, err = os.Stat(ready); err == nil {
-			break
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			t.Fatal(err)
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitFileWithoutDeadline(t, ready)
 	<-child.Done()
+	must(t, os.WriteFile(release, nil, 0o600))
+	waitFileWithoutDeadline(t, descendantDone)
 	lines, _ := child.Details()
 	if !strings.Contains(strings.Join(lines, "\n"), "parent exited") {
 		t.Fatalf("stderr tail = %#v", lines)
 	}
-	must(t, os.WriteFile(release, nil, 0o600))
+}
+
+func waitFileWithoutDeadline(t *testing.T, path string) {
+	t.Helper()
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestPeerHelloRehelloReplacementAndSupersession(t *testing.T) {
