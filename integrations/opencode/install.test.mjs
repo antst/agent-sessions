@@ -108,7 +108,7 @@ test("requested package, directory, and archive forms each converge and remove",
   }
 });
 
-test("unrelated requested HTTP and file packages are rejected without edits", () => {
+test("unrelated or unsupported requested packages are rejected without edits", () => {
   const { directory } = fixture();
   const selected = path.join(directory, "opencode.jsonc");
   const unrelated = path.join(directory, "unrelated");
@@ -116,8 +116,8 @@ test("unrelated requested HTTP and file packages are rejected without edits", ()
   writeFileSync(path.join(unrelated, "package.json"), '{"name":"unrelated"}\n');
   writeFileSync(selected, '{// untouched\n"plugin":["native"]}\n');
   const before = readFileSync(selected, "utf8");
-  for (const specifier of ["https://example.invalid/unrelated.tgz?note=@sessionbus/opencode", `file:${unrelated}`]) {
-    assert.throws(() => configure({ directory, specifier }), /not @sessionbus\/opencode/u);
+  for (const specifier of ["https://example.invalid/unrelated.tgz?note=@sessionbus/opencode", `file:${unrelated}`, "sessionbus-opencode-0.1.0-pre.1.tgz", "ftp://example/sessionbus-opencode-0.1.0-pre.1.tgz"]) {
+    assert.throws(() => configure({ directory, specifier }), /not an installable @sessionbus\/opencode/u);
     assert.equal(readFileSync(selected, "utf8"), before);
   }
 });

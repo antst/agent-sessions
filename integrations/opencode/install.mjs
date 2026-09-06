@@ -121,7 +121,7 @@ export function configure(options = {}) {
   const existing = candidates.filter(existsSync);
   if (remove && existing.length === 0) return false;
   const selected = existing[0] || candidates[0];
-  if (!remove && !ownedSpecifier(specifier, selected)) throw new Error("OpenCode plugin specifier is not @sessionbus/opencode");
+  if (!remove && (!/^(?:@sessionbus\/opencode(?:@[^\s]+)?|file:.+|https?:\/\/.+)$/u.test(specifier) || !ownedSpecifier(specifier, selected))) throw new Error("OpenCode plugin specifier is not an installable @sessionbus/opencode package");
   const documents = existing.map(readConfig);
   if (!existing.length) documents.push({ file: selected, body: "{}\n", value: {}, mode: 0o600 });
   for (const document of documents) document.selected = document.file === selected;
