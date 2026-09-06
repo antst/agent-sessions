@@ -323,8 +323,7 @@ Provenance and tag legend:
   `session_id`, updating name/info in place; `groups` must equal the original slice
   exactly or the daemon returns invalid_hello and closes. (verified: n/a (design);
   source: picture docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:120-127,1488)
-- Hand-started qwen without launcher identity: the MCP entry never hellos; every Agent
-  Sessions tool call returns an error naming the required launcher. (verified: n/a
+- Hand-started qwen without launcher identity: the MCP entry never hellos; every Sessionbus tool call returns an error naming the required launcher. (verified: n/a
   (design); source: picture docs/designs/UNIVERSAL-SESSION-PROTOCOL.md:1488)
 - In the sealed zero-turn peer cell, Qwen 0.23.0 spawned the exact `qwen-peer mcp`
   helper with session id, title, groups, bus socket, and input-file environment before

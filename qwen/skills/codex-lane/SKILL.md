@@ -19,8 +19,7 @@ Start with:
 
 Call `wait` exactly once and select the final agent message matching the last
 `turn.completed`. A timeout exits 124 without cancellation; a terminal notice is
-a collection pointer, not an answer. Send ordinary follow-ups through Agent
-Sessions or call `resume` after collecting debt. Use `interrupt` and `archive`.
+a collection pointer, not an answer. Send ordinary follow-ups through Sessionbus or call `resume` after collecting debt. Use `interrupt` and `archive`.
 Default lanes belong to this exact Qwen parent. `--persistent` disables
 parent-exit cleanup only; the normal 60-second terminal auto-archive grace still
 applies. Pair it with `--no-auto-archive` only for indefinite idle retention,
