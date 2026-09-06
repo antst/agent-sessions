@@ -47,10 +47,11 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	if strings.HasPrefix(name, "stderr-parent") {
-		child := exec.Command("sh", "-c", "sleep 0.2")
+		child := exec.Command("sh", "-c", `while [ ! -e "$STDERR_DESCENDANT_RELEASE" ]; do sleep 0.01; done`)
 		child.Stderr = os.Stderr
 		_ = child.Start()
 		fmt.Fprintln(os.Stderr, "parent exited while descendant held stderr")
+		_ = os.WriteFile(os.Getenv("STDERR_PARENT_READY"), []byte("ready"), 0o600)
 		os.Exit(7)
 	}
 	if strings.HasPrefix(name, "fixture-worker") || strings.HasPrefix(name, "open-exit-worker") || strings.HasPrefix(name, "fixed-worker") || strings.HasPrefix(name, "error-worker") || strings.HasPrefix(name, "close-error-worker") {
@@ -446,17 +447,27 @@ func TestDaemonCloseEndsRawAndActiveSpawnConnections(t *testing.T) {
 func TestProcessWaitDoesNotDependOnDescendantStderr(t *testing.T) {
 	directory := t.TempDir()
 	installFixture(t, directory, "stderr-parent")
+	ready, release := filepath.Join(directory, "parent-ready"), filepath.Join(directory, "release-descendant")
+	t.Setenv("STDERR_PARENT_READY", ready)
+	t.Setenv("STDERR_DESCENDANT_RELEASE", release)
+	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0o600) })
 	child, err := structuredprocess.Start(filepath.Join(directory, "stderr-parent"), os.Environ())
 	must(t, err)
-	select {
-	case <-child.Done():
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("process reap waited for descendant stderr EOF")
+	for {
+		if _, err = os.Stat(ready); err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Millisecond)
 	}
+	<-child.Done()
 	lines, _ := child.Details()
 	if !strings.Contains(strings.Join(lines, "\n"), "parent exited") {
 		t.Fatalf("stderr tail = %#v", lines)
 	}
+	must(t, os.WriteFile(release, nil, 0o600))
 }
 
 func TestPeerHelloRehelloReplacementAndSupersession(t *testing.T) {
