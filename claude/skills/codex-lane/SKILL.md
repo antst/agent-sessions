@@ -21,8 +21,7 @@ Use `sessionbus.lane` for every lifecycle operation with `product: "codex"`.
 Supply one exact `command`, its native arguments after the command, optional
 briefing `input`, and optional federated `host`. Never execute `codex-peer-lane`
 through Bash. CLI spellings below document the argument contract only; translate
-them to the structured tool. `start` returns after registration while the Agent
-Sessions daemon owns the detached background worker.
+them to the structured tool. `start` returns after registration while the Sessionbus daemon owns the detached background worker.
 
 ## Remote host
 
@@ -88,8 +87,7 @@ Pass the briefing as MCP `input`; never put a prompt in `arguments`.
 
 Only `--name` is required. Add policy flags **only** when the caller specified them.
 
-Pick a stable, role-based kebab-case name and check structured `list --all` plus an Agent
-Sessions `discover` request from this session. The same name may exist in disjoint groups; a
+Pick a stable, role-based kebab-case name and check structured `list --all` plus a Sessionbus `discover` request from this session. The same name may exist in disjoint groups; a
 messaging ambiguity matters only when it is visible to this sender. Parse stdout JSONL until
 `{"type":"lane.ready"}`; retain its `session_id` and confirm
 `contract_version` is 2. Everything after `lane.ready` may be ignored for a detached lane.

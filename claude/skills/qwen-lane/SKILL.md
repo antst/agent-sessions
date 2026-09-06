@@ -6,8 +6,7 @@ description: Orchestrate named, messageable local or remote Qwen Code worker lan
 # Orchestrate Qwen lanes
 
 Use the process-attested `sessionbus.lane` MCP tool with `product: "qwen"`.
-The daemon owns a durable native Qwen transcript and exposes it as an Agent
-Sessions peer. Qwen remains the authority for its approval mode. Do not execute
+The daemon owns a durable native Qwen transcript and exposes it as a Sessionbus peer. Qwen remains the authority for its approval mode. Do not execute
 `qwen-peer-lane` through Bash.
 
 Call `doctor` with arguments `["--json"]` and `list` with `["--all"]` first. Require
