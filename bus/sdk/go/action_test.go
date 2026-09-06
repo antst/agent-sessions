@@ -89,3 +89,27 @@ func TestCallerActionRejectsInvalidInput(t *testing.T) {
 		t.Fatalf("actions = %v", Actions)
 	}
 }
+
+func TestNewCallerRejectsInvalidResult(t *testing.T) {
+	for _, test := range []struct {
+		name, result string
+	}{
+		{"missing field", `{}`},
+		{"extra field", `{"sessions":[],"extra":true}`},
+		{"wrong field type", `{"sessions":"wrong"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			caller := NewCaller(func(context.Context, string, any) (json.RawMessage, error) {
+				return json.RawMessage(test.result), nil
+			})
+			listed, err := caller.List(context.Background(), SessionListRequest{})
+			if err == nil || listed.Sessions != nil || listed.Hosts != nil {
+				t.Fatalf("typed result = %#v, err %v", listed, err)
+			}
+			raw, err := caller.Action(context.Background(), "list", json.RawMessage(`{}`))
+			if err == nil || raw != nil {
+				t.Fatalf("action result = %s, err %v", raw, err)
+			}
+		})
+	}
+}
