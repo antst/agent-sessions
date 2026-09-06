@@ -1,25 +1,24 @@
 ---
 name: sessionbus
-description: Discover and message grouped Sessionbus peers and control daemon-backed Codex, Claude, Grok, or Qwen lanes. Use for listing peers, peer replies or acknowledgments, direct or group messaging, and local or federated lane lifecycle; do not substitute product-native agents, teams, or subagents for an Sessionbus operation.
+description: Discover and message grouped Sessionbus peers and control daemon-backed Codex, Claude, Grok, or Qwen lanes. Use for listing peers, peer replies or acknowledgments, direct or group messaging, and local or federated lane lifecycle; do not substitute product-native agents, teams, or subagents for a Sessionbus operation.
 ---
 
 # Sessionbus
 
 Use the structured `sessionbus` MCP tools for Sessionbus discovery,
 messaging, and lane lifecycle. Installed plugin inventory alone is not authority:
-the tools activate only for a managed peer or lane whose live process and Agent
-Sessions registration are attested.
+the tools activate only for a managed peer or lane whose live process and Sessionbus registration are attested.
 
 ## Route the request
 
 - Treat “Sessionbus,” “peer,” “list peers,” “message a peer,” and an explicit
   invocation of this skill as Sessionbus requests.
 - Treat “native agent,” “subagent,” “team,” or a product's native orchestration
-  feature as product-native unless the user explicitly asks for an Sessionbus
+  feature as product-native unless the user explicitly asks for a Sessionbus
   lane.
 - If the user says “list peers,” use `sessionbus.list_peers`. If the user says
   “list native agents,” use the product's native facility.
-- Never implement or retry an Sessionbus request with native agent discovery,
+- Never implement or retry a Sessionbus request with native agent discovery,
   native messaging, a service session, or another carrier.
 
 ## Discover and message
@@ -54,8 +53,7 @@ Qwen lane lifecycle operation. Set `product`, select one exact `command`
 Do not shell-execute `*-peer-lane` from a managed product when the structured
 tool is available. Those CLIs remain supported for operators, automation, CI,
 recovery, and third-party callers; they are not a managed-agent fallback.
-`start` registers detached work and returns while the Agent
-Sessions daemon owns the background worker. A terminal notice is status
+`start` registers detached work and returns while the Sessionbus daemon owns the background worker. A terminal notice is status
 metadata, not the answer. When it says `collection=required`, follow its
 structured `sessionbus.lane` collection hint with one `wait` consumer and
 match the final answer to the terminal turn. `collection=none` means
