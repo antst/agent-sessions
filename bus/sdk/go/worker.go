@@ -194,9 +194,7 @@ func (w *Worker) runTurn(_ context.Context, request *rpc.Request, slot *Run) {
 
 func (w *Worker) interrupt(request *rpc.Request, run *Run, call bool) {
 	if call {
-		if err := w.nativeInterrupt(run); err != nil {
-			fmt.Fprintf(os.Stderr, "agentbus: product interrupt: %q\n", err.Error())
-		}
+		callbackError("interrupt", w.nativeInterrupt(run))
 	}
 	w.reply(w.conn.Result(request, struct{}{}))
 }
@@ -211,15 +209,15 @@ func (w *Worker) deliver(ctx context.Context, request *rpc.Request) {
 
 func (w *Worker) close(ctx context.Context, request *rpc.Request, slot *Run, interrupt bool) {
 	if interrupt {
-		go w.nativeInterrupt(slot)
+		go func() {
+			callbackError("interrupt", w.nativeInterrupt(slot))
+		}()
 	}
 	if slot != nil {
 		<-slot.done
 	}
 	w.cancel()
-	if err := w.closeProduct(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "agentbus: product close: %q\n", err.Error())
-	}
+	w.closeProduct(ctx)
 	w.reply(w.conn.Result(request, struct{}{}))
 	_ = w.conn.Close()
 }
@@ -239,14 +237,18 @@ func (w *Worker) answer(request *rpc.Request, value any, code int) {
 	}
 }
 
-func (w *Worker) closeProduct(ctx context.Context) error {
-	var err error
+func (w *Worker) closeProduct(ctx context.Context) {
 	w.once.Do(func() {
 		if w.opened.Load() {
-			err = w.product.Close(ctx)
+			callbackError("close", w.product.Close(ctx))
 		}
 	})
-	return err
+}
+
+func callbackError(callback string, err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentbus: product %s: %q\n", callback, err.Error())
+	}
 }
 
 func (w *Worker) reply(err error) {
