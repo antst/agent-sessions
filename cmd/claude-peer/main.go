@@ -2,15 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 
 	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
 	"github.com/antst/agent-sessions/wrappers/claude"
 	"github.com/antst/agent-sessions/wrappers/host"
+	"github.com/antst/agent-sessions/wrappers/mcp"
 )
 
 func main() {
@@ -25,9 +28,17 @@ func main() {
 func run(ctx context.Context, arguments []string) error {
 	if !host.LaneMode() {
 		if len(arguments) == 1 && arguments[0] == "mcp" {
-			return errors.New("mcp entry not available in this build")
+			return runMCP(ctx)
 		}
-		return errors.New("interactive entry not available in this build")
+		plan, err := claude.InteractivePlan(arguments, os.Environ())
+		if err != nil {
+			return err
+		}
+		path, err := exec.LookPath(plan.Path)
+		if err != nil {
+			return err
+		}
+		return syscall.Exec(path, append([]string{path}, plan.Args...), plan.Env)
 	}
 	if len(arguments) != 0 {
 		return errors.New("lane mode accepts no arguments")
@@ -35,5 +46,26 @@ func run(ctx context.Context, arguments []string) error {
 	product := claude.New(os.Getenv(host.SocketEnv))
 	worker := sessionkit.NewWorker(product)
 	product.SetShutdown(worker.Shutdown)
+	product.SetCall(func(ctx context.Context, method string, params any) (json.RawMessage, error) {
+		var result json.RawMessage
+		err := worker.Call(ctx, method, params, &result)
+		return result, err
+	})
 	return worker.Serve(ctx)
+}
+
+func runMCP(ctx context.Context) error {
+	if os.Getenv(mcp.LaneSocketEnv) != "" {
+		backend, err := mcp.NewLaneBackend()
+		if err != nil {
+			return err
+		}
+		return (&mcp.Server{Backend: backend}).Serve(ctx, os.Stdin, os.Stdout)
+	}
+	backend, err := claude.NewPeerBackend(ctx)
+	if err != nil {
+		return err
+	}
+	defer backend.Shutdown()
+	return (&mcp.Server{Backend: backend}).Serve(ctx, os.Stdin, os.Stdout)
 }

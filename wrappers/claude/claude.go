@@ -15,6 +15,7 @@ import (
 
 	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
 	"github.com/antst/agent-sessions/wrappers/host"
+	"github.com/antst/agent-sessions/wrappers/mcp"
 )
 
 const (
@@ -25,6 +26,7 @@ const (
 type Wrapper struct {
 	socket                string
 	handoff               host.Handoff
+	backend               mcp.Backend
 	mu                    sync.Mutex
 	child                 *host.Child
 	input                 io.WriteCloser
@@ -69,6 +71,10 @@ func New(socket string) *Wrapper { return &Wrapper{socket: socket} }
 
 func (p *Wrapper) SetShutdown(shutdown func()) { p.shutdown = shutdown }
 
+func (p *Wrapper) SetCall(call func(context.Context, string, any) (json.RawMessage, error)) {
+	p.backend = mcp.BackendFunc(call)
+}
+
 func (*Wrapper) Hello(context.Context) (sessionkit.HelloDescription, error) {
 	return sessionkit.HelloDescription{
 		Product: Product, SupportedOpenFields: []string{"cwd", "permission_mode", "model", "reasoning_effort", "arguments"},
@@ -94,6 +100,10 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 	if err != nil {
 		return sessionkit.OpenResult{}, closeLaunch(lock, endpoint, err)
 	}
+	if p.backend == nil {
+		return sessionkit.OpenResult{}, closeLaunch(lock, endpoint, errors.New("Agentbus lane backend is unavailable"))
+	}
+	go func() { _ = mcp.ServeLane(ctx, endpoint, p.backend) }()
 	command := exec.Command("claude", arguments...)
 	command.Dir, command.Stderr = request.Open.Cwd, os.Stderr
 	environment := slices.DeleteFunc(os.Environ(), func(value string) bool { return strings.HasPrefix(value, LaneSocketEnv+"=") })
@@ -373,6 +383,74 @@ func sessionID(resume string) (string, error) {
 	}
 	value[6], value[8] = value[6]&0x0f|0x40, value[8]&0x3f|0x80
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", value[0:4], value[4:6], value[6:8], value[8:10], value[10:16]), nil
+}
+
+func InteractivePlan(arguments, environment []string) (host.ExecPlan, error) {
+	id, _, err := optionValue(arguments, "--session-id")
+	if err != nil {
+		return host.ExecPlan{}, err
+	}
+	_, resumed, err := optionValue(arguments, "--resume", "-r")
+	if err != nil {
+		return host.ExecPlan{}, err
+	}
+	if id == "" && !resumed {
+		id, err = sessionID("")
+		if err != nil {
+			return host.ExecPlan{}, err
+		}
+		index := slices.Index(arguments, "--")
+		if index < 0 {
+			index = len(arguments)
+		}
+		arguments = slices.Concat(arguments[:index], []string{"--session-id", id}, arguments[index:])
+	}
+	name, _, err := optionValue(arguments, "--name", "-n")
+	if err != nil {
+		return host.ExecPlan{}, err
+	}
+	environment = slices.DeleteFunc(environment, func(value string) bool { return strings.HasPrefix(value, LaneSocketEnv+"=") })
+	if !slices.ContainsFunc(environment, func(value string) bool { return strings.HasPrefix(value, host.SocketEnv+"=") }) {
+		environment = append(environment, host.SocketEnv+"="+sessionkit.Socket())
+	}
+	return host.InteractivePlan("claude", arguments, environment, host.PeerIdentity{SessionID: id, Name: first(name, id)}, claudeOptionTakesValue)
+}
+
+func optionValue(arguments []string, names ...string) (string, bool, error) {
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		if argument == "--" {
+			break
+		}
+		name, value, attached := strings.Cut(argument, "=")
+		if slices.Contains(names, name) {
+			if !attached {
+				if index+1 == len(arguments) {
+					return "", true, errors.New(argument + " requires a value")
+				}
+				value = arguments[index+1]
+			}
+			if strings.TrimSpace(value) == "" {
+				return "", true, errors.New(argument + " requires a value")
+			}
+			return value, true, nil
+		}
+		if !attached && claudeOptionTakesValue(name) {
+			index++
+		}
+	}
+	return "", false, nil
+}
+
+func claudeOptionTakesValue(name string) bool {
+	_, found := map[string]bool{
+		"--agent": true, "--agents": true, "--allowedTools": true, "--append-system-prompt": true,
+		"--betas": true, "--disallowedTools": true, "--effort": true, "--fallback-model": true,
+		"--input-format": true, "--mcp-config": true, "--model": true, "--name": true, "-n": true,
+		"--output-format": true, "--permission-mode": true, "--resume": true, "-r": true,
+		"--session-id": true, "--system-prompt": true, "--tools": true,
+	}[name]
+	return found
 }
 
 func launchArguments(request sessionkit.OpenRequest, id, socket string) ([]string, error) {

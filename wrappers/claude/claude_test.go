@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -82,6 +83,25 @@ func TestArgumentConflicts(t *testing.T) {
 		_, err := launchArguments(sessionkit.OpenRequest{Name: "leaf@local", Open: sessionkit.OpenOptions{Arguments: []string{test.argument}}}, fixtureID, "/tmp/lane.sock")
 		check(t, err != nil && err.Error() == test.want, "%s error = %v", test.argument, err)
 	}
+}
+
+func TestInteractivePlan(t *testing.T) {
+	plan, err := InteractivePlan([]string{"--model", "-g", "--group", "team", "--name", "reviewer", "--", "prompt"}, []string{"PATH=/bin", host.SessionIDEnv + "=stale"})
+	must(t, err)
+	check(t, reflect.DeepEqual(plan.Args[:4], []string{"--model", "-g", "--name", "reviewer"}), "arguments = %#v", plan.Args)
+	check(t, plan.Args[len(plan.Args)-2] == "--" && plan.Args[len(plan.Args)-1] == "prompt", "separator = %#v", plan.Args)
+	id := environmentValue(plan.Env, host.SessionIDEnv)
+	check(t, len(id) == 36 && environmentValue(plan.Env, host.NameEnv) == "reviewer", "identity = %q / %q", id, environmentValue(plan.Env, host.NameEnv))
+	check(t, environmentValue(plan.Env, host.GroupsEnv) == `["team"]`, "groups = %q", environmentValue(plan.Env, host.GroupsEnv))
+	check(t, environmentValue(plan.Env, host.SocketEnv) == sessionkit.Socket(), "socket = %q", environmentValue(plan.Env, host.SocketEnv))
+	check(t, slices.Contains(plan.Args, id), "minted session id absent: %#v", plan.Args)
+
+	plan, err = InteractivePlan([]string{"--resume", fixtureID, "--name=again"}, nil)
+	must(t, err)
+	check(t, environmentValue(plan.Env, host.SessionIDEnv) == "" && environmentValue(plan.Env, host.NameEnv) == "again", "resume identity = %#v", plan.Env)
+
+	_, err = InteractivePlan([]string{"--session-id="}, nil)
+	check(t, err != nil && err.Error() == "--session-id= requires a value", "empty id error = %v", err)
 }
 
 func TestHelloAndIdentity(t *testing.T) {
@@ -223,6 +243,9 @@ func TestWorkerChildDeathWritesTerminalBeforeEOF(t *testing.T) {
 	must(t, os.Symlink(os.Args[0], filepath.Join(directory, "claude")))
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
 	p := New(socket)
+	p.SetCall(func(context.Context, string, any) (json.RawMessage, error) {
+		return json.RawMessage(`{"sessions":[]}`), nil
+	})
 	worker := sessionkit.NewWorker(p)
 	p.SetShutdown(worker.Shutdown)
 	served := make(chan error, 1)
@@ -241,6 +264,12 @@ func TestWorkerChildDeathWritesTerminalBeforeEOF(t *testing.T) {
 	for _, name := range []string{host.SocketEnv, host.LocalKeyEnv, host.TokenEnv, host.SessionIDEnv, host.NameEnv, host.GroupsEnv} {
 		check(t, child[name] == "", "%s reached child: %#v", name, child)
 	}
+	lane, err := sessionkit.Dial(child["lane_socket"].(string))
+	must(t, err)
+	laneResult, err := lane.Call(context.Background(), "session.list", sessionkit.SessionListRequest{})
+	must(t, err)
+	check(t, string(laneResult) == `{"sessions":[]}`, "lane result = %s", laneResult)
+	must(t, lane.Close())
 	writeJSON(t, connection, map[string]any{"jsonrpc": "2.0", "id": 3, "method": "turn.run", "params": map[string]any{"session_id": fixtureID + "@local", "input": "die"}})
 	terminal := readJSON(t, reader)
 	result := terminal["result"].(map[string]any)
@@ -251,6 +280,15 @@ func TestWorkerChildDeathWritesTerminalBeforeEOF(t *testing.T) {
 	_ = connection.Close()
 	_ = listener.Close()
 	_ = <-served
+}
+
+func environmentValue(environment []string, name string) string {
+	for _, value := range environment {
+		if key, _, found := strings.Cut(value, "="); key == name && found {
+			return strings.TrimPrefix(value, name+"=")
+		}
+	}
+	return ""
 }
 
 func delivery(body string) sessionkit.DeliveryRequest {
