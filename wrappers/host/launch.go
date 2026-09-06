@@ -2,6 +2,8 @@ package host
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -19,6 +21,11 @@ const (
 )
 
 func LaneMode() bool { _, present := os.LookupEnv(TokenEnv); return present }
+
+func LaunchTokenDigest(token string) string {
+	digest := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(digest[:16])
+}
 
 type PeerIdentity struct{ SessionID, Name string }
 
