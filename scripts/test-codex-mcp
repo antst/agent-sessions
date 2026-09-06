@@ -16,7 +16,7 @@ set -eu
 printf '%s\n' "$*" >>"$TEST_CODEX_RECORD"
 case "$1 $2" in
   "mcp remove")
-    [ -f "$TEST_CODEX_STATE" ] || exit 1
+    [ "${TEST_CODEX_FAIL_REMOVE:-0}" = 0 ] || exit 43
     rm -f -- "$TEST_CODEX_STATE"
     ;;
   "mcp add")
@@ -60,6 +60,12 @@ rm -f -- "$state"
 remove_codex_mcp "$codex"
 grep -Fxq 'mcp remove agent_sessions' "$record"
 grep -Fxq 'app-server daemon restart' "$record"
+
+: >"$record"
+export TEST_CODEX_FAIL_REMOVE=1
+if remove_codex_mcp "$codex"; then exit 1; else status=$?; fi
+unset TEST_CODEX_FAIL_REMOVE
+[[ $status -eq 43 && $(grep -Fc 'app-server daemon restart' "$record") -eq 0 ]]
 
 printf '%s\n' current >"$state"
 : >"$record"
