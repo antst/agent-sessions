@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,10 +95,9 @@ func TestChildOwnershipTable(t *testing.T) {
 			must(t, err)
 			command := exec.Command(os.Args[0], "-test.run=TestOwnedChildHelper")
 			command.Env = append(os.Environ(), "HOST_CHILD=1", SocketEnv+"=secret", LocalKeyEnv+"=secret", TokenEnv+"=secret", SessionIDEnv+"=secret", NameEnv+"=secret", GroupsEnv+"=secret")
-			input, err := command.StdinPipe()
+			child, input, output, err := StartChild(command, lock, endpoint)
 			must(t, err)
-			child, err := StartChild(command, lock, endpoint)
-			must(t, err)
+			defer output.Close()
 			_, err = AcquireSessionLock(socket, "example", "session")
 			check(t, err != nil && err.Error() == "session busy", "live child lock = %v", err)
 			if ownerDies {
@@ -131,6 +131,10 @@ func TestOwnedChildHelper(t *testing.T) {
 			os.Exit(2)
 		}
 	}
+	if os.Getenv("HOST_CHILD_OUTPUT") != "" {
+		_, _ = os.Stdout.WriteString(strings.Repeat("x", 300000))
+		os.Exit(0)
+	}
 	_, _ = os.Stdin.Read(make([]byte, 1))
 	if os.Getenv("HOST_CHILD_FAILURE") == "1" {
 		os.Exit(3)
@@ -146,10 +150,9 @@ func TestChildCloseIgnoresStoppedProcessNoise(t *testing.T) {
 	must(t, err)
 	command := exec.Command(os.Args[0], "-test.run=TestOwnedChildHelper")
 	command.Env = append(os.Environ(), "HOST_CHILD=1", "HOST_CHILD_FAILURE=1")
-	input, err := command.StdinPipe()
+	child, input, output, err := StartChild(command, lock, endpoint)
 	must(t, err)
-	child, err := StartChild(command, lock, endpoint)
-	must(t, err)
+	defer output.Close()
 	err = child.Close(context.Background(), func(context.Context) error {
 		_ = input.Close()
 		return errors.New("stdin already closed")
@@ -160,4 +163,27 @@ func TestChildCloseIgnoresStoppedProcessNoise(t *testing.T) {
 	again, err := AcquireSessionLock(socket, "example", "session")
 	must(t, err)
 	must(t, again.Close())
+}
+
+func TestChildOutputDrainsAfterExit(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "bus.sock")
+	lock, err := AcquireSessionLock(socket, "example", "session")
+	must(t, err)
+	endpoint, err := ListenPrivate(socket, "session")
+	must(t, err)
+	command := exec.Command(os.Args[0], "-test.run=TestOwnedChildHelper")
+	command.Env = append(os.Environ(), "HOST_CHILD=1", "HOST_CHILD_OUTPUT=1")
+	child, input, output, err := StartChild(command, lock, endpoint)
+	must(t, err)
+	defer input.Close()
+	result := make(chan []byte, 1)
+	go func() {
+		body, _ := io.ReadAll(output)
+		_ = output.Close()
+		result <- body
+	}()
+	must(t, child.Wait())
+	body := <-result
+	check(t, len(body) == 300000, "output bytes = %d", len(body))
+	must(t, child.Close(context.Background(), func(context.Context) error { return nil }))
 }

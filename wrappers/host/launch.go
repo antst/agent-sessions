@@ -43,20 +43,37 @@ type Child struct {
 	err      error
 }
 
-func StartChild(command *exec.Cmd, lock *SessionLock, endpoint *PrivateEndpoint) (*Child, error) {
+func StartChild(command *exec.Cmd, lock *SessionLock, endpoint *PrivateEndpoint) (*Child, *os.File, *os.File, error) {
 	if command.Env == nil {
 		command.Env = os.Environ()
 	}
 	for _, name := range []string{SocketEnv, LocalKeyEnv, TokenEnv, SessionIDEnv, NameEnv, GroupsEnv} {
 		command.Env = replaceEnv(command.Env, name, "")
 	}
+	stdin, input, err := os.Pipe()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	output, stdout, err := os.Pipe()
+	if err != nil {
+		_ = stdin.Close()
+		_ = input.Close()
+		return nil, nil, nil, err
+	}
+	command.Stdin, command.Stdout = stdin, stdout
 	command.ExtraFiles = append(command.ExtraFiles, lock.File())
 	if err := command.Start(); err != nil {
-		return nil, err
+		_ = stdin.Close()
+		_ = input.Close()
+		_ = output.Close()
+		_ = stdout.Close()
+		return nil, nil, nil, err
 	}
+	_ = stdin.Close()
+	_ = stdout.Close()
 	child := &Child{command: command, lock: lock, endpoint: endpoint, done: make(chan struct{})}
 	go func() { child.err = command.Wait(); close(child.done) }()
-	return child, nil
+	return child, input, output, nil
 }
 
 func (c *Child) Done() <-chan struct{} { return c.done }
