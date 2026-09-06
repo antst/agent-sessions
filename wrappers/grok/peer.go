@@ -21,8 +21,11 @@ type peerSession struct {
 	Title     string `json:"title"`
 	Cwd       string `json:"cwd"`
 	Activity  string `json:"activity"`
-	Resident  bool   `json:"resident"`
+	Resident  *bool  `json:"resident"`
+	Yolo      *bool  `json:"yolo"`
 }
+
+var errNoLeader = errors.New("no_leader")
 
 type PeerBackend struct {
 	mu       sync.Mutex
@@ -61,7 +64,7 @@ func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
 	}
 	b := &PeerBackend{observer: observer, process: process}
 	wanted := strings.TrimSpace(os.Getenv(host.NameEnv))
-	row, err := b.roster(ctx, id)
+	row, err := roster(ctx, observer, id)
 	if err != nil {
 		return stop(err)
 	}
@@ -72,7 +75,9 @@ func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
 		if err = observer.request(ctx, "_x.ai/session/rename", map[string]string{"sessionId": id, "title": wanted}, &renamed); err != nil || !renamed.Success {
 			return stop(errors.New("Grok peer title is unavailable"))
 		}
-		row.Title = wanted
+		if row, err = roster(ctx, observer, id); err != nil || row.Title != wanted {
+			return stop(errors.New("Grok peer title was not confirmed"))
+		}
 	}
 	b.identity = sessionkit.PeerIdentity{Product: "grok", SessionID: id, Name: first(row.Title, wanted, id), Groups: groups, Info: map[string]any{"cwd": row.Cwd}}
 	peer, err := sessionkit.ConnectPeer(b.identity, b.deliver)
@@ -80,6 +85,12 @@ func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
 		return stop(err)
 	}
 	b.peer = peer
+	select {
+	case <-peer.Ready():
+	case <-ctx.Done():
+		peer.Shutdown()
+		return stop(ctx.Err())
+	}
 	return b, nil
 }
 
@@ -95,10 +106,10 @@ func (b *PeerBackend) Call(ctx context.Context, method string, params any) (json
 
 func (b *PeerBackend) Caller() *sessionkit.Caller { return b.peer.Caller }
 
-func (b *PeerBackend) Prepare(ctx context.Context) error {
+func (b *PeerBackend) Prepare(ctx context.Context, _ json.RawMessage) error {
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	id, old, observer, peer := b.identity.SessionID, b.identity, b.observer, b.peer
-	b.mu.Unlock()
 	row, err := roster(ctx, observer, id)
 	if err != nil {
 		return err
@@ -107,26 +118,31 @@ func (b *PeerBackend) Prepare(ctx context.Context) error {
 	if name == old.Name && row.Cwd == old.Info["cwd"] {
 		return nil
 	}
-	b.mu.Lock()
-	b.identity.Name, b.identity.Info = name, map[string]any{"cwd": row.Cwd}
-	b.mu.Unlock()
-	return peer.Rehello(name, map[string]any{"cwd": row.Cwd})
+	info := map[string]any{"cwd": row.Cwd}
+	if err := peer.Rehello(name, info); err != nil {
+		return err
+	}
+	b.identity.Name, b.identity.Info = name, info
+	return nil
 }
 
-func (b *PeerBackend) deliver(ctx context.Context, request sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
+func (b *PeerBackend) deliver(ctx context.Context, identity sessionkit.PeerIdentity, request sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
 	b.mu.Lock()
-	id, observer := b.identity.SessionID, b.observer
+	observer := b.observer
 	b.mu.Unlock()
-	row, err := roster(ctx, observer, id)
+	row, err := roster(ctx, observer, identity.SessionID)
 	if err != nil {
-		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "no_leader"}, nil
+		if errors.Is(err, errNoLeader) {
+			return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "no_leader"}, nil
+		}
+		return sessionkit.DeliveryReceipt{}, err
 	}
 	message, err := host.RenderNativeMessage(request)
 	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
-	if err = observer.interject(ctx, id, request.MessageID, message); err != nil {
-		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "no_leader"}, nil
+	if err = observer.interject(ctx, identity.SessionID, request.MessageID, message); err != nil {
+		return sessionkit.DeliveryReceipt{}, fmt.Errorf("Grok interject: %w", err)
 	}
 	if row.Activity == "working" {
 		return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
@@ -134,13 +150,9 @@ func (b *PeerBackend) deliver(ctx context.Context, request sessionkit.DeliveryRe
 	return sessionkit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
 }
 
-func (b *PeerBackend) roster(ctx context.Context, id string) (peerSession, error) {
-	return roster(ctx, b.observer, id)
-}
-
 func roster(ctx context.Context, observer *acpClient, id string) (peerSession, error) {
 	if observer == nil {
-		return peerSession{}, errors.New("no_leader")
+		return peerSession{}, errors.New("Grok observer is unavailable")
 	}
 	var reply struct {
 		Result struct {
@@ -150,12 +162,37 @@ func roster(ctx context.Context, observer *acpClient, id string) (peerSession, e
 	if err := observer.request(ctx, "_x.ai/sessions/list", map[string]any{}, &reply); err != nil {
 		return peerSession{}, err
 	}
-	for _, session := range reply.Result.Sessions {
-		if session.SessionID == id && session.Resident {
-			return session, nil
+	return exactRoster(reply.Result.Sessions, id)
+}
+
+func exactRoster(sessions []peerSession, id string) (peerSession, error) {
+	var found peerSession
+	matches := 0
+	for _, session := range sessions {
+		if session.SessionID == id {
+			matches++
+			found = session
 		}
 	}
-	return peerSession{}, errors.New("no_leader")
+	if matches == 0 {
+		return peerSession{}, errNoLeader
+	}
+	if matches != 1 {
+		return peerSession{}, fmt.Errorf("Grok roster returned %d exact rows for %s", matches, id)
+	}
+	if found.Resident == nil {
+		return peerSession{}, errors.New("exact Grok session roster row has no resident state")
+	}
+	if !*found.Resident || slices.Contains([]string{"completed", "dormant", "dead"}, found.Activity) {
+		return peerSession{}, fmt.Errorf("Grok session %s is not live", id)
+	}
+	if found.Yolo == nil {
+		return peerSession{}, errors.New("live Grok roster row has no yolo state")
+	}
+	if !slices.Contains([]string{"working", "needs_input", "idle"}, found.Activity) {
+		return peerSession{}, fmt.Errorf("live Grok roster row has unsupported activity %q", found.Activity)
+	}
+	return found, nil
 }
 
 func (b *PeerBackend) Shutdown() {
@@ -176,6 +213,9 @@ func (b *PeerBackend) Shutdown() {
 }
 
 func InteractivePlan(arguments, environment []string) (host.ExecPlan, error) {
+	if grokPassthrough(arguments) {
+		return host.ExecPlan{Path: "grok", Args: slices.Clone(arguments), Env: slices.Clone(environment)}, nil
+	}
 	id, err := interactiveIdentity(arguments)
 	if err != nil {
 		return host.ExecPlan{}, err
@@ -201,29 +241,78 @@ func InteractivePlan(arguments, environment []string) (host.ExecPlan, error) {
 }
 
 func interactiveIdentity(arguments []string) (string, error) {
+	identity := ""
 	for index := 0; index < len(arguments); index++ {
 		argument := arguments[index]
 		if argument == "--" {
 			break
 		}
-		if argument == "--no-leader" || strings.HasPrefix(argument, "--leader-socket") {
+		if argument == "--leader" || strings.HasPrefix(argument, "--leader=") || argument == "--no-leader" || strings.HasPrefix(argument, "--no-leader=") || strings.HasPrefix(argument, "--leader-socket") {
 			return "", errors.New("grok-peer requires the default leader")
 		}
+		if argument == "--continue" || strings.HasPrefix(argument, "--continue=") || argument == "-c" || argument == "--fork-session" || strings.HasPrefix(argument, "--fork-session=") {
+			return "", fmt.Errorf("%s cannot identify an exact managed Grok session", argument)
+		}
 		name, value, attached := strings.Cut(argument, "=")
-		if name == "--session-id" || name == "-s" || name == "--resume" || name == "-r" {
+		resume := name == "--resume" || name == "--load" || name == "-r"
+		fresh := name == "--session-id" || name == "-s"
+		if !attached && strings.HasPrefix(argument, "-r") && argument != "-r" {
+			resume, value, attached = true, strings.TrimPrefix(argument, "-r"), true
+		}
+		if !attached && strings.HasPrefix(argument, "-s") && argument != "-s" {
+			fresh, value, attached = true, strings.TrimPrefix(argument, "-s"), true
+		}
+		if resume || fresh {
 			if !attached {
 				if index+1 == len(arguments) || strings.HasPrefix(arguments[index+1], "-") {
 					return "", errors.New(argument + " requires a value")
 				}
-				value = arguments[index+1]
+				index++
+				value = arguments[index]
 			}
-			return value, nil
+			if strings.TrimSpace(value) == "" {
+				return "", errors.New(argument + " requires a value")
+			}
+			if identity != "" {
+				return "", errors.New("Grok session identity was specified more than once")
+			}
+			identity = value
+			continue
 		}
 		if grokOptionTakesValue(argument) {
 			index++
 		}
 	}
-	return "", nil
+	return identity, nil
+}
+
+var grokCommands = map[string]bool{
+	"agent": true, "clone": true, "completions": true, "dashboard": true,
+	"doctor": true, "du": true, "disk-usage": true, "export": true,
+	"help": true, "inspect": true, "leader": true, "login": true,
+	"logout": true, "mcp": true, "memory": true, "models": true,
+	"plugin": true, "sessions": true, "setup": true, "trace": true,
+	"update": true, "version": true, "v": true, "worktree": true,
+	"wrap": true,
+}
+
+func grokPassthrough(arguments []string) bool {
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		if argument == "--" {
+			return false
+		}
+		if argument == "-h" || argument == "--help" || argument == "-v" || argument == "--version" {
+			return true
+		}
+		if !strings.HasPrefix(argument, "-") {
+			return grokCommands[argument]
+		}
+		if grokOptionTakesValue(argument) {
+			index++
+		}
+	}
+	return false
 }
 
 func grokOptionTakesValue(argument string) bool {
@@ -231,7 +320,7 @@ func grokOptionTakesValue(argument string) bool {
 	if attached {
 		return false
 	}
-	return slices.Contains([]string{"-g", "--group", "--agent", "--agents", "--allow", "--cwd", "--debug-file", "--deny", "--disallowed-tools", "--json-schema", "--leader-socket", "-m", "--model", "--max-turns", "--output-format", "--permission-mode", "--prompt-file", "--prompt-json", "-r", "--resume", "--reasoning-effort", "--effort", "--rules", "-s", "--session-id", "--sandbox", "--system-prompt-override", "--tools", "--worktree-ref", "--ref"}, name)
+	return slices.Contains([]string{"-g", "--group", "--agent", "--agents", "--allow", "--cwd", "--debug-file", "--deny", "--disallowed-tools", "--json-schema", "--leader-socket", "-m", "--model", "--max-turns", "--output-format", "--permission-mode", "--prompt-file", "--prompt-json", "-r", "--resume", "--load", "--reasoning-effort", "--effort", "--rules", "-s", "--session-id", "--sandbox", "--system-prompt-override", "--tools", "--worktree-ref", "--ref"}, name)
 }
 
 func newSessionID() (string, error) {

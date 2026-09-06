@@ -31,7 +31,6 @@ type nativeProcess struct {
 type Wrapper struct {
 	socket, key string
 	backend     mcp.Backend
-	handoff     sync.Mutex
 	mu          sync.Mutex
 	primary     *acpClient
 	observer    *acpClient
@@ -39,7 +38,7 @@ type Wrapper struct {
 	leader      *nativeProcess
 	watcher     *nativeProcess
 	sessionID   string
-	active      *sessionkit.Run
+	run         *sessionkit.Run
 	answer      strings.Builder
 	closing     bool
 	shutdown    func()
@@ -84,14 +83,27 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 		return sessionkit.OpenResult{}, err
 	}
 	go func() { _ = mcp.ServeLane(ctx, endpoint, p.backend) }()
-	leader, err := p.startLeader(request.Open.Cwd)
+	leader, err := p.startLeader(request.Open.Cwd, request.Open.PermissionMode)
 	if err != nil {
 		return sessionkit.OpenResult{}, closeLaunch(lock, endpoint, err)
 	}
-	primaryArgs, err := launchArguments(request, leaderSocket(p.socket, p.key))
+	hold, holdProcess, err := p.startObserverClient(ctx, request.Open.Cwd)
 	if err != nil {
 		p.stopAux(leader)
 		return sessionkit.OpenResult{}, closeLaunch(lock, endpoint, err)
+	}
+	releaseHold := func() {
+		hold.close()
+		p.stopAux(holdProcess)
+	}
+	fail := func(cause error) error {
+		releaseHold()
+		p.stopAux(leader)
+		return closeLaunch(lock, endpoint, cause)
+	}
+	primaryArgs, err := launchArguments(request, leaderSocket(p.socket, p.key))
+	if err != nil {
+		return sessionkit.OpenResult{}, fail(err)
 	}
 	primaryCommand := command("grok", primaryArgs...)
 	primaryCommand.Dir, primaryCommand.Stderr = request.Open.Cwd, os.Stderr
@@ -100,8 +112,7 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 	child, err := host.StartChild(primaryCommand, lock, endpoint)
 	if err != nil {
 		_ = input.Close()
-		p.stopAux(leader)
-		return sessionkit.OpenResult{}, closeLaunch(lock, endpoint, fmt.Errorf("start Grok primary: %w", err))
+		return sessionkit.OpenResult{}, fail(fmt.Errorf("start Grok primary: %w", err))
 	}
 	primary := newACPClient(input, output, p.receive)
 	p.mu.Lock()
@@ -113,16 +124,16 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 	if err == nil {
 		err = p.startObserver(ctx, request.Open.Cwd, name)
 	}
+	releaseHold()
 	if err != nil {
-		p.abortLaunch()
-		return sessionkit.OpenResult{}, err
+		return sessionkit.OpenResult{}, errors.Join(err, p.abortLaunch(ctx))
 	}
 	go p.watch(child)
 	return sessionkit.OpenResult{SessionID: p.sessionID}, nil
 }
 
 func (p *Wrapper) openSession(ctx context.Context, primary *acpClient, request sessionkit.OpenRequest, laneSocket string, lock *host.SessionLock) error {
-	params := map[string]any{"cwd": request.Open.Cwd, "mcpServers": []any{mcpServer(laneSocket)}, "_meta": map[string]bool{"yoloMode": false, "autoMode": false}}
+	params := map[string]any{"cwd": request.Open.Cwd, "mcpServers": []any{mcpServer(laneSocket)}, "_meta": map[string]bool{"yoloMode": request.Open.PermissionMode == "bypassPermissions", "autoMode": false}}
 	method := "session/new"
 	if request.ResumeSessionID != "" {
 		method, params["sessionId"] = "session/load", request.ResumeSessionID
@@ -147,10 +158,15 @@ func (p *Wrapper) openSession(ctx context.Context, primary *acpClient, request s
 	return nil
 }
 
-func (p *Wrapper) startLeader(cwd string) (*nativeProcess, error) {
+func (p *Wrapper) startLeader(cwd, permission string) (*nativeProcess, error) {
 	path := leaderSocket(p.socket, p.key)
 	_ = os.Remove(path)
-	cmd := command("grok", "agent", "leader", "--no-auto-update", "--no-exit-on-disconnect", "--leader-socket", path)
+	arguments := []string{"--permission-mode", first(permission, "default")}
+	if permission == "" || permission == "default" {
+		arguments = append(arguments, "--allow", "MCPTool(agent_sessions__*)")
+	}
+	arguments = append(arguments, "agent", "leader", "--leader-socket", path, "--relay-on-demand", "--no-auto-update")
+	cmd := command("grok", arguments...)
 	cmd.Dir, cmd.Env, cmd.Stdout, cmd.Stderr = cwd, nativeEnvironment(), os.Stderr, os.Stderr
 	process, err := startNative(cmd)
 	if err != nil {
@@ -175,7 +191,7 @@ func (p *Wrapper) startLeader(cwd string) (*nativeProcess, error) {
 	}
 }
 
-func (p *Wrapper) startObserver(ctx context.Context, cwd, title string) error {
+func (p *Wrapper) startObserverClient(ctx context.Context, cwd string) (*acpClient, *nativeProcess, error) {
 	args := []string{"--permission-mode", "default", "--leader-socket", leaderSocket(p.socket, p.key), "agent", "--leader", "stdio"}
 	cmd := command("grok", args...)
 	cmd.Dir, cmd.Env, cmd.Stderr = cwd, nativeEnvironment(), os.Stderr
@@ -183,17 +199,28 @@ func (p *Wrapper) startObserver(ctx context.Context, cwd, title string) error {
 	output, _ := cmd.StdoutPipe()
 	process, err := startNative(cmd)
 	if err != nil {
+		return nil, nil, err
+	}
+	client := newACPClient(input, output, nil)
+	if err = initializeACP(ctx, client); err != nil {
+		client.close()
+		p.stopAux(process)
+		return nil, nil, err
+	}
+	return client, process, nil
+}
+
+func (p *Wrapper) startObserver(ctx context.Context, cwd, title string) error {
+	observer, process, err := p.startObserverClient(ctx, cwd)
+	if err != nil {
 		return fmt.Errorf("start Grok observer: %w", err)
 	}
-	observer := newACPClient(input, output, nil)
-	if err = initializeACP(ctx, observer); err == nil {
-		var renamed struct {
-			Success bool `json:"success"`
-		}
-		err = observer.request(ctx, "_x.ai/session/rename", map[string]string{"sessionId": p.sessionID, "title": title}, &renamed)
-		if err == nil && !renamed.Success {
-			err = errors.New("Grok did not apply the session title")
-		}
+	var renamed struct {
+		Success bool `json:"success"`
+	}
+	err = observer.request(ctx, "_x.ai/session/rename", map[string]string{"sessionId": p.sessionID, "title": title}, &renamed)
+	if err == nil && !renamed.Success {
+		err = errors.New("Grok did not apply the session title")
 	}
 	if err != nil {
 		observer.close()
@@ -226,27 +253,46 @@ func initializeACP(ctx context.Context, client *acpClient) error {
 }
 
 func (p *Wrapper) Run(ctx context.Context, run *sessionkit.Run, input string) (sessionkit.TurnResult, error) {
-	p.handoff.Lock()
 	p.mu.Lock()
-	if p.primary == nil || p.active != nil || p.closing {
+	if p.primary == nil || p.run != nil || p.closing {
 		p.mu.Unlock()
-		p.handoff.Unlock()
 		return sessionkit.TurnResult{}, errors.New("Grok lane is not idle")
 	}
-	p.active, p.answer = run, strings.Builder{}
+	p.run, p.answer = run, strings.Builder{}
 	primary, id := p.primary, p.sessionID
-	p.mu.Unlock()
-	p.handoff.Unlock()
+	go p.retireRun(run)
+	if run.Interrupted() {
+		p.mu.Unlock()
+		return sessionkit.TurnResult{Outcome: "interrupted"}, nil
+	}
 	var result struct {
 		StopReason string `json:"stopReason"`
 	}
-	err := primary.request(ctx, "session/prompt", map[string]any{"sessionId": id, "prompt": []map[string]string{{"type": "text", "text": input}}}, &result)
-	p.handoff.Lock()
+	started, finished := make(chan error, 1), make(chan error, 1)
+	go func() {
+		finished <- primary.requestStarted(ctx, "session/prompt", map[string]any{"sessionId": id, "prompt": []map[string]string{{"type": "text", "text": input}}}, &result, started)
+	}()
+	if err := <-started; err != nil {
+		p.mu.Unlock()
+		return sessionkit.TurnResult{}, err
+	}
+	native := &nativePrompt{client: primary, sessionID: id}
+	run.Native = native
+	interrupted := run.Interrupted()
+	if interrupted {
+		run.Native = nil
+	}
+	p.mu.Unlock()
+	if interrupted {
+		_ = native.client.cancel(native.sessionID)
+	}
+	err := <-finished
 	p.mu.Lock()
 	answer := p.answer.String()
-	p.active = nil
+	if run.Native == native {
+		run.Native = nil
+	}
 	p.mu.Unlock()
-	p.handoff.Unlock()
 	if err != nil {
 		return sessionkit.TurnResult{}, err
 	}
@@ -257,6 +303,20 @@ func (p *Wrapper) Run(ctx context.Context, run *sessionkit.Run, input string) (s
 		outcome = "failed"
 	}
 	return sessionkit.TurnResult{Outcome: outcome, Result: answer, NativeStopReason: result.StopReason}, nil
+}
+
+type nativePrompt struct {
+	client    *acpClient
+	sessionID string
+}
+
+func (p *Wrapper) retireRun(run *sessionkit.Run) {
+	<-run.Done()
+	p.mu.Lock()
+	if p.run == run {
+		p.run = nil
+	}
+	p.mu.Unlock()
 }
 
 func (p *Wrapper) receive(frame acpFrame) {
@@ -276,20 +336,23 @@ func (p *Wrapper) receive(frame acpFrame) {
 		return
 	}
 	p.mu.Lock()
-	if p.active != nil && update.SessionID == p.sessionID {
+	if p.run != nil && p.run.Native != nil && update.SessionID == p.sessionID {
 		p.answer.WriteString(update.Update.Content.Text)
 	}
 	p.mu.Unlock()
 }
 
-func (p *Wrapper) Interrupt(context.Context, *sessionkit.Run) error {
+func (p *Wrapper) Interrupt(_ context.Context, run *sessionkit.Run) error {
 	p.mu.Lock()
-	primary, id := p.primary, p.sessionID
-	p.mu.Unlock()
-	if primary == nil {
-		return errors.New("Grok primary is unavailable")
+	native, _ := run.Native.(*nativePrompt)
+	if native != nil {
+		run.Native = nil
 	}
-	return primary.cancel(id)
+	p.mu.Unlock()
+	if native == nil {
+		return nil
+	}
+	return native.client.cancel(native.sessionID)
 }
 
 func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
@@ -297,16 +360,15 @@ func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryReques
 	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}
-	p.handoff.Lock()
-	defer p.handoff.Unlock()
 	p.mu.Lock()
-	observer, id, active := p.observer, p.sessionID, p.active != nil
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	observer, id := p.observer, p.sessionID
+	active := p.run != nil && p.run.Native != nil
 	if observer == nil {
-		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "no_leader"}, nil
+		return sessionkit.DeliveryReceipt{}, errors.New("Grok observer is unavailable")
 	}
 	if err := observer.interject(ctx, id, request.MessageID, message); err != nil {
-		return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "no_leader"}, nil
+		return sessionkit.DeliveryReceipt{}, fmt.Errorf("Grok interject: %w", err)
 	}
 	if active {
 		return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
@@ -318,56 +380,37 @@ func (p *Wrapper) Close(ctx context.Context) error {
 	p.mu.Lock()
 	p.closing = true
 	p.mu.Unlock()
-	p.closeProcesses(ctx)
-	return nil
+	return p.closeProcesses(ctx)
 }
 
-func (p *Wrapper) closeProcesses(ctx context.Context) {
+func (p *Wrapper) closeProcesses(ctx context.Context) error {
 	p.mu.Lock()
 	primary, observer, child, watcher, leader, id := p.primary, p.observer, p.child, p.watcher, p.leader, p.sessionID
 	p.mu.Unlock()
-	var wait sync.WaitGroup
-	if primary != nil {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			_ = primary.request(context.Background(), "session/close", map[string]string{"sessionId": id}, &map[string]any{})
-			primary.close()
-			if child != nil {
-				_ = child.Close(ctx, func(context.Context) error { return nil })
-			}
-		}()
+	var failures []error
+	if primary != nil && id != "" {
+		failures = append(failures, primary.request(ctx, "session/close", map[string]string{"sessionId": id}, &map[string]any{}))
+		primary.close()
 	}
-	for _, item := range []struct {
-		client  *acpClient
-		process *nativeProcess
-	}{{observer, watcher}, {nil, leader}} {
-		if item.process == nil {
-			continue
+	if observer != nil {
+		observer.close()
+	}
+	failures = append(failures, closeNative(ctx, "observer", watcher), closeNative(ctx, "leader", leader))
+	if child != nil {
+		if err := child.Close(ctx, func(context.Context) error { return nil }); err != nil {
+			failures = append(failures, err)
 		}
-		wait.Add(1)
-		go func(item struct {
-			client  *acpClient
-			process *nativeProcess
-		}) {
-			defer wait.Done()
-			if item.client != nil {
-				item.client.close()
-			}
-			_ = item.process.cmd.Process.Signal(syscall.SIGTERM)
-			<-item.process.done
-		}(item)
 	}
-	wait.Wait()
 	path := leaderSocket(p.socket, p.key)
-	_ = os.Remove(path)
-	_ = os.Remove(strings.TrimSuffix(path, ".sock") + ".lock")
+	failures = appendRemoveError(failures, path)
+	failures = appendRemoveError(failures, strings.TrimSuffix(path, ".sock")+".lock")
+	return errors.Join(failures...)
 }
 
 func (p *Wrapper) watch(child *host.Child) {
 	err := child.Wait()
 	p.mu.Lock()
-	closing, run, shutdown := p.closing, p.active, p.shutdown
+	closing, run, shutdown := p.closing, p.run, p.shutdown
 	p.mu.Unlock()
 	if err != nil && !closing {
 		fmt.Fprintf(os.Stderr, "agentbus: Grok primary exited: %v\n", err)
@@ -380,11 +423,11 @@ func (p *Wrapper) watch(child *host.Child) {
 	}
 }
 
-func (p *Wrapper) abortLaunch() {
+func (p *Wrapper) abortLaunch(ctx context.Context) error {
 	p.mu.Lock()
 	p.closing = true
 	p.mu.Unlock()
-	p.closeProcesses(context.Background())
+	return p.closeProcesses(ctx)
 }
 
 func (p *Wrapper) stopAux(process *nativeProcess) {
@@ -393,6 +436,35 @@ func (p *Wrapper) stopAux(process *nativeProcess) {
 	}
 	_ = process.cmd.Process.Signal(syscall.SIGKILL)
 	<-process.done
+}
+
+func stopNative(ctx context.Context, process *nativeProcess) error {
+	if err := process.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	select {
+	case <-process.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func closeNative(ctx context.Context, role string, process *nativeProcess) error {
+	if process == nil {
+		return nil
+	}
+	if err := stopNative(ctx, process); err != nil {
+		return fmt.Errorf("close Grok %s: %w", role, err)
+	}
+	return nil
+}
+
+func appendRemoveError(failures []error, path string) []error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return append(failures, err)
+	}
+	return failures
 }
 
 func startNative(cmd *exec.Cmd) (*nativeProcess, error) {

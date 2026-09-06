@@ -35,7 +35,6 @@ type acpClient struct {
 	input       io.WriteCloser
 	requests    sync.Mutex
 	writes      sync.Mutex
-	state       sync.Mutex
 	next        int64
 	err         error
 	responses   chan acpFrame
@@ -85,22 +84,24 @@ func (c *acpClient) read(output io.Reader) {
 }
 
 func (c *acpClient) finish(err error) {
-	c.state.Lock()
-	if c.err == nil {
-		c.err = err
-		close(c.done)
-	}
-	c.state.Unlock()
+	c.err = err
+	close(c.done)
 }
 
 func (c *acpClient) request(ctx context.Context, method string, params any, result any) error {
+	return c.requestStarted(ctx, method, params, result, nil)
+}
+
+func (c *acpClient) requestStarted(ctx context.Context, method string, params any, result any, started chan<- error) error {
 	c.requests.Lock()
 	defer c.requests.Unlock()
-	c.state.Lock()
 	c.next++
 	id := c.next
-	c.state.Unlock()
-	if err := c.send(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
+	err := c.send(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+	if started != nil {
+		started <- err
+	}
+	if err != nil {
 		return fmt.Errorf("write Grok ACP %s: %w", method, err)
 	}
 	for {
@@ -117,10 +118,7 @@ func (c *acpClient) request(ctx context.Context, method string, params any, resu
 			}
 			return nil
 		case <-c.done:
-			c.state.Lock()
-			err := c.err
-			c.state.Unlock()
-			return fmt.Errorf("read Grok ACP %s: %w", method, err)
+			return fmt.Errorf("read Grok ACP %s: %w", method, c.err)
 		case <-ctx.Done():
 			return ctx.Err()
 		}
