@@ -525,9 +525,6 @@ func launchArguments(request sessionkit.OpenRequest, leader string) ([]string, e
 		return nil, err
 	}
 	arguments := []string{"--no-auto-update"}
-	if request.ResumeSessionID != "" {
-		arguments = append(arguments, "--resume", request.ResumeSessionID)
-	}
 	mode := first(request.Open.PermissionMode, "default")
 	arguments = append(arguments, "--permission-mode", mode)
 	if request.Open.ReasoningEffort != "" {

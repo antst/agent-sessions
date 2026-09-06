@@ -217,7 +217,9 @@ func TestInterruptAndResume(t *testing.T) {
 	_, err := p.Open(context.Background(), sessionkit.OpenRequest{Name: "lane@local", ResumeSessionID: testSessionID, Open: sessionkit.OpenOptions{Cwd: root}})
 	must(t, err)
 	frames := records(t, os.Getenv("GROK_TEST_RECORD"))
-	check(t, len(findFrame(frames, "session/load")) > 0, "resume did not load")
+	load := findFrame(frames, "session/load")
+	check(t, strings.Contains(string(load), `"sessionId":"`+testSessionID+`"`), "resume load = %s", load)
+	check(t, !containsStart(frames, "--resume", testSessionID), "resume was selected in both argv and session/load")
 	check(t, containsStart(frames, "--permission-mode", "default", "--allow", "MCPTool(agent_sessions__*)"), "default leader MCP allow absent")
 	must(t, p.Close(context.Background()))
 }
