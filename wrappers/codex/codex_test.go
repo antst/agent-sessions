@@ -238,6 +238,21 @@ func TestCompletedTurnRequiresFinalAnswer(t *testing.T) {
 	}
 }
 
+func TestCapturedFailedTurn(t *testing.T) {
+	raw := `{"method":"turn/completed","params":{"threadId":"01a075f0-66ba-7b52-87a7-5dca3de53066","turn":{"id":"01a075f0-6737-7b02-ae86-c9be43e17c19","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'agentbus-invalid-model' model is not supported when using Codex with a ChatGPT account.\"}}","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"startedAt":1788685084,"completedAt":1788685085,"durationMs":1261}},"emittedAtMs":1788685085742}`
+	var frame appFrame
+	var event struct {
+		Turn nativeTurn `json:"turn"`
+	}
+	if json.Unmarshal([]byte(raw), &frame) != nil || json.Unmarshal(frame.Params, &event) != nil {
+		t.Fatal("decode captured failed turn")
+	}
+	result, err := terminal(event.Turn)
+	if err != nil || result.Outcome != "failed" || result.NativeStopReason != "failed" || !strings.Contains(result.Result, "agentbus-invalid-model") {
+		t.Fatalf("terminal = %#v, %v", result, err)
+	}
+}
+
 func TestOpenEffectiveSettings(t *testing.T) {
 	p := &Wrapper{approval: "never", sandbox: "danger-full-access"}
 	reply := threadReply{Cwd: "/work", ApprovalPolicy: "never"}

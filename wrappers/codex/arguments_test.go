@@ -1,10 +1,6 @@
 package codex
 
 import (
-	"context"
-	"encoding/json"
-	"os"
-	"os/exec"
 	"slices"
 	"strings"
 	"testing"
@@ -61,12 +57,11 @@ func TestPermissionAndName(t *testing.T) {
 }
 
 func TestInteractivePlan(t *testing.T) {
-	t.Setenv("CODEX_HOME", "/codex-home")
 	plan, err := InteractivePlan([]string{"--model", "-g", "-g", "team", "--peer-name", "chosen", "resume", "id"}, []string{"PATH=/bin"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(plan.Args, []string{"--remote", "unix:///codex-home/app-server-control/app-server-control.sock", "--model", "-g", "resume", "id"}) {
+	if !slices.Equal(plan.Args, []string{"--model", "-g", "resume", "id"}) {
 		t.Fatalf("args = %v", plan.Args)
 	}
 	if !slices.Contains(plan.Env, host.GroupsEnv+`=["team"]`) || !slices.Contains(plan.Env, host.NameEnv+"=chosen") {
@@ -74,48 +69,25 @@ func TestInteractivePlan(t *testing.T) {
 	}
 }
 
-func TestInteractivePlanRejectsUnsupportedSurface(t *testing.T) {
-	for _, argument := range []string{"--remote", "--remote=x", "--remote-auth-token-env", "-i", "--image=x", "--local-provider", "--add-dir=x"} {
-		if _, err := InteractivePlan([]string{argument}, nil); err == nil || !strings.Contains(err.Error(), "unsupported Codex interactive option") {
+func TestInteractivePlanRemoteAndPassthrough(t *testing.T) {
+	for _, argument := range []string{"--remote", "--remote=x", "--remote-auth-token-env"} {
+		if _, err := InteractivePlan([]string{argument}, nil); err == nil || !strings.Contains(err.Error(), "caller-controlled --remote") {
 			t.Fatalf("%s: %v", argument, err)
 		}
 	}
-}
-
-func TestStartPeerDaemon(t *testing.T) {
-	t.Setenv("GO_WANT_CODEX_DAEMON", "1")
-	evidence := t.TempDir() + "/daemon.json"
-	t.Setenv("CODEX_TEST_EVIDENCE", evidence)
-	t.Setenv(host.TokenEnv, "must-not-reach-daemon")
-	original := peerDaemonCommand
-	peerDaemonCommand = func(ctx context.Context, _ string, arguments ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, os.Args[0], append([]string{"-test.run=TestCodexDaemonProcess", "--"}, arguments...)...)
+	for _, arguments := range [][]string{
+		{"--help", "-g", "literal", "--peer-name", "literal"},
+		{"exec", "-g", "literal"},
+	} {
+		environment := []string{"PATH=/bin"}
+		plan, err := InteractivePlan(arguments, environment)
+		if err != nil || !slices.Equal(plan.Args, arguments) || !slices.Equal(plan.Env, environment) {
+			t.Fatalf("passthrough = %#v, %v", plan, err)
+		}
 	}
-	t.Cleanup(func() { peerDaemonCommand = original })
-	if err := StartPeerDaemon(context.Background(), "codex"); err != nil {
-		t.Fatal(err)
+	for _, argument := range []string{"-i", "--image=x", "--local-provider", "--add-dir=x"} {
+		if _, err := InteractivePlan([]string{argument, "value"}, nil); err != nil {
+			t.Fatalf("%s: %v", argument, err)
+		}
 	}
-	var observed struct{ Args, Env []string }
-	body, err := os.ReadFile(evidence)
-	if err != nil || json.Unmarshal(body, &observed) != nil {
-		t.Fatalf("evidence = %s, %v", body, err)
-	}
-	if !slices.Equal(observed.Args, []string{"app-server", "daemon", "start"}) || slices.Contains(observed.Env, host.TokenEnv) {
-		t.Fatalf("observed = %#v", observed)
-	}
-}
-
-func TestCodexDaemonProcess(t *testing.T) {
-	if os.Getenv("GO_WANT_CODEX_DAEMON") != "1" {
-		return
-	}
-	separator := slices.Index(os.Args, "--")
-	names := []string{}
-	for _, value := range os.Environ() {
-		name, _, _ := strings.Cut(value, "=")
-		names = append(names, name)
-	}
-	body, _ := json.Marshal(map[string]any{"Args": os.Args[separator+1:], "Env": names})
-	_ = os.WriteFile(os.Getenv("CODEX_TEST_EVIDENCE"), body, 0o600)
-	os.Exit(0)
 }

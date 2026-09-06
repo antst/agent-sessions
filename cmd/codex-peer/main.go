@@ -38,9 +38,6 @@ func run(ctx context.Context, arguments []string) error {
 		if err != nil {
 			return err
 		}
-		if err = codex.StartPeerDaemon(ctx, path); err != nil {
-			return err
-		}
 		return syscall.Exec(path, append([]string{path}, plan.Args...), plan.Env)
 	}
 	if len(arguments) != 0 {

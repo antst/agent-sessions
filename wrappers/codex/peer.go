@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -69,11 +70,15 @@ func NewPeerBackend(ctx context.Context) (*PeerBackend, error) {
 }
 
 func startPeerApp() (*exec.Cmd, io.WriteCloser, io.Reader, error) {
-	socket, err := appServerSocket()
-	if err != nil {
-		return nil, nil, nil, err
+	home := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if home == "" {
+		user, err := os.UserHomeDir()
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		home = filepath.Join(user, ".codex")
 	}
-	command := exec.Command("codex", "app-server", "proxy", "--sock", socket)
+	command := exec.Command("codex", "app-server", "proxy", "--sock", filepath.Join(home, "app-server-control", "app-server-control.sock"))
 	command.Stderr = os.Stderr
 	command.Env = slices.DeleteFunc(os.Environ(), func(value string) bool {
 		key, _, _ := strings.Cut(value, "=")

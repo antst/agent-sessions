@@ -1,12 +1,7 @@
 package codex
 
 import (
-	"context"
 	"errors"
-	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -21,8 +16,6 @@ var processRules = []host.ArgumentRule{
 	{Name: "--disable", TakesValue: true},
 	{Name: "--search"},
 }
-
-var peerDaemonCommand = exec.CommandContext
 
 func processArguments(arguments []string) ([]string, error) {
 	return host.BuildArguments(arguments, processRules)
@@ -68,100 +61,49 @@ func namePart(name string) (string, error) {
 }
 
 func InteractivePlan(arguments, environment []string) (host.ExecPlan, error) {
-	name, groups, forwarded, err := projectInteractive(arguments)
-	if err != nil {
-		return host.ExecPlan{}, err
-	}
+	originalEnvironment := environment
 	if !slices.ContainsFunc(environment, func(value string) bool { return strings.HasPrefix(value, host.SocketEnv+"=") }) {
 		environment = append(environment, host.SocketEnv+"="+sessionkit.Socket())
 	}
-	groupArgs := make([]string, 0, len(groups)*2)
-	for _, group := range groups {
-		groupArgs = append(groupArgs, "-g", group)
-	}
-	plan, err := host.InteractivePlan("codex", groupArgs, environment, host.PeerIdentity{Name: name}, nil)
+	passthrough, remote := false, false
+	plan, err := host.InteractivePlan("codex", arguments, environment, host.PeerIdentity{}, func(argument string) bool {
+		key, _, attached := strings.Cut(argument, "=")
+		if key == "--remote" || key == "--remote-auth-token-env" {
+			remote = true
+		}
+		if argument == "-h" || argument == "--help" || argument == "-V" || argument == "--version" || codexSubcommand(argument) {
+			passthrough = true
+		}
+		return !attached && codexOptionTakesValue(key)
+	})
 	if err != nil {
 		return host.ExecPlan{}, err
 	}
-	socket, err := appServerSocket()
-	if err != nil {
-		return host.ExecPlan{}, err
+	if passthrough {
+		return host.ExecPlan{Path: "codex", Args: arguments, Env: originalEnvironment}, nil
 	}
-	plan.Args = append([]string{"--remote", "unix://" + socket}, forwarded...)
+	if remote {
+		return host.ExecPlan{}, errors.New("caller-controlled --remote options are not supported")
+	}
 	return plan, nil
 }
 
-func projectInteractive(arguments []string) (string, []string, []string, error) {
-	forwarded := make([]string, 0, len(arguments))
-	name, groups := "", []string{}
-	for index := 0; index < len(arguments); index++ {
-		argument := arguments[index]
-		key, value, attached := strings.Cut(argument, "=")
-		if slices.Contains([]string{"--remote", "--remote-auth-token-env", "-i", "--image", "--local-provider", "--add-dir"}, key) {
-			return "", nil, nil, errors.New("unsupported Codex interactive option " + key)
-		}
-		if key == "-n" || key == "--peer-name" || key == "-g" || key == "--group" {
-			if !attached {
-				if index+1 == len(arguments) {
-					return "", nil, nil, errors.New(argument + " requires a value")
-				}
-				index++
-				value = arguments[index]
-			}
-			if strings.TrimSpace(value) == "" {
-				return "", nil, nil, errors.New(argument + " requires a value")
-			}
-			if key == "-g" || key == "--group" {
-				groups = append(groups, value)
-			} else {
-				name = value
-			}
-			continue
-		}
-		forwarded = append(forwarded, argument)
-		if argument == "--" {
-			forwarded = append(forwarded, arguments[index+1:]...)
-			break
-		}
-		if !attached && codexOptionTakesValue(key) && index+1 < len(arguments) {
-			index++
-			forwarded = append(forwarded, arguments[index])
-		}
+func codexSubcommand(argument string) bool {
+	switch argument {
+	case "agents", "exec", "e", "review", "login", "logout", "mcp", "plugin", "mcp-server", "app-server", "remote-control", "completion", "update", "doctor", "sandbox", "debug", "apply", "a", "queue", "archive", "delete", "unarchive", "cloud", "app", "exec-server", "features", "help", "migrate-rollouts":
+		return true
 	}
-	return name, groups, forwarded, nil
-}
-
-func appServerSocket() (string, error) {
-	home := strings.TrimSpace(os.Getenv("CODEX_HOME"))
-	if home == "" {
-		user, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		home = filepath.Join(user, ".codex")
-	}
-	return filepath.Join(home, "app-server-control", "app-server-control.sock"), nil
-}
-
-func StartPeerDaemon(ctx context.Context, path string) error {
-	command := peerDaemonCommand(ctx, path, "app-server", "daemon", "start")
-	command.Env = slices.DeleteFunc(os.Environ(), func(value string) bool {
-		key, _, _ := strings.Cut(value, "=")
-		return strings.HasPrefix(key, "AGENTBUS_")
-	})
-	command.Stdout, command.Stderr = os.Stdout, os.Stderr
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("start Codex App Server: %w", err)
-	}
-	return nil
+	return false
 }
 
 func codexOptionTakesValue(name string) bool {
 	_, found := map[string]bool{
 		"-a": true, "--ask-for-approval": true, "-c": true, "--config": true,
 		"-C": true, "--cd": true, "--disable": true, "--enable": true,
-		"-m": true, "--model": true, "-p": true, "--profile": true,
-		"-s": true, "--sandbox": true,
+		"-i": true, "--image": true, "-m": true, "--model": true,
+		"--local-provider": true, "-p": true, "--profile": true,
+		"--remote": true, "--remote-auth-token-env": true,
+		"-s": true, "--sandbox": true, "--add-dir": true,
 	}[name]
 	return found
 }

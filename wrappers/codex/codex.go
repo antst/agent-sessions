@@ -421,14 +421,16 @@ func terminal(t nativeTurn) (sessionkit.TurnResult, error) {
 		}
 	case "interrupted":
 		result.Outcome = "interrupted"
-	default:
+	case "failed":
 		result.Outcome = "failed"
 		if t.Error != nil {
 			result.Result = t.Error.Message
 		}
 		if result.Result == "" {
-			result.Result = first(t.Status, "Codex turn failed")
+			result.Result = "Codex turn failed"
 		}
+	default:
+		return sessionkit.TurnResult{}, fmt.Errorf("Codex turn %s has unsupported terminal status %q", t.ID, t.Status)
 	}
 	return result, nil
 }
