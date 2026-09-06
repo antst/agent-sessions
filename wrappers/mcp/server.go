@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 	"sync"
 
 	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
@@ -16,12 +17,6 @@ const ToolName, ProtocolVersion = "agent_sessions", "2025-06-18"
 
 type Backend interface {
 	Call(context.Context, string, any) (json.RawMessage, error)
-}
-
-type BackendFunc func(context.Context, string, any) (json.RawMessage, error)
-
-func (call BackendFunc) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	return call(ctx, method, params)
 }
 
 type Server struct {
@@ -50,6 +45,9 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) e
 		defer stop()
 	}
 	caller := sessionkit.NewCaller(s.Backend.Call)
+	if source, ok := s.Backend.(interface{ Caller() *sessionkit.Caller }); ok {
+		caller = source.Caller()
+	}
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 1<<20)
 	var calls sync.WaitGroup
@@ -114,7 +112,7 @@ func (s *Server) callTool(ctx context.Context, caller *sessionkit.Caller, raw js
 			Arguments json.RawMessage `json:"arguments"`
 		} `json:"arguments"`
 	}
-	if json.Unmarshal(raw, &call) != nil || call.Name != ToolName || !validAction(call.Arguments.Action) {
+	if json.Unmarshal(raw, &call) != nil || call.Name != ToolName || !slices.Contains(sessionkit.Actions, call.Arguments.Action) {
 		return nil, &failure{Code: -32602, Message: "Invalid params"}
 	}
 	arguments := call.Arguments.Arguments
@@ -122,6 +120,11 @@ func (s *Server) callTool(ctx context.Context, caller *sessionkit.Caller, raw js
 		arguments = json.RawMessage(`{}`)
 	} else if !object(arguments) {
 		return nil, &failure{Code: -32602, Message: "Invalid params"}
+	}
+	if backend, ok := s.Backend.(interface{ Prepare(context.Context) error }); ok {
+		if err := backend.Prepare(ctx); err != nil {
+			return nil, errorFailure(err)
+		}
 	}
 	result, err := caller.Action(ctx, call.Arguments.Action, arguments)
 	if err != nil {
@@ -186,15 +189,6 @@ func toolDefinition() map[string]any {
 			},
 		},
 	}
-}
-
-func validAction(action string) bool {
-	for _, candidate := range sessionkit.Actions {
-		if action == candidate {
-			return true
-		}
-	}
-	return false
 }
 
 func errorFailure(err error) *failure {
