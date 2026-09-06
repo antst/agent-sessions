@@ -227,10 +227,10 @@ func (p *workerProduct) Interrupt(ctx context.Context, run *sessionkit.Run) erro
 	close(p.interrupt)
 	return p.h.Interrupt(ctx, run)
 }
-func (p *workerProduct) Deliver(context.Context, sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
+func (p *workerProduct) Deliver(context.Context, sessionkit.DeliveryRequest, *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
 	return sessionkit.DeliveryReceipt{}, nil
 }
-func (*workerProduct) Close(context.Context) error { return nil }
+func (*workerProduct) Close(context.Context, sessionkit.SessionCloseRequest) error { return nil }
 
 func TestHandoffSDKInterruptCrossings(t *testing.T) {
 	for _, phase := range []string{"before callback", "during creation", "active turn"} {

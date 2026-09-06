@@ -1,0 +1,10 @@
+{
+  "name": "@agentbus/kit",
+  "version": "0.1.0-pre.1",
+  "license": "MIT",
+  "repository": {"type": "git", "url": "git+https://github.com/antst/agent-sessions.git", "directory": "bus"},
+  "main": "sdk/js/index.js",
+  "files": ["sdk/js/index.js", "sdk/js/connection.js", "sdk/js/caller.js", "sdk/js/schema.js", "internal/protocol/session.schema.json"],
+  "scripts": {"test": "node --test sdk/js/*.test.js"},
+  "publishConfig": {"access": "public", "tag": "pre"}
+}
