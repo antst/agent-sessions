@@ -4,11 +4,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,23 +14,23 @@ import (
 	"github.com/antst/agent-sessions/wrappers/host"
 )
 
-func TestPeerNativeAppStartsOnlyAfterIdentity(t *testing.T) {
-	previous := peerAppStart
-	started := 0
-	peerAppStart = func() (*exec.Cmd, io.WriteCloser, io.Reader, error) {
-		started++
-		return nil, nil, nil, errors.New("native start observed")
+func TestPeerNativeAppDialsOnlyAfterIdentity(t *testing.T) {
+	previous := peerAppDial
+	dials := 0
+	peerAppDial = func(context.Context) (appTransport, error) {
+		dials++
+		return nil, fmt.Errorf("native dial observed")
 	}
-	t.Cleanup(func() { peerAppStart = previous })
+	t.Cleanup(func() { peerAppDial = previous })
 	b, err := NewPeerBackend(context.Background())
-	if err != nil || started != 0 {
-		t.Fatalf("construct = %v, starts = %d", err, started)
+	if err != nil || dials != 0 {
+		t.Fatalf("construct = %v, dials = %d", err, dials)
 	}
-	if err = b.Prepare(context.Background(), nil); err == nil || started != 0 {
-		t.Fatalf("missing identity = %v, starts = %d", err, started)
+	if err = b.Prepare(context.Background(), nil); err == nil || dials != 0 {
+		t.Fatalf("missing identity = %v, dials = %d", err, dials)
 	}
-	if err = b.Prepare(context.Background(), json.RawMessage(`{"threadId":"thread-1"}`)); err == nil || err.Error() != "native start observed" || started != 1 {
-		t.Fatalf("first tool = %v, starts = %d", err, started)
+	if err = b.Prepare(context.Background(), json.RawMessage(`{"threadId":"thread-1"}`)); err == nil || err.Error() != "native dial observed" || dials != 1 {
+		t.Fatalf("first tool = %v, dials = %d", err, dials)
 	}
 }
 

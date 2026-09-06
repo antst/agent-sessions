@@ -22,6 +22,21 @@ type appReply struct {
 	err    error
 }
 
+type appTransport interface {
+	Read(any) error
+	Write(any) error
+	Close() error
+}
+
+type streamTransport struct {
+	input   io.WriteCloser
+	decoder *json.Decoder
+}
+
+func (s *streamTransport) Read(value any) error  { return s.decoder.Decode(value) }
+func (s *streamTransport) Write(value any) error { return json.NewEncoder(s.input).Encode(value) }
+func (s *streamTransport) Close() error          { return s.input.Close() }
+
 type appFrame struct {
 	ID     json.RawMessage `json:"id"`
 	Method string          `json:"method"`
@@ -31,7 +46,7 @@ type appFrame struct {
 }
 
 type appClient struct {
-	input       io.WriteCloser
+	transport   appTransport
 	mu, writeMu sync.Mutex
 	next        int64
 	pending     map[int64]chan appReply
@@ -41,8 +56,12 @@ type appClient struct {
 }
 
 func newAppClient(input io.WriteCloser, output io.Reader, notify func(string, json.RawMessage), failure func(error)) *appClient {
-	c := &appClient{input: input, pending: map[int64]chan appReply{}, notify: notify, onFailure: failure}
-	go c.read(output)
+	return newTransportClient(&streamTransport{input: input, decoder: json.NewDecoder(output)}, notify, failure)
+}
+
+func newTransportClient(transport appTransport, notify func(string, json.RawMessage), failure func(error)) *appClient {
+	c := &appClient{transport: transport, pending: map[int64]chan appReply{}, notify: notify, onFailure: failure}
+	go c.read()
 	return c
 }
 
@@ -98,7 +117,7 @@ func (c *appClient) notifyMethod(method string, params any) error {
 
 func (c *appClient) write(value any) error {
 	c.writeMu.Lock()
-	err := json.NewEncoder(c.input).Encode(value)
+	err := c.transport.Write(value)
 	c.writeMu.Unlock()
 	if err != nil {
 		c.fail(err)
@@ -106,11 +125,10 @@ func (c *appClient) write(value any) error {
 	return err
 }
 
-func (c *appClient) read(output io.Reader) {
-	decoder := json.NewDecoder(output)
+func (c *appClient) read() {
 	for {
 		var frame appFrame
-		if err := decoder.Decode(&frame); err != nil {
+		if err := c.transport.Read(&frame); err != nil {
 			if errors.Is(err, io.EOF) {
 				err = errors.New("Codex App Server exited")
 			} else {
@@ -171,12 +189,12 @@ func (c *appClient) fail(err error) {
 	for _, reply := range pending {
 		reply <- appReply{err: err}
 	}
-	_ = c.input.Close()
+	_ = c.transport.Close()
 	if c.onFailure != nil {
 		c.onFailure(err)
 	}
 }
 
 func (c *appClient) close() error {
-	return c.input.Close()
+	return c.transport.Close()
 }

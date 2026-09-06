@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -21,7 +19,6 @@ type PeerBackend struct {
 	mu            sync.Mutex
 	prepareMu     sync.Mutex
 	app           *appClient
-	processDone   chan error
 	peer          *sessionkit.Peer
 	caller        *sessionkit.Caller
 	identity      sessionkit.PeerIdentity
@@ -43,7 +40,7 @@ func NewPeerBackend(_ context.Context) (*PeerBackend, error) {
 	return b, nil
 }
 
-var peerAppStart = startPeerApp
+var peerAppDial = dialPeerApp
 
 func (b *PeerBackend) start(ctx context.Context) error {
 	b.mu.Lock()
@@ -52,54 +49,23 @@ func (b *PeerBackend) start(ctx context.Context) error {
 	if started {
 		return nil
 	}
-	command, input, output, err := peerAppStart()
+	transport, err := peerAppDial(ctx)
 	if err != nil {
 		return err
 	}
-	app, done := newAppClient(input, output, nil, b.nativeFailure), make(chan error, 1)
+	app := newTransportClient(transport, nil, b.nativeFailure)
 	b.mu.Lock()
-	b.app, b.processDone = app, done
+	b.app = app
 	b.mu.Unlock()
-	go func() {
-		done <- command.Wait()
-		close(done)
-	}()
 	if err = app.initialize(ctx, "Agentbus Codex Peer"); err != nil {
 		_ = app.close()
-		<-done
 		b.mu.Lock()
 		if b.app == app {
-			b.app, b.processDone = nil, nil
+			b.app = nil
 		}
 		b.mu.Unlock()
 	}
 	return err
-}
-
-func startPeerApp() (*exec.Cmd, io.WriteCloser, io.Reader, error) {
-	socket, err := appServerSocket()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	command := exec.Command("codex", "app-server", "proxy", "--sock", socket)
-	command.Stderr = os.Stderr
-	command.Env = slices.DeleteFunc(os.Environ(), func(value string) bool {
-		key, _, _ := strings.Cut(value, "=")
-		return key == mcp.LaneSocketEnv || strings.HasPrefix(key, "AGENTBUS_")
-	})
-	input, err := command.StdinPipe()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	output, err := command.StdoutPipe()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	if err = command.Start(); err != nil {
-		_ = input.Close()
-		return nil, nil, nil, err
-	}
-	return command, input, output, nil
 }
 
 func (b *PeerBackend) Caller() *sessionkit.Caller { return b.caller }
@@ -296,7 +262,7 @@ func statusType(raw json.RawMessage) (string, error) {
 
 func (b *PeerBackend) Shutdown() {
 	b.mu.Lock()
-	peer, app, done := b.peer, b.app, b.processDone
+	peer, app := b.peer, b.app
 	b.peer = nil
 	b.mu.Unlock()
 	if peer != nil {
@@ -305,8 +271,5 @@ func (b *PeerBackend) Shutdown() {
 	}
 	if app != nil {
 		_ = app.close()
-	}
-	if done != nil {
-		<-done
 	}
 }
