@@ -21,6 +21,8 @@ import (
 
 const Product = "grok-peer"
 
+const grokReadyInterval = 25 * time.Millisecond
+
 var command = exec.Command
 
 type nativeProcess struct {
@@ -197,7 +199,7 @@ func startLeader(socket, key, cwd, permission string, environment []string) (*na
 	}
 	deadline := time.NewTimer(15 * time.Second)
 	defer deadline.Stop()
-	tick := time.NewTicker(25 * time.Millisecond)
+	tick := time.NewTicker(grokReadyInterval)
 	defer tick.Stop()
 	for {
 		select {
@@ -478,7 +480,11 @@ func stopAux(process *nativeProcess) {
 	if process == nil {
 		return
 	}
-	_ = process.cmd.Process.Signal(syscall.SIGKILL)
+	pid := process.cmd.Process.Pid
+	if process.cmd.SysProcAttr != nil && process.cmd.SysProcAttr.Setpgid {
+		pid = -pid
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
 	<-process.done
 }
 

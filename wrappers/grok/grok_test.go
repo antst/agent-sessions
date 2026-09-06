@@ -45,13 +45,13 @@ func fakeGrok() {
 	index := slices.Index(os.Args, "--")
 	arguments := os.Args[index+1:]
 	cwd, _ := os.Getwd()
-	record("START", map[string]any{"arguments": arguments, "cwd": cwd, "laneSocket": os.Getenv("AGENTBUS_LANE_SOCKET")})
+	record("START", map[string]any{"pid": os.Getpid(), "arguments": arguments, "cwd": cwd, "laneSocket": os.Getenv("AGENTBUS_LANE_SOCKET")})
 	if path := os.Getenv("GROK_TEST_INTERACTIVE_STARTED"); path != "" && slices.Contains(arguments, "--leader") && !slices.Contains(arguments, "stdio") {
-		_ = os.WriteFile(path, []byte("started"), 0o600)
+		publishTestFile(path, []byte("started"))
 	}
 	if slices.Contains(arguments, "leader") && !slices.Contains(arguments, "stdio") {
 		if pidPath := os.Getenv("GROK_TEST_LEADER_PID"); pidPath != "" {
-			_ = os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0o600)
+			publishTestFile(pidPath, []byte(strconv.Itoa(os.Getpid())))
 		}
 		path := option(arguments, "--leader-socket")
 		listener, err := net.Listen("unix", path)
@@ -63,7 +63,7 @@ func fakeGrok() {
 	}
 	if slices.Contains(arguments, "--leader") && !slices.Contains(arguments, "stdio") {
 		if path := os.Getenv("GROK_TEST_INTERACTIVE_PID"); path != "" {
-			_ = os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o600)
+			publishTestFile(path, []byte(strconv.Itoa(os.Getpid())))
 		}
 		if code, _ := strconv.Atoi(os.Getenv("GROK_TEST_INTERACTIVE_EXIT")); code != 0 {
 			if path := os.Getenv("GROK_TEST_INTERACTIVE_EXIT_BARRIER"); path != "" {
@@ -74,12 +74,12 @@ func fakeGrok() {
 		time.Sleep(24 * time.Hour)
 	}
 	if path := os.Getenv("GROK_TEST_OBSERVER_PID"); path != "" && slices.Contains(arguments, "--leader") && slices.Contains(arguments, "stdio") {
-		_ = os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o600)
+		publishTestFile(path, []byte(strconv.Itoa(os.Getpid())))
 	}
 	if path := os.Getenv("GROK_TEST_DESCENDANT_PID"); path != "" {
 		child := exec.Command("sleep", "3600")
 		if child.Start() == nil {
-			_ = os.WriteFile(path, []byte(strconv.Itoa(child.Process.Pid)), 0o600)
+			publishTestFile(path, []byte(strconv.Itoa(child.Process.Pid)))
 		}
 	}
 	title, cancelled, rosterCalls := "", make(chan struct{}, 1), 0
@@ -91,6 +91,7 @@ func fakeGrok() {
 	for scanner.Scan() {
 		var request map[string]any
 		_ = json.Unmarshal(scanner.Bytes(), &request)
+		request["_testPID"] = os.Getpid()
 		record("FRAME", request)
 		method, id := request["method"], request["id"]
 		params, _ := request["params"].(map[string]any)
@@ -99,11 +100,9 @@ func fakeGrok() {
 			reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"protocolVersion": 1, "authMethods": []map[string]string{{"id": "cached_token"}}}})
 		case "authenticate":
 			reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{}})
-			if path := os.Getenv("GROK_TEST_CHANGE_AFTER_TUI"); path != "" && slices.Contains(arguments, "stdio") {
-				go func() {
-					<-fileReady(path)
-					reply(map[string]any{"jsonrpc": "2.0", "method": "_x.ai/sessions/changed", "params": map[string]any{}})
-				}()
+			if path := os.Getenv("GROK_TEST_HOLD_EXIT"); path != "" && slices.Contains(arguments, "stdio") {
+				<-fileReady(path)
+				return
 			}
 		case "session/new", "session/load":
 			session := testSessionID
@@ -223,6 +222,13 @@ func record(kind string, value any) {
 	if file != nil {
 		_, _ = file.Write(append(body, '\n'))
 		_ = file.Close()
+	}
+}
+
+func publishTestFile(path string, body []byte) {
+	temporary := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
+	if os.WriteFile(temporary, body, 0o600) == nil {
+		_ = os.Rename(temporary, path)
 	}
 }
 

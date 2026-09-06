@@ -67,6 +67,23 @@ func TestInteractivePlan(t *testing.T) {
 	check(t, separator > 0 && plan.Args[separator-1] == "--leader" && plan.Args[separator+1] == "--leader", "post-separator literal changed: %#v", plan.Args)
 }
 
+func TestSessionArtifactDirectory(t *testing.T) {
+	root := t.TempDir()
+	directory, err := sessionArtifactDirectory([]string{"HOME=" + root}, "/work/with space/.dot")
+	must(t, err)
+	check(t, directory == filepath.Join(root, ".grok", "sessions", "%2Fwork%2Fwith%20space%2F.dot"), "artifact directory = %q", directory)
+	directory, err = sessionArtifactDirectory([]string{"HOME=/ignored", "GROK_HOME=" + root}, "/work")
+	must(t, err)
+	check(t, directory == filepath.Join(root, "sessions", "%2Fwork"), "GROK_HOME artifact directory = %q", directory)
+	recordPath := filepath.Join(root, "record")
+	t.Setenv("GROK_TEST_RECORD", recordPath)
+	plan, err := InteractivePlan([]string{"--session-id", testSessionID, "--cwd", "/" + strings.Repeat("x", 256)}, os.Environ())
+	must(t, err)
+	err = RunInteractive(context.Background(), plan)
+	check(t, err != nil && strings.Contains(err.Error(), "259 bytes, over the 255-byte limit"), "long cwd error = %v", err)
+	check(t, len(records(t, recordPath)) == 0, "long cwd started Grok")
+}
+
 func TestPeerMCPUsesRosterTitleAndDefaultLeader(t *testing.T) {
 	root := t.TempDir()
 	socket := filepath.Join(root, "agentbus.sock")
@@ -117,7 +134,7 @@ func newPeerBackend(ctx context.Context, identity sessionkit.PeerIdentity, leade
 	if err != nil {
 		return nil, errors.Join(err, closeNative("leader", leader))
 	}
-	return connectPeerBackend(ctx, identity, observer, process, leader, changed)
+	return connectPeerBackend(ctx, identity, nil, nil, observer, process, leader, changed)
 }
 
 func TestInteractiveLauncherOwnsPeerAndLocalAction(t *testing.T) {
@@ -127,23 +144,37 @@ func TestInteractiveLauncherOwnsPeerAndLocalAction(t *testing.T) {
 	server, hellos := fakeDaemon(t, socket)
 	defer server.Close()
 	t.Setenv(host.SocketEnv, socket)
+	t.Setenv("HOME", root)
 	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
 	t.Setenv("GROK_TEST_RECORD", recordPath)
 	started := filepath.Join(root, "interactive-started")
 	leaderPID := filepath.Join(root, "leader.pid")
 	t.Setenv("GROK_TEST_INTERACTIVE_STARTED", started)
-	t.Setenv("GROK_TEST_CHANGE_AFTER_TUI", started)
 	t.Setenv("GROK_TEST_LEADER_PID", leaderPID)
-	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
+	plan, err := InteractivePlan([]string{"--session-id", testSessionID, "--cwd", root}, os.Environ())
 	must(t, err)
 	ctx, cancel := context.WithCancelCause(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- RunInteractive(ctx, plan) }()
+	<-fileReady(started)
+	waitFrame(t, recordPath, "authenticate", 1)
+	before := records(t, recordPath)
+	check(t, countFrames(before, "initialize") == 1 && countFrames(before, "authenticate") == 1, "quiet hold handshake = %#v", before)
+	check(t, countFrames(before, "_x.ai/sessions/list") == 0, "quiet hold queried the roster before the session artifact")
+	directory, err := sessionArtifactDirectory(plan.Env, root)
+	must(t, err)
+	must(t, os.MkdirAll(directory, 0o700))
+	must(t, os.Mkdir(filepath.Join(directory, testSessionID), 0o700))
 	hello := <-hellos
 	check(t, hello.SessionID == testSessionID, "hello = %#v", hello)
 	hello.ack <- true
 	leaderPidfd := interactivePidfd(t, leaderPID)
 	defer unix.Close(leaderPidfd)
+	clientPIDs := peerClientPIDs(t, records(t, recordPath))
+	check(t, len(clientPIDs) == 2, "peer clients = %#v", clientPIDs)
+	clientPidfds := []int{pidfd(t, clientPIDs[0]), pidfd(t, clientPIDs[1])}
+	defer unix.Close(clientPidfds[0])
+	defer unix.Close(clientPidfds[1])
 	path := filepath.Join(root, "lanes", host.LaunchTokenDigest(testSessionID)+".sock")
 	t.Setenv(mcp.LaneSocketEnv, path)
 	client, err := mcp.NewLaneBackend()
@@ -151,15 +182,16 @@ func TestInteractiveLauncherOwnsPeerAndLocalAction(t *testing.T) {
 	result, err := client.Action(context.Background(), "interrupt", json.RawMessage(`{"session_id":"lane@local"}`))
 	must(t, err)
 	check(t, string(result) == `{}`, "local action = %s", result)
-	<-fileReady(started)
 	cancel(testSignal{syscall.SIGINT})
 	var exited *exec.ExitError
 	err = <-done
 	check(t, errors.As(err, &exited) && exited.ProcessState.Sys().(syscall.WaitStatus).Signal() == syscall.SIGINT, "signalled Grok child = %v", err)
 	check(t, !processRunning(t, leaderPidfd), "private leader survived interactive shutdown")
+	check(t, !processRunning(t, clientPidfds[0]) && !processRunning(t, clientPidfds[1]), "Grok hold or observer survived interactive shutdown")
 	check(t, !exists(path), "peer endpoint remains")
 	frames := records(t, recordPath)
-	check(t, countFrames(frames, "initialize") == 1, "resident observer was replaced: %d handshakes", countFrames(frames, "initialize"))
+	check(t, countFrames(frames, "initialize") == 2, "hold and observer handshakes = %d", countFrames(frames, "initialize"))
+	check(t, slices.Equal(peerClientMethods(frames, clientPIDs[0]), []string{"initialize", "authenticate"}), "startup hold was not quiet: %#v", peerClientMethods(frames, clientPIDs[0]))
 	authenticated, tuiStarted := false, false
 	for _, frame := range frames {
 		authenticated = authenticated || strings.Contains(string(frame), `"method":"authenticate"`)
@@ -174,8 +206,91 @@ func TestInteractiveLauncherOwnsPeerAndLocalAction(t *testing.T) {
 	leaderPath := filepath.Join(root, "grok-"+host.LaunchTokenDigest(testSessionID)+".sock")
 	check(t, containsStart(frames, "--leader", "--session-id", testSessionID, leaderPath), "managed child did not use the private leader")
 	check(t, containsStart(frames, "agent", "leader", "--relay-on-demand", leaderPath, path), "private leader or local action endpoint absent")
-	check(t, containsStart(frames, "agent", "stdio", leaderPath), "private observer absent")
+	check(t, len(clientPIDs) == 2 && containsStart(frames, "agent", "stdio", leaderPath), "private hold or observer absent")
 	check(t, containsStart(frames, path), "child did not inherit local endpoint")
+}
+
+func TestInteractiveResumeWaitsForArtifactChange(t *testing.T) {
+	root := shortRoot(t)
+	recordPath := filepath.Join(root, "record")
+	socket := filepath.Join(root, "agentbus.sock")
+	server, hellos := fakeDaemon(t, socket)
+	defer server.Close()
+	t.Setenv(host.SocketEnv, socket)
+	t.Setenv("HOME", root)
+	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
+	t.Setenv("GROK_TEST_RECORD", recordPath)
+	started := filepath.Join(root, "interactive-started")
+	t.Setenv("GROK_TEST_INTERACTIVE_STARTED", started)
+	plan, err := InteractivePlan([]string{"--resume", testSessionID, "--cwd", root}, os.Environ())
+	must(t, err)
+	directory, err := sessionArtifactDirectory(plan.Env, root)
+	must(t, err)
+	artifact := filepath.Join(directory, testSessionID)
+	must(t, os.MkdirAll(artifact, 0o700))
+	before, err := os.Stat(artifact)
+	must(t, err)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- RunInteractive(ctx, plan) }()
+	<-fileReady(started)
+	waitFrame(t, recordPath, "authenticate", 1)
+	frames := records(t, recordPath)
+	check(t, countFrames(frames, "initialize") == 1 && countFrames(frames, "_x.ai/sessions/list") == 0, "resume observer started before artifact changed: %#v", frames)
+	select {
+	case hello := <-hellos:
+		t.Fatalf("resume hello before artifact changed: %#v", hello)
+	default:
+	}
+	must(t, os.Chtimes(artifact, before.ModTime(), before.ModTime().Add(time.Second)))
+	hello := <-hellos
+	hello.ack <- true
+	clientPIDs := peerClientPIDs(t, records(t, recordPath))
+	check(t, len(clientPIDs) == 2, "resume peer clients = %#v", clientPIDs)
+	clientPidfds := []int{pidfd(t, clientPIDs[0]), pidfd(t, clientPIDs[1])}
+	defer unix.Close(clientPidfds[0])
+	defer unix.Close(clientPidfds[1])
+	cancel(testSignal{syscall.SIGTERM})
+	<-done
+	check(t, !processRunning(t, clientPidfds[0]) && !processRunning(t, clientPidfds[1]), "resume hold or observer survived shutdown")
+}
+
+func TestStartupHoldExitAbortsArtifactWait(t *testing.T) {
+	root := shortRoot(t)
+	recordPath := filepath.Join(root, "record")
+	socket := filepath.Join(root, "agentbus.sock")
+	server, _ := fakeDaemon(t, socket)
+	defer server.Close()
+	t.Setenv(host.SocketEnv, socket)
+	t.Setenv("HOME", root)
+	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
+	t.Setenv("GROK_TEST_RECORD", recordPath)
+	interactivePID := filepath.Join(root, "interactive.pid")
+	leaderPID := filepath.Join(root, "leader.pid")
+	holdPID := filepath.Join(root, "hold.pid")
+	release := filepath.Join(root, "release-hold")
+	t.Setenv("GROK_TEST_INTERACTIVE_PID", interactivePID)
+	t.Setenv("GROK_TEST_LEADER_PID", leaderPID)
+	t.Setenv("GROK_TEST_OBSERVER_PID", holdPID)
+	t.Setenv("GROK_TEST_HOLD_EXIT", release)
+	plan, err := InteractivePlan([]string{"--session-id", testSessionID, "--cwd", root}, os.Environ())
+	must(t, err)
+	done := make(chan error, 1)
+	go func() { done <- RunInteractive(context.Background(), plan) }()
+	tuiPidfd := interactivePidfd(t, interactivePID)
+	leaderPidfd := interactivePidfd(t, leaderPID)
+	holdPidfd := interactivePidfd(t, holdPID)
+	defer unix.Close(tuiPidfd)
+	defer unix.Close(leaderPidfd)
+	defer unix.Close(holdPidfd)
+	frames := records(t, recordPath)
+	clientPIDs := peerClientPIDs(t, frames)
+	check(t, len(clientPIDs) == 1 && countFrames(frames, "_x.ai/sessions/list") == 0, "observer started before artifact readiness: %#v", frames)
+	must(t, os.WriteFile(release, nil, 0o600))
+	err = <-done
+	check(t, strings.Contains(err.Error(), "Grok startup hold closed"), "launcher error = %v", err)
+	check(t, !processRunning(t, tuiPidfd) && !processRunning(t, holdPidfd) && !processRunning(t, leaderPidfd), "Grok bootstrap process survived startup-hold failure")
+	check(t, slices.Equal(peerClientMethods(records(t, recordPath), clientPIDs[0]), []string{"initialize", "authenticate"}), "startup hold was not quiet")
 }
 
 func TestRejectedHelloStopsInteractiveOwner(t *testing.T) {
@@ -185,15 +300,16 @@ func TestRejectedHelloStopsInteractiveOwner(t *testing.T) {
 	defer server.Close()
 	pidPath := filepath.Join(root, "interactive.pid")
 	t.Setenv(host.SocketEnv, socket)
+	t.Setenv("HOME", root)
 	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
 	t.Setenv("GROK_TEST_INTERACTIVE_PID", pidPath)
-	t.Setenv("GROK_TEST_CHANGE_AFTER_TUI", pidPath)
-	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
+	plan, err := InteractivePlan([]string{"--session-id", testSessionID, "--cwd", root}, os.Environ())
 	must(t, err)
 	done := make(chan error, 1)
 	go func() { done <- RunInteractive(context.Background(), plan) }()
-	hello := <-hellos
 	pidfd := interactivePidfd(t, pidPath)
+	createSessionArtifact(t, plan.Env, root)
+	hello := <-hellos
 	hello.ack <- false
 	err = <-done
 	check(t, strings.Contains(err.Error(), "invalid_hello"), "launcher error = %v", err)
@@ -210,16 +326,17 @@ func TestTerminalPeerStopsInteractiveOwner(t *testing.T) {
 	defer server.Close()
 	pidPath := filepath.Join(root, "interactive.pid")
 	t.Setenv(host.SocketEnv, socket)
+	t.Setenv("HOME", root)
 	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
 	t.Setenv("GROK_TEST_INTERACTIVE_PID", pidPath)
-	t.Setenv("GROK_TEST_CHANGE_AFTER_TUI", pidPath)
-	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
+	plan, err := InteractivePlan([]string{"--session-id", testSessionID, "--cwd", root}, os.Environ())
 	must(t, err)
 	done := make(chan error, 1)
 	go func() { done <- RunInteractive(context.Background(), plan) }()
+	pidfd := interactivePidfd(t, pidPath)
+	createSessionArtifact(t, plan.Env, root)
 	hello := <-hellos
 	hello.ack <- true
-	pidfd := interactivePidfd(t, pidPath)
 	path := filepath.Join(root, "lanes", host.LaunchTokenDigest(testSessionID)+".sock")
 	t.Setenv(mcp.LaneSocketEnv, path)
 	client, err := mcp.NewLaneBackend()
@@ -241,17 +358,18 @@ func TestObserverExitStopsInteractiveOwner(t *testing.T) {
 	defer server.Close()
 	pidPath := filepath.Join(root, "interactive.pid")
 	t.Setenv(host.SocketEnv, socket)
+	t.Setenv("HOME", root)
 	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
 	t.Setenv("GROK_TEST_INTERACTIVE_PID", pidPath)
-	t.Setenv("GROK_TEST_CHANGE_AFTER_TUI", pidPath)
 	t.Setenv("GROK_TEST_OBSERVER_EXIT", pidPath)
-	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
+	plan, err := InteractivePlan([]string{"--session-id", testSessionID, "--cwd", root}, os.Environ())
 	must(t, err)
 	done := make(chan error, 1)
 	go func() { done <- RunInteractive(context.Background(), plan) }()
+	pidfd := interactivePidfd(t, pidPath)
+	createSessionArtifact(t, plan.Env, root)
 	hello := <-hellos
 	hello.ack <- true
-	pidfd := interactivePidfd(t, pidPath)
 	err = <-done
 	check(t, strings.Contains(err.Error(), "Grok observer closed"), "launcher error = %v", err)
 	check(t, !processRunning(t, pidfd), "TUI survived observer exit")
@@ -262,6 +380,7 @@ func TestObserverExitStopsInteractiveOwner(t *testing.T) {
 func TestInteractiveLauncherReturnsProductExit(t *testing.T) {
 	root := shortRoot(t)
 	t.Setenv(host.SocketEnv, filepath.Join(root, "agentbus.sock"))
+	t.Setenv("HOME", root)
 	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
 	leaderPID, observerPID := filepath.Join(root, "leader.pid"), filepath.Join(root, "observer.pid")
 	interactivePID, release := filepath.Join(root, "interactive.pid"), filepath.Join(root, "release")
@@ -270,7 +389,7 @@ func TestInteractiveLauncherReturnsProductExit(t *testing.T) {
 	t.Setenv("GROK_TEST_INTERACTIVE_PID", interactivePID)
 	t.Setenv("GROK_TEST_INTERACTIVE_EXIT", "7")
 	t.Setenv("GROK_TEST_INTERACTIVE_EXIT_BARRIER", release)
-	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
+	plan, err := InteractivePlan([]string{"--session-id", testSessionID, "--cwd", root}, os.Environ())
 	must(t, err)
 	done := make(chan error, 1)
 	go func() { done <- RunInteractive(context.Background(), plan) }()
@@ -520,14 +639,65 @@ func fakeDaemonTerminal(t *testing.T, path string, terminal <-chan struct{}) (ne
 func interactivePidfd(t *testing.T, path string) int {
 	t.Helper()
 	<-fileReady(path)
-	var pid int
 	body, err := os.ReadFile(path)
 	must(t, err)
+	var pid int
 	_, err = fmt.Sscan(string(body), &pid)
 	must(t, err)
 	pidfd, err := unix.PidfdOpen(pid, 0)
 	must(t, err)
 	return pidfd
+}
+
+func createSessionArtifact(t *testing.T, environment []string, cwd string) {
+	t.Helper()
+	directory, err := sessionArtifactDirectory(environment, cwd)
+	must(t, err)
+	must(t, os.MkdirAll(directory, 0o700))
+	must(t, os.Mkdir(filepath.Join(directory, testSessionID), 0o700))
+}
+
+func peerClientPIDs(t *testing.T, rows []json.RawMessage) []int {
+	t.Helper()
+	var result []int
+	for _, raw := range rows {
+		var record struct {
+			Kind  string `json:"kind"`
+			Value struct {
+				PID       int      `json:"pid"`
+				Arguments []string `json:"arguments"`
+			} `json:"value"`
+		}
+		must(t, json.Unmarshal(raw, &record))
+		if record.Kind == "START" && slices.Contains(record.Value.Arguments, "--leader") && slices.Contains(record.Value.Arguments, "stdio") {
+			result = append(result, record.Value.PID)
+		}
+	}
+	return result
+}
+
+func peerClientMethods(rows []json.RawMessage, pid int) []string {
+	var result []string
+	for _, raw := range rows {
+		var record struct {
+			Kind  string `json:"kind"`
+			Value struct {
+				PID    int    `json:"_testPID"`
+				Method string `json:"method"`
+			} `json:"value"`
+		}
+		if json.Unmarshal(raw, &record) == nil && record.Kind == "FRAME" && record.Value.PID == pid {
+			result = append(result, record.Value.Method)
+		}
+	}
+	return result
+}
+
+func pidfd(t *testing.T, pid int) int {
+	t.Helper()
+	fd, err := unix.PidfdOpen(pid, 0)
+	must(t, err)
+	return fd
 }
 
 func environment(values []string, name string) string {
