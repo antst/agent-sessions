@@ -89,7 +89,18 @@ func TestPeerReconnectsButSupersededStops(t *testing.T) {
 	hello := <-requests1
 	mustRPC(t, server1.Result(hello, struct{}{}))
 	await(t, peer.Ready(), "peer ready")
+	started, err := peer.Caller.Start(TurnRunRequest{SessionID: "lane@local", Input: "block"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request := <-requests1; request.Method != "turn.run" {
+		t.Fatalf("method = %s", request.Method)
+	}
 	mustRPC(t, server1.Close())
+	status, err := peer.Caller.Wait(WaitRequest{TurnID: started.TurnID})
+	if err != nil || status.State != "unavailable" || status.Reason != unavailableReason {
+		t.Fatalf("EOF status = %#v, %v", status, err)
+	}
 	awaitConnection(t, peer, false)
 	if _, err = peer.Call(context.Background(), "session.list", SessionListRequest{}); !isCode(err, protocol.NotConnected) {
 		t.Fatalf("disconnected call = %v", err)
@@ -118,6 +129,98 @@ func TestPeerReconnectsButSupersededStops(t *testing.T) {
 	if attempts.Load() != attemptsBeforeSupersession {
 		t.Fatal("superseded peer retried")
 	}
+}
+
+func TestPeerReplaceSettlesOldRunAndReconnectsAsNewIdentity(t *testing.T) {
+	connections := make(chan net.Conn, 2)
+	usePeerDialer(t, func(string, string) (net.Conn, error) {
+		select {
+		case fd := <-connections:
+			return fd, nil
+		default:
+			return nil, errors.New("offline")
+		}
+	})
+	requests1, server1, client1 := peerPipe(t)
+	paused := &pauseNthWriteConn{Conn: client1, at: 3, entered: make(chan struct{}), release: make(chan struct{})}
+	connections <- paused
+	peer, err := ConnectPeer(Identity{Product: "fixture-client", SessionID: "old", Name: "old", Groups: []string{"old"}, Info: map[string]any{}}, acceptDelivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := <-requests1
+	mustRPC(t, server1.Result(hello, struct{}{}))
+	await(t, peer.Ready(), "peer ready")
+	started, err := peer.Caller.Start(TurnRunRequest{SessionID: "lane@local", Input: "block"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := <-requests1
+	replaced := make(chan error, 1)
+	next := Identity{Product: "fixture-client", SessionID: "new", Name: "new", Groups: []string{"new"}, Info: map[string]any{}}
+	go func() { replaced <- peer.Replace(context.Background(), next) }()
+	<-paused.entered
+	status, err := peer.Caller.Wait(WaitRequest{TurnID: started.TurnID})
+	if err != nil || status.State != "unavailable" || status.Reason != "-32002 not_connected" {
+		t.Fatalf("old run = %#v, %v", status, err)
+	}
+	if _, err = peer.Call(context.Background(), "session.list", SessionListRequest{}); !isCode(err, protocol.NotConnected) {
+		t.Fatalf("call during replacement = %v", err)
+	}
+	if err = peer.Rehello("retitled", map[string]any{"revision": 2}); !isCode(err, protocol.NotConnected) {
+		t.Fatalf("crossed rehello = %v", err)
+	}
+	mustRPC(t, server1.Error(run, protocol.NotConnected, nil))
+	close(paused.release)
+	replacement := <-requests1
+	if _, err = peer.Call(context.Background(), "session.list", SessionListRequest{}); !isCode(err, protocol.NotConnected) {
+		t.Fatalf("call before replacement ack = %v", err)
+	}
+	select {
+	case request := <-requests1:
+		t.Fatalf("request escaped replacement gap: %s", request.Method)
+	default:
+	}
+	mustRPC(t, server1.Result(replacement, struct{}{}))
+	retitled := <-requests1
+	assertPeerHello(t, retitled, "retitled", "")
+	if got := retitled.Params.(*protocol.PeerHello).SessionID; got != "new" {
+		t.Fatalf("retitled identity = %q", got)
+	}
+	mustRPC(t, server1.Result(retitled, struct{}{}))
+	mustRPC(t, <-replaced)
+	peer.mu.Lock()
+	currentID, currentName := peer.identity.SessionID, peer.identity.Name
+	peer.mu.Unlock()
+	if currentID != "new" || currentName != "retitled" {
+		t.Fatalf("identity = %q/%q", currentID, currentName)
+	}
+	requests2, server2, client2 := peerPipe(t)
+	connections <- client2
+	mustRPC(t, server1.Close())
+	reconnected := <-requests2
+	if got := reconnected.Params.(*protocol.PeerHello).SessionID; got != "new" {
+		t.Fatalf("reconnect identity = %q", got)
+	}
+	assertPeerHello(t, reconnected, "retitled", "")
+	mustRPC(t, server2.Result(reconnected, struct{}{}))
+	peer.Shutdown()
+	await(t, peer.Closed(), "peer closed")
+}
+
+type pauseNthWriteConn struct {
+	net.Conn
+	at, writes       int
+	entered, release chan struct{}
+}
+
+func (c *pauseNthWriteConn) Write(body []byte) (int, error) {
+	c.writes++
+	if c.writes == c.at {
+		close(c.entered)
+		<-c.release
+	}
+	return c.Conn.Write(body)
 }
 
 func TestCallerReportsRealDaemonEOF(t *testing.T) {
@@ -236,7 +339,10 @@ func startPeer(t *testing.T, socket, id string) *Peer {
 		t.Fatal(err)
 	}
 	await(t, peer.Ready(), "peer ready")
-	t.Cleanup(peer.Shutdown)
+	t.Cleanup(func() {
+		peer.Shutdown()
+		await(t, peer.Closed(), "peer closed")
+	})
 	return peer
 }
 

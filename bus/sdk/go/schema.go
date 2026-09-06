@@ -17,7 +17,8 @@ type (
 	SessionSummary      = protocol.SessionSummary
 	HostProducts        = protocol.HostProducts
 	ProtocolError       = protocol.RPCError
-	PeerIdentity        = protocol.PeerHello
+	Identity            = protocol.PeerHello
+	PeerIdentity        = Identity
 	SessionListRequest  = protocol.SessionListRequest
 	SessionListResult   = protocol.SessionListResult
 	MessageSendRequest  = protocol.MessageSendRequest

@@ -17,7 +17,7 @@ import (
 	"github.com/antst/agent-sessions/bus/internal/protocol"
 )
 
-func TestCallRoundTripAndIncreasingIDs(t *testing.T) {
+func TestCallRoundTripIncreasingIDsAndUnmatchedResponse(t *testing.T) {
 	client, peer := net.Pipe()
 	c := New(client, true, nil)
 	defer c.Close()
@@ -27,17 +27,23 @@ func TestCallRoundTripAndIncreasingIDs(t *testing.T) {
 			check(t, frame.ID == id, "id = %d, want %d", frame.ID, id)
 			body, _ := protocol.ResultBytes(id, "session.list", protocol.SessionListResult{Sessions: []protocol.SessionSummary{}})
 			_, _ = peer.Write(body)
-			if id == 1 {
+			if id == 2 {
 				_, _ = peer.Write(body)
 			}
 		}
 	}()
-	for range 2 {
-		var result protocol.SessionListResult
-		must(t, c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &result))
-	}
+	var result protocol.SessionListResult
+	must(t, c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &result))
 	c.next = protocol.MaxRequestID
 	check(t, c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}) != nil, "exhausted request id succeeded")
+	c.next = 1
+	must(t, c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &result))
+	select {
+	case <-c.Done():
+	case <-time.After(time.Second):
+		t.Fatal("unmatched response did not close connection")
+	}
+	check(t, errors.Is(c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{}), ErrClosed), "call after unmatched response did not fail closed")
 }
 
 func TestResponseClaimsTargetBeforeCancelOrClose(t *testing.T) {
@@ -106,19 +112,12 @@ func TestCloseUnblocksWriter(t *testing.T) {
 	_ = peer.Close()
 }
 
-func TestLateResponseDoesNotBlockAndRequestIDsIncrease(t *testing.T) {
+func TestRequestIDsIncreaseAndInvalidUTF8StopsLaterFrame(t *testing.T) {
 	local, peer := net.Pipe()
 	requests := make(chan *Request, 1)
 	c := New(local, true, func(_ context.Context, request *Request) { requests <- request })
-	ctx, cancel := context.WithCancel(context.Background())
-	returned := asyncCall(c, ctx)
-	lost := readFrame(t, peer)
-	cancel()
-	check(t, errors.Is(<-returned, context.Canceled), "cancelled call did not return context error")
 	go func() {
-		body, _ := protocol.ResultBytes(lost.ID, "session.list", protocol.SessionListResult{Sessions: []protocol.SessionSummary{}})
-		_, _ = peer.Write(body)
-		body = []byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"unknown\",\"method\":\"session.open\",\"params\":{\"name\":\"lane@local\",\"groups\":[],\"open\":{}}}\n")
+		body := []byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"unknown\",\"method\":\"session.open\",\"params\":{\"name\":\"lane@local\",\"groups\":[],\"open\":{}}}\n")
 		_, _ = peer.Write(body)
 	}()
 	select {
@@ -162,16 +161,6 @@ func TestInvalidRequestRepliesThenCloses(t *testing.T) {
 	}
 }
 
-func TestEOFFailsPendingOnce(t *testing.T) {
-	local, peer := net.Pipe()
-	c := New(local, true, nil)
-	returned := asyncCall(c, context.Background())
-	_ = readFrame(t, peer)
-	_, _ = peer.Write([]byte("{"))
-	_ = peer.Close()
-	check(t, <-returned != nil, "pending call succeeded after EOF")
-}
-
 func TestCloseIsIdempotent(t *testing.T) {
 	local, peer := net.Pipe()
 	counted := &signalWriteConn{Conn: local, entered: make(chan struct{})}
@@ -200,19 +189,31 @@ func TestOversizeFrameClosesAtBound(t *testing.T) {
 	check(t, <-written != nil, "oversize writer was not interrupted")
 }
 
-func TestMalformedPendingResponseClosesAllCalls(t *testing.T) {
-	local, peer := net.Pipe()
-	c := New(local, true, nil)
-	returned := make(chan error, 2)
-	for range 2 {
-		go func() {
-			returned <- c.Call(context.Background(), "session.list", protocol.SessionListRequest{}, &protocol.SessionListResult{})
-		}()
+func TestBadInboundClosesPendingCalls(t *testing.T) {
+	tests := []struct {
+		name, body string
+	}{
+		{"partial frame EOF", `{`},
+		{"empty frame", "\n"},
+		{"result and error", `{"jsonrpc":"2.0","id":1,"result":{},"error":{"code":-32002,"message":"not_connected"}}` + "\n"},
+		{"trailing empty object", `{"jsonrpc":"2.0","id":1,"result":{"sessions":[]}}{}` + "\n"},
+		{"trailing null", `{"jsonrpc":"2.0","id":1,"result":{"sessions":[]}}null` + "\n"},
+		{"trailing second object", `{"jsonrpc":"2.0","id":1,"result":{"sessions":[]}}{"other":true}` + "\n"},
 	}
-	first, second := readFrame(t, peer), readFrame(t, peer)
-	bad := fmt.Sprintf("{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":null}\n", min(first.ID, second.ID))
-	_, _ = io.WriteString(peer, bad)
-	check(t, <-returned != nil && <-returned != nil, "malformed response left a pending call")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			local, peer := net.Pipe()
+			c := New(local, true, nil)
+			first, second := asyncCall(c, context.Background()), asyncCall(c, context.Background())
+			_, _ = readFrame(t, peer), readFrame(t, peer)
+			_, _ = io.WriteString(peer, test.body)
+			if !strings.HasSuffix(test.body, "\n") {
+				_ = peer.Close()
+			}
+			check(t, <-first != nil && <-second != nil, "malformed input left a pending call")
+			_ = peer.Close()
+		})
+	}
 }
 
 func TestCloseCancelsAdmittedHandler(t *testing.T) {

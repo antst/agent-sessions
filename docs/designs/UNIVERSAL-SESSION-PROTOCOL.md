@@ -33,6 +33,8 @@ A request with a usable ID whose params or method are invalid receives its
 correlated `invalid_frame` response, or `invalid_hello` for `session.hello`,
 before the reader closes the connection. Without a usable ID the reader closes
 without writing. The reader never dispatches a later frame after either case.
+A response whose ID does not match an outstanding call is also an invalid frame:
+the receiver closes the connection and fails its pending calls once.
 
 The local Unix socket is trusted and plain by default. When the daemon's
 optional `local_key` is configured, every peer and worker connection instead
@@ -1211,6 +1213,15 @@ or another re-hello therefore cannot leave the older value installed. Its
 `rehello(name, info)` call preserves the product, session ID, and groups. While
 disconnected it stores the new desired name and information and returns
 `not_connected`.
+Its `replace(ctx, identity)` call supplies a complete new identity for a
+different-ID re-hello on the same connection. It settles outstanding operations
+from the old identity as `not_connected`; reconnect uses the new desired
+identity. The desired-identity swap, caller settlement, and removal of the old
+wire from new-call admission are one peer-lock operation; calls in the gap fail
+`not_connected`. The replacement hello acknowledgement reinstalls that wire
+only if its desired-identity generation is still current. `rehello` composes
+its name and information from the current desired identity under the same lock,
+so a crossed replacement keeps the new session ID and groups.
 The product's current title is the peer name. A same-ID re-hello updates that
 name and information in place only when the declared groups slice is exactly
 equal, including order. A
@@ -1224,16 +1235,30 @@ delivery, and worker-originated session-method API are otherwise shared.
 The public SDK exposes `WorkerCallbacks`, the kit-owned `Run`, and the wire types
 generated from the schema:
 `HelloDescription`, `ExtraArgument`, `OpenOptions`, `OpenRequest`, `OpenResult`,
-`TurnResult`, `DeliverySource`, `DeliveryRequest`, `DeliveryReceipt`,
+`TurnResult`, `DeliverySource`, `DeliveryRequest`, `DeliveryReceipt`, `Identity`,
 `SessionSummary`, `HostProducts`, and `ProtocolError`; wrappers and products do
 not hand-maintain protocol-shaped duplicates. The worker entry is
 `serveWorker(callbacks, env)`, which returns the kit-owned `closed` signal. Peer
-mode is `connectPeer(identity, deliver)` plus `rehello(name, info)`. A
+mode is `connectPeer(identity, deliver)`, `rehello(name, info)`, and
+`replace(ctx, identity)`. A
 connection-bound client supplies `list`, `send`, `describe`, `spawn`, `resume`,
 `run`, `interrupt`, and `close(forget)` and is usable from every callback
 without blocking the reader. Go also exports one thin no-hello client:
 `Dial(socket)`, `Call(ctx, method, params)`, and `Close`; the caller kit and a
-wrapper's private lane socket use that one framed implementation.
+wrapper's private lane socket use that one framed implementation. `Socket()`
+returns `AGENTBUS_SOCKET` when set and otherwise the documented state-root
+socket; `Dial("")`, peer connections, and worker connections use that value.
+Go exports `NewCaller(call)` to place the same typed methods and caller
+conveniences over that no-hello client's call function; workers and peers are
+the other two uses of the same caller.
+The caller kit also owns the tool action vocabulary: exported `Actions` is
+`list`, `send`, `spawn`, `describe`, `run`, `start`, `wait`, `status`,
+`interrupt`, `close`, and `forget`, and `Caller.Action(ctx, action, args)`
+decodes the wrapper/MCP JSON argument shape and dispatches to the corresponding
+typed method or caller convenience. `forget` is `close` with `forget:true`.
+An unknown action returns an error for the MCP layer to report as Invalid
+params. This dispatcher is at most 40 production logical lines; wrappers do not
+carry another action switch.
 
 Go constructs one caller for each worker before `Serve` and binds it to the
 worker's current connection through `Worker.Call`; repeated `Worker.Caller()`

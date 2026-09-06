@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/antst/agent-sessions/bus/internal/daemon"
 	"github.com/antst/agent-sessions/bus/internal/protocol"
+	"github.com/antst/agent-sessions/bus/internal/rpc"
 )
 
 func TestOneShotResultAndError(t *testing.T) {
@@ -53,5 +57,61 @@ func TestUsage(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"session.list", "{"}, &stdout, &stderr); code != 2 || stdout.Len() != 0 {
 		t.Fatalf("usage = %d, %q, %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestTurnRunWaitsForTerminal(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "agentbus.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	requests := make(chan *rpc.Request, 2)
+	serverReady := make(chan *rpc.Conn, 1)
+	go func() {
+		fd, _ := listener.Accept()
+		serverReady <- rpc.New(fd, false, func(_ context.Context, request *rpc.Request) { requests <- request })
+	}()
+	var stdout, stderr bytes.Buffer
+	finished := make(chan int, 1)
+	go func() {
+		params := `{"session_id":"lane@local","input":"work"}`
+		finished <- run([]string{"-socket", socket, "turn.run", params}, &stdout, &stderr)
+	}()
+	server := <-serverReady
+	hello := waitRequest(t, requests)
+	if hello.Method != "session.hello" {
+		t.Fatalf("first method = %s", hello.Method)
+	}
+	if err = server.Result(hello, struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	runRequest := waitRequest(t, requests)
+	if runRequest.Method != "turn.run" {
+		t.Fatalf("second method = %s", runRequest.Method)
+	}
+	select {
+	case code := <-finished:
+		t.Fatalf("returned before terminal with exit %d", code)
+	default:
+	}
+	terminal := protocol.TurnResult{Outcome: "completed", Result: "terminal"}
+	if err = server.Result(runRequest, terminal); err != nil {
+		t.Fatal(err)
+	}
+	if code := <-finished; code != 0 || stdout.String() != `{"outcome":"completed","result":"terminal"}`+"\n" {
+		t.Fatalf("terminal exit %d: %s / %s", code, stdout.String(), stderr.String())
+	}
+}
+
+func waitRequest(t *testing.T, requests <-chan *rpc.Request) *rpc.Request {
+	t.Helper()
+	select {
+	case request := <-requests:
+		return request
+	case <-time.After(time.Second):
+		t.Fatal("request timed out")
+		return nil
 	}
 }

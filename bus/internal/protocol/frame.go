@@ -33,7 +33,7 @@ func DecodeFrame(body []byte) (frame Frame, err error) {
 		_ = json.Unmarshal(fields["method"], &frame.Method)
 	}
 	var wire wireFrame
-	if !utf8.Valid(body) || strict(body, &wire) != nil || null(wire.JSONRPC) || null(wire.ID) {
+	if !utf8.Valid(body) || DecodeJSON(body, &wire) != nil || null(wire.JSONRPC) || null(wire.ID) {
 		return frame, errInvalid
 	}
 	var version string
@@ -97,13 +97,13 @@ func encodeFrame(value any) ([]byte, error) {
 	}
 	return append(raw, '\n'), nil
 }
-func strict(raw []byte, target any) error {
+func DecodeJSON(raw []byte, target any) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return err
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+	if decoder.Decode(new(json.RawMessage)) != io.EOF {
 		return errInvalid
 	}
 	return nil

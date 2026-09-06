@@ -266,3 +266,17 @@ func TestReviewStaleResponseSettlesNoReceipt(t *testing.T) {
 		t.Fatalf("stale receipt = %#v", got)
 	}
 }
+
+func TestReviewUnmatchedWorkerResponseClosesConnection(t *testing.T) {
+	_, s, _ := reviewSession(t)
+	result, err := protocol.ResultBytes(1, "message.deliver", protocol.DeliveryReceipt{Disposition: "injected"})
+	must(t, err)
+	frame, err := protocol.DecodeFrame(result[:len(result)-1])
+	must(t, err)
+	s.receiveResponse(frame)
+	select {
+	case <-s.wire.Done():
+	case <-time.After(time.Second):
+		t.Fatal("unmatched worker response did not close connection")
+	}
+}

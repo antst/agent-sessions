@@ -42,7 +42,7 @@ func ConnectPeer(identity PeerIdentity, deliver DeliverFunc) (*Peer, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &Peer{identity: identity, deliver: deliver, socket: socket, ctx: ctx, cancel: cancel, ready: make(chan struct{}), closed: make(chan struct{})}
-	p.Caller = newCaller(p.call)
+	p.Caller = NewCaller(p.Call)
 	go p.connect()
 	return p, nil
 }
@@ -51,31 +51,57 @@ func (p *Peer) Ready() <-chan struct{}  { return p.ready }
 func (p *Peer) Closed() <-chan struct{} { return p.closed }
 
 func (p *Peer) Rehello(name string, info map[string]any) error {
-	p.mu.Lock()
-	next := p.identity
-	p.mu.Unlock()
-	next.Name, next.Info = name, info
-	next, err := snapshotIdentity(next)
+	next, wire, generation, err := p.desire(Identity{Name: name, Info: info}, false)
 	if err != nil {
 		return err
 	}
-	p.mu.Lock()
-	if p.ctx.Err() != nil {
-		p.mu.Unlock()
-		return &ProtocolError{Code: protocol.Superseded, Message: "superseded"}
-	}
-	p.identity = next
-	p.generation++
-	wire, generation := p.wire, p.generation
-	p.mu.Unlock()
 	if wire == nil {
 		return errNotConnected
 	}
-	err = p.hello(wire, next, generation)
+	err = p.hello(p.ctx, wire, next, generation)
 	if err != nil && wire.Context().Err() != nil {
 		return errNotConnected
 	}
 	return err
+}
+
+func (p *Peer) Replace(ctx context.Context, identity Identity) error {
+	identity, wire, generation, err := p.desire(identity, true)
+	if err != nil {
+		return err
+	}
+	if wire == nil {
+		return errNotConnected
+	}
+	if err = p.hello(ctx, wire, identity, generation); err != nil {
+		_ = wire.Close()
+	}
+	return err
+}
+
+func (p *Peer) desire(identity Identity, replacement bool) (Identity, *rpc.Conn, uint64, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ctx.Err() != nil {
+		return Identity{}, nil, 0, &ProtocolError{Code: protocol.Superseded, Message: "superseded"}
+	}
+	if !replacement {
+		identity.Product, identity.SessionID, identity.Groups = p.identity.Product, p.identity.SessionID, p.identity.Groups
+	}
+	identity, err := snapshotIdentity(identity)
+	if err != nil {
+		return Identity{}, nil, 0, err
+	}
+	if replacement && identity.SessionID == p.identity.SessionID {
+		return Identity{}, nil, 0, &ProtocolError{Code: protocol.InvalidHello, Message: "invalid_hello"}
+	}
+	p.identity, p.generation = identity, p.generation+1
+	wire := p.wire
+	if replacement {
+		p.wire = nil
+		p.Caller.disconnected()
+	}
+	return identity, wire, p.generation, nil
 }
 
 func (p *Peer) Shutdown() {
@@ -116,7 +142,7 @@ func (p *Peer) connect() {
 			p.mu.Lock()
 			identity, generation := p.identity, p.generation
 			p.mu.Unlock()
-			if p.hello(wire, identity, generation) == nil {
+			if p.hello(p.ctx, wire, identity, generation) == nil {
 				if ready != nil {
 					close(ready)
 					ready = nil
@@ -141,9 +167,9 @@ func (p *Peer) connect() {
 	}
 }
 
-func (p *Peer) hello(wire *rpc.Conn, identity PeerIdentity, generation uint64) error {
+func (p *Peer) hello(ctx context.Context, wire *rpc.Conn, identity PeerIdentity, generation uint64) error {
 	for {
-		if err := wire.Call(p.ctx, "session.hello", identity, &struct{}{}); err != nil {
+		if err := wire.Call(ctx, "session.hello", identity, &struct{}{}); err != nil {
 			return err
 		}
 		p.mu.Lock()
