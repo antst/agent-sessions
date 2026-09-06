@@ -66,9 +66,15 @@ func fakeGrok() {
 			_ = os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o600)
 		}
 		if code, _ := strconv.Atoi(os.Getenv("GROK_TEST_INTERACTIVE_EXIT")); code != 0 {
+			if path := os.Getenv("GROK_TEST_INTERACTIVE_EXIT_BARRIER"); path != "" {
+				<-fileReady(path)
+			}
 			os.Exit(code)
 		}
 		time.Sleep(24 * time.Hour)
+	}
+	if path := os.Getenv("GROK_TEST_OBSERVER_PID"); path != "" && slices.Contains(arguments, "--leader") && slices.Contains(arguments, "stdio") {
+		_ = os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o600)
 	}
 	if path := os.Getenv("GROK_TEST_DESCENDANT_PID"); path != "" {
 		child := exec.Command("sleep", "3600")
@@ -93,6 +99,12 @@ func fakeGrok() {
 			reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"protocolVersion": 1, "authMethods": []map[string]string{{"id": "cached_token"}}}})
 		case "authenticate":
 			reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{}})
+			if path := os.Getenv("GROK_TEST_CHANGE_AFTER_TUI"); path != "" && slices.Contains(arguments, "stdio") {
+				go func() {
+					<-fileReady(path)
+					reply(map[string]any{"jsonrpc": "2.0", "method": "_x.ai/sessions/changed", "params": map[string]any{}})
+				}()
+			}
 		case "session/new", "session/load":
 			session := testSessionID
 			if loaded, ok := params["sessionId"].(string); ok {

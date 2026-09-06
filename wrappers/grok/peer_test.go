@@ -132,6 +132,7 @@ func TestInteractiveLauncherOwnsPeerAndLocalAction(t *testing.T) {
 	started := filepath.Join(root, "interactive-started")
 	leaderPID := filepath.Join(root, "leader.pid")
 	t.Setenv("GROK_TEST_INTERACTIVE_STARTED", started)
+	t.Setenv("GROK_TEST_CHANGE_AFTER_TUI", started)
 	t.Setenv("GROK_TEST_LEADER_PID", leaderPID)
 	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
 	must(t, err)
@@ -159,12 +160,15 @@ func TestInteractiveLauncherOwnsPeerAndLocalAction(t *testing.T) {
 	check(t, !exists(path), "peer endpoint remains")
 	frames := records(t, recordPath)
 	check(t, countFrames(frames, "initialize") == 1, "resident observer was replaced: %d handshakes", countFrames(frames, "initialize"))
-	authenticated := false
+	authenticated, tuiStarted := false, false
 	for _, frame := range frames {
 		authenticated = authenticated || strings.Contains(string(frame), `"method":"authenticate"`)
 		if strings.Contains(string(frame), `"kind":"START"`) && strings.Contains(string(frame), `"--session-id"`) {
 			check(t, authenticated, "TUI started before the resident observer authenticated")
-			break
+			tuiStarted = true
+		}
+		if strings.Contains(string(frame), `"method":"_x.ai/sessions/list"`) {
+			check(t, tuiStarted, "resident observer queried the roster before the TUI session appeared")
 		}
 	}
 	leaderPath := filepath.Join(root, "grok-"+host.LaunchTokenDigest(testSessionID)+".sock")
@@ -183,6 +187,7 @@ func TestRejectedHelloStopsInteractiveOwner(t *testing.T) {
 	t.Setenv(host.SocketEnv, socket)
 	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
 	t.Setenv("GROK_TEST_INTERACTIVE_PID", pidPath)
+	t.Setenv("GROK_TEST_CHANGE_AFTER_TUI", pidPath)
 	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
 	must(t, err)
 	done := make(chan error, 1)
@@ -207,6 +212,7 @@ func TestTerminalPeerStopsInteractiveOwner(t *testing.T) {
 	t.Setenv(host.SocketEnv, socket)
 	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
 	t.Setenv("GROK_TEST_INTERACTIVE_PID", pidPath)
+	t.Setenv("GROK_TEST_CHANGE_AFTER_TUI", pidPath)
 	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
 	must(t, err)
 	done := make(chan error, 1)
@@ -237,6 +243,7 @@ func TestObserverExitStopsInteractiveOwner(t *testing.T) {
 	t.Setenv(host.SocketEnv, socket)
 	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
 	t.Setenv("GROK_TEST_INTERACTIVE_PID", pidPath)
+	t.Setenv("GROK_TEST_CHANGE_AFTER_TUI", pidPath)
 	t.Setenv("GROK_TEST_OBSERVER_EXIT", pidPath)
 	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
 	must(t, err)
@@ -256,12 +263,25 @@ func TestInteractiveLauncherReturnsProductExit(t *testing.T) {
 	root := shortRoot(t)
 	t.Setenv(host.SocketEnv, filepath.Join(root, "agentbus.sock"))
 	t.Setenv("GROK_TEST_SESSION_ID", testSessionID)
+	leaderPID, observerPID := filepath.Join(root, "leader.pid"), filepath.Join(root, "observer.pid")
+	interactivePID, release := filepath.Join(root, "interactive.pid"), filepath.Join(root, "release")
+	t.Setenv("GROK_TEST_LEADER_PID", leaderPID)
+	t.Setenv("GROK_TEST_OBSERVER_PID", observerPID)
+	t.Setenv("GROK_TEST_INTERACTIVE_PID", interactivePID)
 	t.Setenv("GROK_TEST_INTERACTIVE_EXIT", "7")
+	t.Setenv("GROK_TEST_INTERACTIVE_EXIT_BARRIER", release)
 	plan, err := InteractivePlan([]string{"--session-id", testSessionID}, os.Environ())
 	must(t, err)
-	err = RunInteractive(context.Background(), plan)
+	done := make(chan error, 1)
+	go func() { done <- RunInteractive(context.Background(), plan) }()
+	leaderPidfd, observerPidfd := interactivePidfd(t, leaderPID), interactivePidfd(t, observerPID)
+	must(t, os.WriteFile(release, nil, 0o600))
+	err = <-done
 	var exited *exec.ExitError
-	check(t, errors.As(err, &exited) && exited.ExitCode() == 7, "exit = %v", err)
+	check(t, strings.Contains(err.Error(), "before its session appeared") && errors.As(err, &exited) && exited.ExitCode() == 7, "exit = %v", err)
+	check(t, !processRunning(t, leaderPidfd) && !processRunning(t, observerPidfd), "unready Grok dependencies survived the TUI")
+	unix.Close(leaderPidfd)
+	unix.Close(observerPidfd)
 }
 
 func TestPrepareSerializesAndCommitsAcknowledgedTitles(t *testing.T) {

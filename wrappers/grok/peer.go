@@ -173,6 +173,22 @@ func RunInteractive(ctx context.Context, plan host.ExecPlan) error {
 		close(childDone)
 		cancel()
 	}()
+	stopUnready := func(childErr error) error {
+		observer.close()
+		stopPeerProcess(observerProcess)
+		_ = endpoint.Close()
+		return errors.Join(childErr, closeNative("leader", leader))
+	}
+	select {
+	case <-changed:
+	case childErr := <-childDone:
+		if childErr == nil {
+			childErr = errors.New("exit status 0")
+		}
+		return stopUnready(fmt.Errorf("Grok TUI exited before its session appeared: %w", childErr))
+	case <-ctx.Done():
+		return stopUnready(finishInteractiveChild(child, childDone, interactiveSignal(ctx)))
+	}
 	backend, err := connectPeerBackend(childCtx, identity, observer, observerProcess, leader, changed)
 	if err != nil {
 		select {
