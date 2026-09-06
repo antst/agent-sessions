@@ -36,7 +36,7 @@ class FakeProduct {
     this.calls[4]++; if (this.deliverStart) { this.deliverStart.resolve(); await aborted(cancel); throw cancel.reason; }
     if (this.outbound) await this.worker.caller.list({}); return { disposition: "injected" };
   }
-  async close(cancel) { this.calls[5]++; assert.equal(cancel.aborted, true); this.closeStart?.resolve(); if (this.closeEnd) await this.closeEnd.promise; if (this.closeError) throw this.closeError; }
+  async close(cancel) { this.calls[5]++; this.closeAborted = cancel.aborted; this.closeStart?.resolve(); if (this.closeEnd) await this.closeEnd.promise; if (this.closeError) throw this.closeError; }
 }
 
 test("connection write failure rejects once", async (t) => {
@@ -191,7 +191,7 @@ for (const row of rows) test(`lifecycle: ${row.name}`, async (t) => {
       product.release.resolve(); result = await running; await run.Done; if (row.name === "one-interrupt") assert.equal(run.Native, null); break;
     }
     case "eof-during-run": {
-      product.closeError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); product.started = deferred(); const { daemon, worker, serving } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "eof" }); const run = await product.started.promise; daemon.close(); await serving; await assert.rejects(running); await run.Done; assert.equal(worker.controller.signal.aborted, true); assert.equal(stderr(), 'agentbus: product close: "first failure\\nsecond failure"\n'); break;
+      product.closeError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); product.started = deferred(); const { daemon, worker, serving } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "eof" }); const run = await product.started.promise; daemon.close(); await serving; await assert.rejects(running); await run.Done; assert.equal(worker.controller.signal.aborted, true); assert.equal(product.closeAborted, true); assert.equal(stderr(), 'agentbus: product close: "first failure\\nsecond failure"\n'); break;
     }
     case "peer-lifetime": { await peerLifetime(); const { daemon, serving } = await harness(t, product, { open: false }); await daemon.call("session.superseded", {}); await serving; break; }
     case "wrong-direction-request": { const { daemon, serving } = await harness(t, product, { open: false }); await errorCode(daemon.call("session.hello", { protocol: 1, product: "example-peer", launch_token: "again", supported_open_fields: [], extra_arguments: [] }), -32602); await serving; break; }
@@ -211,7 +211,7 @@ for (const row of rows) test(`lifecycle: ${row.name}`, async (t) => {
       product.started = deferred(); product.release = deferred(); const { daemon, workerSocket, serving } = await harness(t, product); const running = daemon.call("turn.run", { ...target, input: "block" }); const run = await product.started.promise; workerSocket.failNext = true; product.release.resolve(); await serving; await assert.rejects(running); await run.Done; break;
     }
     case "close-error": {
-      product.closeError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); const { daemon } = await harness(t, product); assert.deepEqual(await daemon.call("session.close", target), {}); assert.equal(stderr(), 'agentbus: product close: "first failure\\nsecond failure"\n'); break;
+      product.closeError = new Error("first failure\nsecond failure"); const stderr = captureStderr(t); const { daemon } = await harness(t, product); assert.deepEqual(await daemon.call("session.close", target), {}); assert.equal(product.closeAborted, false); assert.equal(stderr(), 'agentbus: product close: "first failure\\nsecond failure"\n'); break;
     }
     default: assert.fail(`unknown row ${row.name}`);
   }
