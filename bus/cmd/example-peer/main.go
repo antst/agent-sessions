@@ -134,7 +134,7 @@ func (p *example) Interrupt(_ context.Context, run *sdk.Run) error {
 	return nil
 }
 
-func (p *example) Deliver(_ context.Context, request sdk.DeliveryRequest) (sdk.DeliveryReceipt, error) {
+func (p *example) Deliver(_ context.Context, request sdk.DeliveryRequest, _ *sdk.Run) (sdk.DeliveryReceipt, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.active != nil {
