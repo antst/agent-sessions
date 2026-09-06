@@ -14,8 +14,6 @@ import (
 
 const ToolName, ProtocolVersion = "agent_sessions", "2025-06-18"
 
-var Actions = []string{"list", "send", "spawn", "describe", "run", "start", "wait", "status", "interrupt", "close", "forget"}
-
 type Backend interface {
 	Call(context.Context, string, any) (json.RawMessage, error)
 }
@@ -125,80 +123,15 @@ func (s *Server) callTool(ctx context.Context, caller *sessionkit.Caller, raw js
 	} else if !object(arguments) {
 		return nil, &failure{Code: -32602, Message: "Invalid params"}
 	}
-	result, err := callAction(ctx, caller, call.Arguments.Action, arguments)
+	result, err := caller.Action(ctx, call.Arguments.Action, arguments)
 	if err != nil {
 		return nil, errorFailure(err)
 	}
-	encoded, err := json.Marshal(result)
-	if err != nil {
+	var structured any
+	if !json.Valid(result) || json.Unmarshal(result, &structured) != nil {
 		return nil, &failure{Code: -32603, Message: "Agentbus backend returned an invalid response"}
 	}
-	return map[string]any{"content": []map[string]string{{"type": "text", "text": string(encoded)}}, "structuredContent": result}, nil
-}
-
-func callAction(ctx context.Context, caller *sessionkit.Caller, action string, raw json.RawMessage) (any, error) {
-	switch action {
-	case "list":
-		return withContext(ctx, raw, caller.List)
-	case "send":
-		return withContext(ctx, raw, caller.Send)
-	case "spawn":
-		return withContext(ctx, raw, caller.Spawn)
-	case "describe":
-		return withContext(ctx, raw, caller.Describe)
-	case "run":
-		return withContext(ctx, raw, caller.Run)
-	case "start":
-		return withRequest(raw, caller.Start)
-	case "wait":
-		return withRequest(raw, caller.Wait)
-	case "status":
-		return withRequest(raw, caller.Status)
-	case "interrupt":
-		return withoutResult(ctx, raw, caller.Interrupt)
-	case "close":
-		return withoutResult(ctx, raw, caller.Close)
-	case "forget":
-		request, err := decode[sessionkit.SessionCloseRequest](raw)
-		request.Forget = true
-		if err == nil {
-			err = caller.Close(ctx, request)
-		}
-		return struct{}{}, err
-	default:
-		return nil, errors.New("unsupported action")
-	}
-}
-
-func withContext[T, R any](ctx context.Context, raw json.RawMessage, call func(context.Context, T) (R, error)) (any, error) {
-	request, err := decode[T](raw)
-	if err != nil {
-		return nil, err
-	}
-	return call(ctx, request)
-}
-
-func withRequest[T, R any](raw json.RawMessage, call func(T) (R, error)) (any, error) {
-	request, err := decode[T](raw)
-	if err != nil {
-		return nil, err
-	}
-	return call(request)
-}
-
-func withoutResult[T any](ctx context.Context, raw json.RawMessage, call func(context.Context, T) error) (any, error) {
-	request, err := decode[T](raw)
-	if err == nil {
-		err = call(ctx, request)
-	}
-	return struct{}{}, err
-}
-
-func decode[T any](raw json.RawMessage) (result T, err error) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	err = decoder.Decode(&result)
-	return
+	return map[string]any{"content": []map[string]string{{"type": "text", "text": string(result)}}, "structuredContent": structured}, nil
 }
 
 func decodeRequest(body []byte) (request, *failure) {
@@ -248,7 +181,7 @@ func toolDefinition() map[string]any {
 		"inputSchema": map[string]any{
 			"type": "object", "additionalProperties": false, "required": []string{"action"},
 			"properties": map[string]any{
-				"action":    map[string]any{"type": "string", "enum": Actions, "description": "Exact Agent Sessions operation."},
+				"action":    map[string]any{"type": "string", "enum": sessionkit.Actions, "description": "Exact Agent Sessions operation."},
 				"arguments": map[string]any{"type": "object", "additionalProperties": true, "description": "Arguments in the exact shape for the selected operation."},
 			},
 		},
@@ -256,7 +189,7 @@ func toolDefinition() map[string]any {
 }
 
 func validAction(action string) bool {
-	for _, candidate := range Actions {
+	for _, candidate := range sessionkit.Actions {
 		if action == candidate {
 			return true
 		}

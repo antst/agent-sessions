@@ -39,7 +39,7 @@ func TestServerMethods(t *testing.T) {
 		{"tools list", `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`, &fakeBackend{}, 0, func(t *testing.T, response map[string]any, _ *fakeBackend) {
 			tool := response["result"].(map[string]any)["tools"].([]any)[0].(map[string]any)
 			schema := tool["inputSchema"].(map[string]any)["properties"].(map[string]any)
-			check(t, tool["name"] == ToolName && reflect.DeepEqual(stringsOf(schema["action"].(map[string]any)["enum"]), Actions), "tool = %#v", tool)
+			check(t, tool["name"] == ToolName && reflect.DeepEqual(stringsOf(schema["action"].(map[string]any)["enum"]), sessionkit.Actions), "tool = %#v", tool)
 		}},
 		{"tools call", `{"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"send","arguments":{"target":"peer","message":"hello"}}}}`, &fakeBackend{result: json.RawMessage(`{"message_id":"message","deliveries":[]}`)}, 0, func(t *testing.T, response map[string]any, backend *fakeBackend) {
 			result := response["result"].(map[string]any)
@@ -94,27 +94,6 @@ func TestToolArgumentsMustBeObject(t *testing.T) {
 			check(t, failed["code"] == float64(-32602) && backend.calls == 0, "response/backend = %#v/%#v", response, backend)
 		})
 	}
-}
-
-func TestCallerSugarLivesInMCPProcess(t *testing.T) {
-	started, release := make(chan struct{}), make(chan struct{})
-	backend := BackendFunc(func(_ context.Context, method string, params any) (json.RawMessage, error) {
-		check(t, method == "turn.run", "method = %q", method)
-		encoded, _ := json.Marshal(params)
-		check(t, string(encoded) == `{"session_id":"lane@local","input":"work"}`, "params = %s", encoded)
-		close(started)
-		<-release
-		return json.RawMessage(`{"outcome":"completed","result":"done"}`), nil
-	})
-	caller := sessionkit.NewCaller(backend.Call)
-	result, err := callAction(context.Background(), caller, "start", json.RawMessage(`{"session_id":"lane@local","input":"work"}`))
-	check(t, err == nil && reflect.DeepEqual(result, sessionkit.StartResult{TurnID: "t-1"}), "start = %#v / %v", result, err)
-	<-started
-	result, err = callAction(context.Background(), caller, "status", json.RawMessage(`{"turn_id":"t-1"}`))
-	check(t, err == nil && result.(sessionkit.TurnStatus).State == "running", "status = %#v / %v", result, err)
-	close(release)
-	result, err = callAction(context.Background(), caller, "wait", json.RawMessage(`{"turn_id":"t-1"}`))
-	check(t, err == nil && result.(sessionkit.TurnStatus).Result.Result == "done", "wait = %#v / %v", result, err)
 }
 
 func TestServerReturnsOutputFailure(t *testing.T) {
