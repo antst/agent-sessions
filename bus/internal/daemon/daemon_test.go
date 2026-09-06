@@ -53,7 +53,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "parent exited while descendant held stderr")
 		os.Exit(7)
 	}
-	if strings.HasPrefix(name, "fixture-worker") || strings.HasPrefix(name, "open-exit-worker") || strings.HasPrefix(name, "fixed-worker") || strings.HasPrefix(name, "error-worker") {
+	if strings.HasPrefix(name, "fixture-worker") || strings.HasPrefix(name, "open-exit-worker") || strings.HasPrefix(name, "fixed-worker") || strings.HasPrefix(name, "error-worker") || strings.HasPrefix(name, "close-error-worker") {
 		worker := sessionkit.NewWorker(&fixtureProduct{product: name})
 		_ = worker.Serve(context.Background())
 		os.Exit(0)
@@ -239,6 +239,9 @@ func (p *fixtureProduct) Open(_ context.Context, request sessionkit.OpenRequest)
 }
 
 func (p *fixtureProduct) Run(_ context.Context, run *sessionkit.Run, input string) (sessionkit.TurnResult, error) {
+	if input == "fail" {
+		return sessionkit.TurnResult{}, errors.New("stream malformed")
+	}
 	if input == "block" {
 		p.mu.Lock()
 		p.stop = make(chan struct{})
@@ -269,7 +272,33 @@ func (*fixtureProduct) Deliver(_ context.Context, request sessionkit.DeliveryReq
 	}
 	return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
 }
-func (*fixtureProduct) Close(context.Context) error { return nil }
+func (p *fixtureProduct) Close(context.Context) error {
+	if strings.HasPrefix(p.product, "close-error-worker") {
+		return errors.New("native cleanup failed")
+	}
+	return nil
+}
+
+func TestCloseErrorAfterFailedRunStillCloses(t *testing.T) {
+	directory := t.TempDir()
+	installFixture(t, directory, "close-error-worker")
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, socket := startDaemon(t)
+	parent := connectPeer(t, socket, "parent", "parent", "shared")
+	var spawned protocol.LaneSpawnResult
+	must(t, parent.call("lane.spawn", protocol.LaneSpawnRequest{Name: "child", Product: "close-error-worker", Open: &protocol.OpenOptions{}}, &spawned))
+	var turn protocol.TurnResult
+	must(t, parent.call("turn.run", protocol.TurnRunRequest{SessionID: spawned.SessionID, Input: "fail"}, &turn))
+	if turn.Outcome != "failed" || turn.Result != "stream malformed" {
+		t.Fatalf("failed run = %#v", turn)
+	}
+	must(t, parent.call("session.close", protocol.SessionCloseRequest{SessionID: spawned.SessionID}, &struct{}{}))
+	var listed protocol.SessionListResult
+	must(t, parent.call("session.list", protocol.SessionListRequest{SessionID: spawned.SessionID}, &listed))
+	if len(listed.Sessions) != 1 || listed.Sessions[0].Connected || listed.Sessions[0].Running {
+		t.Fatalf("closed row = %#v", listed.Sessions)
+	}
+}
 
 type peerClient struct {
 	wire       *rpc.Conn

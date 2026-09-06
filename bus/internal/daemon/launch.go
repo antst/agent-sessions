@@ -67,7 +67,7 @@ func (d *Daemon) startProduct(start *launch) {
 				d.finishClaimed(start, child, true)
 			}
 		case <-d.shutdown:
-			if !d.finishUnclaimed(start, child, answer{code: protocol.Internal}) {
+			if !d.finishUnclaimed(start, child, answer{code: protocol.Internal, data: "daemon shutting down"}) {
 				d.finishClaimed(start, child, false)
 			}
 		}

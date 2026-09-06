@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"sync"
@@ -194,8 +195,7 @@ func (w *Worker) runTurn(_ context.Context, request *rpc.Request, slot *Run) {
 func (w *Worker) interrupt(request *rpc.Request, run *Run, call bool) {
 	if call {
 		if err := w.nativeInterrupt(run); err != nil {
-			w.reply(w.conn.Error(request, protocol.Internal, nil))
-			return
+			fmt.Fprintf(os.Stderr, "agentbus: product interrupt: %q\n", err.Error())
 		}
 	}
 	w.reply(w.conn.Result(request, struct{}{}))
@@ -218,10 +218,9 @@ func (w *Worker) close(ctx context.Context, request *rpc.Request, slot *Run, int
 	}
 	w.cancel()
 	if err := w.closeProduct(ctx); err != nil {
-		w.reply(w.conn.Error(request, protocol.Internal, nil))
-	} else {
-		w.reply(w.conn.Result(request, struct{}{}))
+		fmt.Fprintf(os.Stderr, "agentbus: product close: %q\n", err.Error())
 	}
+	w.reply(w.conn.Result(request, struct{}{}))
 	_ = w.conn.Close()
 }
 

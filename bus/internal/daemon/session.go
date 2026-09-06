@@ -99,7 +99,7 @@ func (s *session) run() {
 		case <-shutdown:
 			shutdown = nil
 			if s.launch != nil && !s.committed {
-				s.abortLaunch(answer{code: protocol.Internal})
+				s.abortLaunch(answer{code: protocol.Internal, data: "daemon shutting down"})
 			}
 			s.orderlyStop()
 		}
