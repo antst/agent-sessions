@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/bridge"
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	"github.com/antst/sessionbus/internal/bridge"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
 )
 
 const maxHookInputBytes = 2 << 20

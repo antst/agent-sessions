@@ -13,7 +13,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/antst/agent-sessions/internal/pathidentity"
+	"github.com/antst/sessionbus/internal/pathidentity"
 )
 
 const (

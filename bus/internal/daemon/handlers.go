@@ -3,7 +3,7 @@ package daemon
 import (
 	"slices"
 
-	"github.com/antst/agent-sessions/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/protocol"
 )
 
 type requestState struct {
@@ -41,7 +41,7 @@ func (s *session) handleRequest(frame protocol.Frame, params any) {
 }
 
 func (s *session) peerHello(frame protocol.Frame, hello *protocol.PeerHello) {
-	if s.identity != nil && !s.identity.peer || !validPart(hello.SessionID) || !validPart(hello.Name) || !validHost(hello.Product) {
+	if s.identity != nil && !s.identity.peer || !validIDPart(hello.SessionID) || !validNamePart(hello.Name) || !validHost(hello.Product) {
 		s.reject(frame, protocol.InvalidHello)
 		return
 	}
@@ -64,7 +64,7 @@ func (s *session) peerHello(frame protocol.Frame, hello *protocol.PeerHello) {
 func (s *session) list(frame protocol.Frame, input *protocol.SessionListRequest) {
 	items := s.daemon.directory.visible(s.identity.row.Groups)
 	if input.SessionID != "" {
-		canonical, code := canonicalInput(input.SessionID, s.daemon.host)
+		canonical, code := canonicalSessionID(input.SessionID, s.daemon.host)
 		if code == protocol.InvalidFrame {
 			s.reject(frame, code)
 			return
@@ -128,7 +128,7 @@ func (s *session) describe(frame protocol.Frame, input *protocol.LaneDescribeReq
 	start.entry = &entry{row: row{Product: input.Product}, claimed: true, done: make(chan struct{})}
 	if code := s.daemon.directory.reserveDescribe(start); code != 0 {
 		start.timer.Stop()
-		s.error(frame, code, nil)
+		s.error(frame, code, internalData(code))
 		return
 	}
 	s.launchRequest(frame, start)
@@ -140,7 +140,7 @@ func (s *session) spawn(frame protocol.Frame, input *protocol.LaneSpawnRequest) 
 		return
 	}
 	if input.ResumeSessionID != "" {
-		id, code := canonicalInput(input.ResumeSessionID, s.daemon.host)
+		id, code := canonicalSessionID(input.ResumeSessionID, s.daemon.host)
 		if code == protocol.InvalidFrame {
 			s.reject(frame, code)
 			return
@@ -153,7 +153,7 @@ func (s *session) spawn(frame protocol.Frame, input *protocol.LaneSpawnRequest) 
 		_, code = s.daemon.directory.reserveResume(id, s.identity.row.Groups, start)
 		if code != 0 {
 			start.timer.Stop()
-			s.error(frame, code, nil)
+			s.error(frame, code, internalData(code))
 			return
 		}
 		s.launchRequest(frame, start)
@@ -165,7 +165,7 @@ func (s *session) spawn(frame protocol.Frame, input *protocol.LaneSpawnRequest) 
 	}
 	parentName := unqualify(s.identity.row.Name)
 	composedName := parentName + "/" + input.Name
-	if !validPart(input.Name) || !validPart(composedName) || input.Open == nil {
+	if !validNamePart(input.Name) || !validNamePart(composedName) || input.Open == nil {
 		s.reject(frame, protocol.InvalidFrame)
 		return
 	}
@@ -177,7 +177,7 @@ func (s *session) spawn(frame protocol.Frame, input *protocol.LaneSpawnRequest) 
 	_, code := s.daemon.directory.reserveFresh(value, start)
 	if code != 0 {
 		start.timer.Stop()
-		s.error(frame, code, nil)
+		s.error(frame, code, internalData(code))
 		return
 	}
 	s.launchRequest(frame, start)
@@ -208,7 +208,7 @@ func (s *session) send(frame protocol.Frame, input *protocol.MessageSendRequest)
 	seen := map[*entry]bool{}
 	for _, label := range labels {
 		delivery := protocol.MessageSendDelivery{Target: label}
-		canonical, code := canonicalInput(label, s.daemon.host)
+		canonical, code := canonicalName(label, s.daemon.host)
 		if code == protocol.InvalidFrame {
 			s.reject(frame, code)
 			return
@@ -354,6 +354,13 @@ func reason(code int, fallback string) string {
 	default:
 		return fallback
 	}
+}
+
+func internalData(code int) any {
+	if code == protocol.Internal {
+		return "daemon shutting down"
+	}
+	return nil
 }
 
 func unique(values []string) []string {

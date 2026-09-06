@@ -5,10 +5,10 @@ import (
 	"errors"
 	"strings"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
 )
 
-func render(request sessionkit.DeliveryRequest) (string, error) {
+func RenderNativeMessage(request sessionkit.DeliveryRequest) (string, error) {
 	if strings.TrimSpace(request.From.SessionID) == "" || strings.TrimSpace(request.From.Product) == "" {
 		return "", errors.New("structured message sender is incomplete")
 	}
@@ -25,7 +25,7 @@ func render(request sessionkit.DeliveryRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "<cross-session-message " + attributes + ">\n[agentbus-metadata: " + string(metadata) + "]\n" +
+	return "<cross-session-message " + attributes + ">\n[sessionbus-metadata: " + string(metadata) + "]\n" +
 		escapeEnvelopeBody(request.Body) + "\n</cross-session-message>", nil
 }
 

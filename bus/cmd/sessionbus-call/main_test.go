@@ -9,14 +9,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/bus/internal/daemon"
-	"github.com/antst/agent-sessions/bus/internal/protocol"
-	"github.com/antst/agent-sessions/bus/internal/rpc"
+	"github.com/antst/sessionbus/bus/internal/daemon"
+	"github.com/antst/sessionbus/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/rpc"
 )
 
 func TestOneShotResultAndError(t *testing.T) {
 	directory := t.TempDir()
-	socket := filepath.Join(directory, "agentbus.sock")
+	socket := filepath.Join(directory, "sessionbus.sock")
 	service, err := daemon.Start(daemon.Config{SocketPath: socket, TablePath: filepath.Join(directory, "sessions")})
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func TestUsage(t *testing.T) {
 }
 
 func TestTurnRunWaitsForTerminal(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "agentbus.sock")
+	socket := filepath.Join(t.TempDir(), "sessionbus.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)

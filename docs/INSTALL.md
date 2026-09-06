@@ -9,7 +9,7 @@ native product versions.
 From a source checkout:
 
 ```sh
-git clone https://github.com/antst/agent-sessions.git
+git clone https://github.com/antst/sessionbus.git
 cd agent-sessions
 make test
 make install

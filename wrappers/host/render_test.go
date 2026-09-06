@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
 )
 
 func TestRendererMatchesC5Fixture(t *testing.T) {
@@ -16,10 +16,10 @@ func TestRendererMatchesC5Fixture(t *testing.T) {
 		Rendered string                     `json:"rendered"`
 	}
 	must(t, json.Unmarshal(raw, &fixture))
-	got, err := render(fixture.Message)
+	got, err := RenderNativeMessage(fixture.Message)
 	must(t, err)
 	check(t, got == fixture.Rendered, "rendered = %q, want %q", got, fixture.Rendered)
 	fixture.Message.From.SessionID = ""
-	_, err = render(fixture.Message)
+	_, err = RenderNativeMessage(fixture.Message)
 	check(t, err != nil, "incomplete sender was rendered")
 }

@@ -3,12 +3,13 @@ package sessionkit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"sync"
 	"time"
 
-	"github.com/antst/agent-sessions/bus/internal/protocol"
-	"github.com/antst/agent-sessions/bus/internal/rpc"
+	"github.com/antst/sessionbus/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/rpc"
 )
 
 const defaultPeerReconnectInterval = 2 * time.Second
@@ -16,7 +17,7 @@ const defaultPeerReconnectInterval = 2 * time.Second
 var peerReconnectInterval = defaultPeerReconnectInterval
 var dialPeer = net.Dial
 
-type DeliverFunc func(context.Context, DeliveryRequest) (DeliveryReceipt, error)
+type DeliverFunc func(context.Context, PeerIdentity, DeliveryRequest) (DeliveryReceipt, error)
 
 type Peer struct {
 	Caller        *Caller
@@ -28,7 +29,10 @@ type Peer struct {
 	wire          *rpc.Conn
 	ctx           context.Context
 	cancel        context.CancelFunc
+	identityCtx   context.Context
+	identityStop  context.CancelFunc
 	ready, closed chan struct{}
+	terminal      error
 }
 
 func ConnectPeer(identity PeerIdentity, deliver DeliverFunc) (*Peer, error) {
@@ -49,6 +53,11 @@ func ConnectPeer(identity PeerIdentity, deliver DeliverFunc) (*Peer, error) {
 
 func (p *Peer) Ready() <-chan struct{}  { return p.ready }
 func (p *Peer) Closed() <-chan struct{} { return p.closed }
+func (p *Peer) Err() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.terminal
+}
 
 func (p *Peer) Rehello(name string, info map[string]any) error {
 	next, wire, generation, err := p.desire(Identity{Name: name, Info: info}, false)
@@ -59,6 +68,9 @@ func (p *Peer) Rehello(name string, info map[string]any) error {
 		return errNotConnected
 	}
 	err = p.hello(p.ctx, wire, next, generation)
+	if p.failHello(err) {
+		return err
+	}
 	if err != nil && wire.Context().Err() != nil {
 		return errNotConnected
 	}
@@ -74,6 +86,7 @@ func (p *Peer) Replace(ctx context.Context, identity Identity) error {
 		return errNotConnected
 	}
 	if err = p.hello(ctx, wire, identity, generation); err != nil {
+		p.failHello(err)
 		_ = wire.Close()
 	}
 	return err
@@ -98,6 +111,9 @@ func (p *Peer) desire(identity Identity, replacement bool) (Identity, *rpc.Conn,
 	p.identity, p.generation = identity, p.generation+1
 	wire := p.wire
 	if replacement {
+		if p.identityStop != nil {
+			p.identityStop()
+		}
 		p.wire = nil
 		p.Caller.disconnected()
 	}
@@ -142,19 +158,33 @@ func (p *Peer) connect() {
 			p.mu.Lock()
 			identity, generation := p.identity, p.generation
 			p.mu.Unlock()
-			if p.hello(p.ctx, wire, identity, generation) == nil {
+			helloErr := p.hello(p.ctx, wire, identity, generation)
+			if helloErr == nil {
 				if ready != nil {
 					close(ready)
 					ready = nil
 				}
-				<-wire.Done()
+				select {
+				case <-wire.Done():
+				case <-p.ctx.Done():
+					_ = wire.Close()
+					<-wire.Done()
+				}
 				p.mu.Lock()
 				if p.wire == wire {
 					p.wire = nil
+					if p.identityStop != nil {
+						p.identityStop()
+						p.identityStop = nil
+						p.identityCtx = nil
+					}
 				}
 				p.mu.Unlock()
 			}
 			_ = wire.Close()
+			if p.failHello(helloErr) {
+				return
+			}
 		}
 		if p.ctx.Err() != nil {
 			return
@@ -167,34 +197,71 @@ func (p *Peer) connect() {
 	}
 }
 
+func (p *Peer) failHello(err error) bool {
+	var failure *ProtocolError
+	if !errors.As(err, &failure) || failure.Code != protocol.InvalidHello {
+		return false
+	}
+	p.mu.Lock()
+	p.terminal = failure
+	p.mu.Unlock()
+	p.cancel()
+	return true
+}
+
 func (p *Peer) hello(ctx context.Context, wire *rpc.Conn, identity PeerIdentity, generation uint64) error {
 	for {
-		if err := wire.Call(ctx, "session.hello", identity, &struct{}{}); err != nil {
+		installed := false
+		err := wire.CallObserved(ctx, "session.hello", identity, &struct{}{}, func() error {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if p.ctx.Err() != nil {
+				return rpc.ErrClosed
+			}
+			if generation == p.generation {
+				if p.wire != wire {
+					p.identityCtx, p.identityStop = context.WithCancel(wire.Context())
+				}
+				p.wire, installed = wire, true
+			} else {
+				identity, generation = p.identity, p.generation
+			}
+			return nil
+		})
+		if err != nil {
 			return err
 		}
-		p.mu.Lock()
-		if p.ctx.Err() != nil {
-			p.mu.Unlock()
-			return rpc.ErrClosed
-		}
-		if generation == p.generation {
-			p.wire = wire
-			p.mu.Unlock()
+		if installed {
 			return nil
 		}
-		identity, generation = p.identity, p.generation
-		p.mu.Unlock()
 	}
 }
 
 func (p *Peer) handle(wire *rpc.Conn, request *rpc.Request) {
 	switch request.Method {
 	case "session.superseded":
-		p.cancel()
-		go func() { _ = wire.Result(request, struct{}{}); _ = wire.Close() }()
+		p.mu.Lock()
+		if p.wire == wire {
+			p.wire = nil
+			p.terminal = &ProtocolError{Code: protocol.Superseded, Message: "superseded"}
+			if p.identityStop != nil {
+				p.identityStop()
+			}
+		}
+		p.mu.Unlock()
+		p.Caller.disconnected()
+		go func() { _ = wire.Result(request, struct{}{}); p.cancel(); _ = wire.Close() }()
 	case "message.deliver":
+		p.mu.Lock()
+		identity, err := snapshotIdentity(p.identity)
+		identityCtx := p.identityCtx
+		current := p.wire == wire && identityCtx != nil
+		p.mu.Unlock()
 		go func() {
-			receipt, err := p.deliver(wire.Context(), *request.Params.(*DeliveryRequest))
+			receipt := DeliveryReceipt{Disposition: "rejected", Reason: "closing"}
+			if current && err == nil {
+				receipt, err = p.deliver(identityCtx, identity, *request.Params.(*DeliveryRequest))
+			}
 			if err != nil {
 				receipt = DeliveryReceipt{Disposition: "rejected", Reason: err.Error()}
 			}

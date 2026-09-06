@@ -5,9 +5,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/antst/agent-sessions/bus/internal/conn"
-	"github.com/antst/agent-sessions/bus/internal/protocol"
-	"github.com/antst/agent-sessions/bus/internal/structuredprocess"
+	"github.com/antst/sessionbus/bus/internal/conn"
+	"github.com/antst/sessionbus/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/structuredprocess"
 )
 
 const (
@@ -99,7 +99,7 @@ func (s *session) run() {
 		case <-shutdown:
 			shutdown = nil
 			if s.launch != nil && !s.committed {
-				s.abortLaunch(answer{code: protocol.Internal})
+				s.abortLaunch(answer{code: protocol.Internal, data: "daemon shutting down"})
 			}
 			s.orderlyStop()
 		}

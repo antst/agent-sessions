@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/permissionmode"
-	"github.com/antst/agent-sessions/internal/productcatalog"
-	"github.com/antst/agent-sessions/internal/productruntime"
-	"github.com/antst/agent-sessions/internal/sessiontools"
+	"github.com/antst/sessionbus/internal/permissionmode"
+	"github.com/antst/sessionbus/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/productruntime"
+	"github.com/antst/sessionbus/internal/sessiontools"
 )
 
 func claudeTestMessage(body string) productruntime.NativeMessage {

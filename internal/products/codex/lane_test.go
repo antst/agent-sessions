@@ -6,10 +6,10 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/bridge"
-	"github.com/antst/agent-sessions/internal/permissionmode"
-	"github.com/antst/agent-sessions/internal/productruntime"
-	"github.com/antst/agent-sessions/internal/sessiontools"
+	"github.com/antst/sessionbus/internal/bridge"
+	"github.com/antst/sessionbus/internal/permissionmode"
+	"github.com/antst/sessionbus/internal/productruntime"
+	"github.com/antst/sessionbus/internal/sessiontools"
 )
 
 func codexTestMessage(body string) productruntime.NativeMessage {

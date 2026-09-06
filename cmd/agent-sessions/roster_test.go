@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/clihelp"
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	federationpkg "github.com/antst/agent-sessions/internal/federation"
+	"github.com/antst/sessionbus/internal/clihelp"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
+	federationpkg "github.com/antst/sessionbus/internal/federation"
 )
 
 func TestOperatorRosterProjectsCurrentLocalAndFederatedMetadataWithoutSensitiveContent(t *testing.T) {

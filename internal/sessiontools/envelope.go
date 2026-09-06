@@ -5,7 +5,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/sessionbus/internal/productruntime"
 )
 
 // RenderNativeMessage is the one Go-side rendering of a structured v1

@@ -20,9 +20,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/antst/agent-sessions/internal/productcatalog"
-	"github.com/antst/agent-sessions/internal/sessionidentity"
-	"github.com/antst/agent-sessions/internal/sessionkey"
+	"github.com/antst/sessionbus/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/sessionidentity"
+	"github.com/antst/sessionbus/internal/sessionkey"
 )
 
 const (

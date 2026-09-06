@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/antst/agent-sessions/internal/pathidentity"
+	"github.com/antst/sessionbus/internal/pathidentity"
 )
 
 // LookupEnv is the presence-sensitive environment lookup used by ResolveEnvironment.

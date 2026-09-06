@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/bus/internal/daemon"
-	"github.com/antst/agent-sessions/bus/internal/protocol"
-	"github.com/antst/agent-sessions/bus/internal/rpc"
+	"github.com/antst/sessionbus/bus/internal/daemon"
+	"github.com/antst/sessionbus/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/rpc"
 )
 
 func TestPeerDesiredIdentityAndDeepSnapshots(t *testing.T) {
@@ -66,6 +66,9 @@ func TestPeerDesiredIdentityAndDeepSnapshots(t *testing.T) {
 	mustRPC(t, <-firstDone)
 	peer.Shutdown()
 	await(t, peer.Closed(), "peer closed")
+	if peer.Err() != nil {
+		t.Fatalf("shutdown terminal error = %v", peer.Err())
+	}
 }
 
 func TestPeerReconnectsButSupersededStops(t *testing.T) {
@@ -126,8 +129,45 @@ func TestPeerReconnectsButSupersededStops(t *testing.T) {
 	}()
 	mustRPC(t, <-superseded)
 	await(t, peer.Closed(), "superseded peer closed")
+	if !isCode(peer.Err(), protocol.Superseded) {
+		t.Fatalf("superseded terminal error = %v", peer.Err())
+	}
 	if attempts.Load() != attemptsBeforeSupersession {
 		t.Fatal("superseded peer retried")
+	}
+}
+
+func TestPeerRejectedHelloIsTerminal(t *testing.T) {
+	var attempts atomic.Int32
+	requests, server, client := peerPipe(t)
+	connections := make(chan net.Conn, 1)
+	connections <- client
+	usePeerDialer(t, func(string, string) (net.Conn, error) {
+		attempts.Add(1)
+		select {
+		case fd := <-connections:
+			return fd, nil
+		default:
+			return nil, errors.New("offline")
+		}
+	})
+	peer, err := ConnectPeer(PeerIdentity{Product: "fixture-client", SessionID: "peer", Name: "peer title", Groups: []string{}, Info: map[string]any{}}, acceptDelivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := <-requests
+	mustRPC(t, server.Error(hello, protocol.InvalidHello, nil))
+	await(t, peer.Closed(), "rejected peer closed")
+	if !isCode(peer.Err(), protocol.InvalidHello) {
+		t.Fatalf("rejected hello error = %v", peer.Err())
+	}
+	select {
+	case <-peer.Ready():
+		t.Fatal("rejected peer became ready")
+	default:
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("rejected hello retried %d times", attempts.Load())
 	}
 }
 
@@ -208,6 +248,123 @@ func TestPeerReplaceSettlesOldRunAndReconnectsAsNewIdentity(t *testing.T) {
 	await(t, peer.Closed(), "peer closed")
 }
 
+func TestPeerDeliveryKeepsAdmissionIdentityAcrossReplace(t *testing.T) {
+	requests, server, client := peerPipe(t)
+	connections := make(chan net.Conn, 1)
+	connections <- client
+	usePeerDialer(t, func(string, string) (net.Conn, error) { return <-connections, nil })
+	admitted := make(chan PeerIdentity, 1)
+	peer, err := ConnectPeer(Identity{Product: "fixture-client", SessionID: "old", Name: "old", Groups: []string{"old"}, Info: map[string]any{}}, func(ctx context.Context, identity PeerIdentity, _ DeliveryRequest) (DeliveryReceipt, error) {
+		admitted <- identity
+		<-ctx.Done()
+		return DeliveryReceipt{Disposition: "rejected", Reason: "closing"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := <-requests
+	mustRPC(t, server.Result(hello, struct{}{}))
+	await(t, peer.Ready(), "peer ready")
+	delivered := make(chan DeliveryReceipt, 1)
+	go func() {
+		var receipt DeliveryReceipt
+		_ = server.Call(context.Background(), "message.deliver", DeliveryRequest{MessageID: "message", From: DeliverySource{SessionID: "sender@local", Name: "sender@local", Product: "fixture", Groups: []string{}}, Body: "body"}, &receipt)
+		delivered <- receipt
+	}()
+	identity := <-admitted
+	replaced := make(chan error, 1)
+	go func() {
+		replaced <- peer.Replace(context.Background(), Identity{Product: "fixture-client", SessionID: "new", Name: "new", Groups: []string{"new"}, Info: map[string]any{}})
+	}()
+	replacement := <-requests
+	receipt := <-delivered
+	if identity.SessionID != "old" || receipt.Reason != "closing" {
+		t.Fatalf("delivery identity/receipt = %q/%#v", identity.SessionID, receipt)
+	}
+	mustRPC(t, server.Result(replacement, struct{}{}))
+	mustRPC(t, <-replaced)
+	peer.Shutdown()
+	await(t, peer.Closed(), "peer closed")
+}
+
+func TestPeerInstallsIdentityBeforeReadingDeliveryAfterHello(t *testing.T) {
+	old := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(old)
+	requests, server, client := peerPipe(t)
+	connections := make(chan net.Conn, 1)
+	connections <- client
+	usePeerDialer(t, func(string, string) (net.Conn, error) { return <-connections, nil })
+	called := make(chan struct{}, 1)
+	peer, err := ConnectPeer(Identity{Product: "fixture-client", SessionID: "peer", Name: "peer", Groups: []string{}, Info: map[string]any{}}, func(context.Context, PeerIdentity, DeliveryRequest) (DeliveryReceipt, error) {
+		called <- struct{}{}
+		return DeliveryReceipt{Disposition: "injected"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRPC(t, server.Result(<-requests, struct{}{}))
+	var receipt DeliveryReceipt
+	mustRPC(t, server.Call(context.Background(), "message.deliver", DeliveryRequest{MessageID: "m", From: DeliverySource{SessionID: "s@local", Name: "s@local", Product: "fixture", Groups: []string{}}, Body: "body"}, &receipt))
+	select {
+	case <-called:
+	default:
+		t.Fatalf("delivery after hello was rejected: %#v", receipt)
+	}
+	peer.Shutdown()
+}
+
+func TestPeerShutdownOwnsWireDuringReplacementHello(t *testing.T) {
+	requests, server, client := peerPipe(t)
+	connections := make(chan net.Conn, 1)
+	connections <- client
+	usePeerDialer(t, func(string, string) (net.Conn, error) { return <-connections, nil })
+	peer, err := ConnectPeer(Identity{Product: "fixture-client", SessionID: "old", Name: "old", Groups: []string{}, Info: map[string]any{}}, acceptDelivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRPC(t, server.Result(<-requests, struct{}{}))
+	await(t, peer.Ready(), "peer ready")
+	replaced := make(chan error, 1)
+	go func() {
+		replaced <- peer.Replace(context.Background(), Identity{Product: "fixture-client", SessionID: "new", Name: "new", Groups: []string{}, Info: map[string]any{}})
+	}()
+	<-requests
+	peer.Shutdown()
+	await(t, peer.Closed(), "peer closed during replacement")
+	select {
+	case <-replaced:
+	case <-time.After(time.Second):
+		t.Fatal("replacement stayed blocked after shutdown")
+	}
+}
+
+func TestPeerDeliveryGetsDeepIdentitySnapshot(t *testing.T) {
+	requests, server, client := peerPipe(t)
+	connections := make(chan net.Conn, 1)
+	connections <- client
+	usePeerDialer(t, func(string, string) (net.Conn, error) { return <-connections, nil })
+	peer, err := ConnectPeer(Identity{Product: "fixture-client", SessionID: "peer", Name: "peer", Groups: []string{"original"}, Info: map[string]any{"nested": map[string]any{"value": "original"}}}, func(_ context.Context, identity PeerIdentity, _ DeliveryRequest) (DeliveryReceipt, error) {
+		identity.Groups[0] = "mutated"
+		identity.Info["nested"].(map[string]any)["value"] = "mutated"
+		return DeliveryReceipt{Disposition: "injected"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRPC(t, server.Result(<-requests, struct{}{}))
+	await(t, peer.Ready(), "peer ready")
+	var receipt DeliveryReceipt
+	mustRPC(t, server.Call(context.Background(), "message.deliver", DeliveryRequest{MessageID: "m", From: DeliverySource{SessionID: "s@local", Name: "s@local", Product: "fixture", Groups: []string{}}, Body: "body"}, &receipt))
+	peer.mu.Lock()
+	group := peer.identity.Groups[0]
+	nested := peer.identity.Info["nested"].(map[string]any)["value"]
+	peer.mu.Unlock()
+	if group != "original" || nested != "original" {
+		t.Fatalf("delivery callback mutated stored identity: %q/%v", group, nested)
+	}
+	peer.Shutdown()
+}
+
 type pauseNthWriteConn struct {
 	net.Conn
 	at, writes       int
@@ -226,7 +383,7 @@ func (c *pauseNthWriteConn) Write(body []byte) (int, error) {
 func TestCallerReportsRealDaemonEOF(t *testing.T) {
 	fixtures := loadCallerFixtures(t)
 	directory := t.TempDir()
-	socket := filepath.Join(directory, "agentbus.sock")
+	socket := filepath.Join(directory, "sessionbus.sock")
 	service := startDaemon(t, socket)
 	caller := startPeer(t, socket, "caller")
 	fd, err := net.Dial("unix", socket)
@@ -273,7 +430,7 @@ type rehelloFixture struct {
 
 func TestPeerDaemonRehelloRules(t *testing.T) {
 	directory := t.TempDir()
-	socket := filepath.Join(directory, "agentbus.sock")
+	socket := filepath.Join(directory, "sessionbus.sock")
 	startDaemon(t, socket)
 	peer := startPeer(t, socket, "peer")
 	if err := peer.Rehello("renamed", map[string]any{"revision": 2}); err != nil {
@@ -300,7 +457,7 @@ func usePeerDialer(t *testing.T, dial func(string, string) (net.Conn, error)) {
 	t.Helper()
 	oldDial, oldInterval := dialPeer, peerReconnectInterval
 	dialPeer, peerReconnectInterval = dial, time.Millisecond
-	t.Setenv("AGENTBUS_SOCKET", "fixture.sock")
+	t.Setenv("SESSIONBUS_SOCKET", "fixture.sock")
 	t.Cleanup(func() { dialPeer, peerReconnectInterval = oldDial, oldInterval })
 }
 
@@ -333,7 +490,7 @@ func startDaemon(t *testing.T, socket string) *daemon.Daemon {
 
 func startPeer(t *testing.T, socket, id string) *Peer {
 	t.Helper()
-	t.Setenv("AGENTBUS_SOCKET", socket)
+	t.Setenv("SESSIONBUS_SOCKET", socket)
 	peer, err := ConnectPeer(PeerIdentity{Product: "fixture-client", SessionID: id, Name: id, Groups: []string{"shared"}, Info: map[string]any{}}, acceptDelivery)
 	if err != nil {
 		t.Fatal(err)
@@ -346,7 +503,7 @@ func startPeer(t *testing.T, socket, id string) *Peer {
 	return peer
 }
 
-func acceptDelivery(context.Context, DeliveryRequest) (DeliveryReceipt, error) {
+func acceptDelivery(context.Context, PeerIdentity, DeliveryRequest) (DeliveryReceipt, error) {
 	return DeliveryReceipt{Disposition: "injected"}, nil
 }
 

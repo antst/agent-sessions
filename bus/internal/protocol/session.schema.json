@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:agentbus:session:v1",
+  "$id": "urn:sessionbus:session:v1",
   "$defs": {
     "SessionHelloRequest": {
       "type": "object",
@@ -10,7 +10,7 @@
         "protocol": {"type": "integer", "const": 1},
         "product": {"type": "string", "minLength": 1},
         "session_id": {"type": "string", "minLength": 1, "maxLength": 128},
-        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "name": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[\\p{L}\\p{M}\\p{N}\\p{P}\\p{S}\\p{Zs}]+$"},
         "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
         "info": {"type": "object", "additionalProperties": true},
         "launch_token": {"type": "string", "minLength": 1},
@@ -79,7 +79,7 @@
         "session_id": {"type": "string", "minLength": 1, "maxLength": 161},
         "kind": {"enum": ["peer", "lane"]},
         "product": {"type": "string", "minLength": 1},
-        "name": {"type": "string", "minLength": 1, "maxLength": 161},
+        "name": {"type": "string", "minLength": 1, "maxLength": 161, "pattern": "^[\\p{L}\\p{M}\\p{N}\\p{P}\\p{S}\\p{Zs}]+$"},
         "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
         "connected": {"type": "boolean"},
         "running": {"type": "boolean"},
@@ -183,7 +183,7 @@
       "required": ["session_id", "name", "product", "groups"],
       "properties": {
         "session_id": {"type": "string", "minLength": 1},
-        "name": {"type": "string", "minLength": 1, "maxLength": 161},
+        "name": {"type": "string", "minLength": 1, "maxLength": 161, "pattern": "^[\\p{L}\\p{M}\\p{N}\\p{P}\\p{S}\\p{Zs}]+$"},
         "product": {"type": "string", "minLength": 1},
         "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
       }
@@ -250,7 +250,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "name": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[\\p{L}\\p{M}\\p{N}\\p{P}\\p{S}\\p{Zs}]+$"},
         "product": {"type": "string", "minLength": 1},
         "host": {"type": "string", "minLength": 1},
         "resume_session_id": {"type": "string", "minLength": 1},
@@ -283,7 +283,7 @@
       "additionalProperties": false,
       "required": ["name", "groups", "open"],
       "properties": {
-        "name": {"type": "string", "minLength": 1, "maxLength": 161},
+        "name": {"type": "string", "minLength": 1, "maxLength": 161, "pattern": "^[\\p{L}\\p{M}\\p{N}\\p{P}\\p{S}\\p{Zs}]+$"},
         "groups": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
         "resume_session_id": {"type": "string", "minLength": 1},
         "open": {"$ref": "#/$defs/SessionOpenOptions"}
@@ -349,7 +349,7 @@
       "properties": {
         "code": {"enum": [-32600, -32602, -32603, -32001, -32002, -32003, -32004, -32005, -32007, -32008, -32009, -32010, -32011, -32012, -32013, -32014, -32015]},
         "message": {"enum": ["invalid_frame", "invalid_hello", "internal", "unknown_session", "not_connected", "busy", "not_running", "already_connected", "unknown_product", "unsupported_open_field", "spawn_failed", "timeout", "not_committed", "superseded", "name_taken", "unknown_host", "forward_lost"]},
-        "data": {"$ref": "#/$defs/SpawnFailedData"}
+        "data": {}
       },
       "allOf": [
         {"if": {"properties": {"code": {"const": -32600}}}, "then": {"properties": {"message": {"const": "invalid_frame"}}}},
@@ -367,8 +367,12 @@
         {"if": {"properties": {"code": {"const": -32012}}}, "then": {"properties": {"message": {"const": "superseded"}}}}, {"if": {"properties": {"code": {"const": -32013}}}, "then": {"properties": {"message": {"const": "name_taken"}}}}, {"if": {"properties": {"code": {"const": -32014}}}, "then": {"properties": {"message": {"const": "unknown_host"}}}}, {"if": {"properties": {"code": {"const": -32015}}}, "then": {"properties": {"message": {"const": "forward_lost"}}}}, {"if": {"properties": {"code": {"const": -32603}}}, "then": {"properties": {"message": {"const": "internal"}}}},
         {
           "if": {"properties": {"code": {"const": -32009}}, "required": ["code"]},
-          "then": {"required": ["data"]},
-          "else": {"not": {"required": ["data"]}}
+          "then": {"required": ["data"], "properties": {"data": {"$ref": "#/$defs/SpawnFailedData"}}},
+          "else": {
+            "if": {"properties": {"code": {"const": -32603}}, "required": ["code"]},
+            "then": {"required": ["data"], "properties": {"data": {"type": "string", "minLength": 1}}},
+            "else": {"not": {"required": ["data"]}}
+          }
         }
       ]
     },

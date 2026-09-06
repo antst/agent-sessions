@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/antst/agent-sessions/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/protocol"
 )
 
 type entry struct {
@@ -312,7 +312,7 @@ func visibleTo(item *entry, groups []string) bool {
 }
 
 func (d *directory) routeLabel(value, host string, groups []string, method string, request routedRequest) (*entry, bool, int) {
-	canonical, code := canonicalInput(value, host)
+	canonical, code := canonicalSessionID(value, host)
 	if code != 0 {
 		return nil, false, code
 	}

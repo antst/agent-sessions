@@ -187,8 +187,11 @@ func TestSchemaDefinitions(t *testing.T) {
 }
 
 func TestMinimalInterpreterRejectsUnknownKeywords(t *testing.T) {
-	if checkSchemaNode(schemaDefinitions, schemaNode{"pattern": "x"}) == nil {
+	if checkSchemaNode(schemaDefinitions, schemaNode{"title": "x"}) == nil {
 		t.Fatal("unknown keyword accepted")
+	}
+	if checkSchemaNode(schemaDefinitions, schemaNode{"pattern": "["}) == nil {
+		t.Fatal("invalid pattern accepted")
 	}
 	if checkSchemaNode(schemaDefinitions, schemaNode{"$ref": "#/$defs/Missing"}) == nil {
 		t.Fatal("unknown reference accepted")

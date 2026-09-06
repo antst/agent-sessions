@@ -5,8 +5,8 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/antst/agent-sessions/bus/internal/protocol"
-	"github.com/antst/agent-sessions/bus/internal/structuredprocess"
+	"github.com/antst/sessionbus/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/structuredprocess"
 )
 
 const spawnTransactionTimeout = 60 * time.Second
@@ -47,7 +47,7 @@ func (d *Daemon) startProduct(start *launch) {
 			}
 			return
 		}
-		environment := structuredprocess.Environment(os.Environ(), map[string]string{"AGENTBUS_LAUNCH_TOKEN": start.token, "AGENTBUS_SOCKET": d.config.SocketPath})
+		environment := structuredprocess.Environment(os.Environ(), map[string]string{"SESSIONBUS_LAUNCH_TOKEN": start.token, "SESSIONBUS_SOCKET": d.config.SocketPath})
 		child, err := structuredprocess.Start(path, environment)
 		if err != nil {
 			if !d.finishUnclaimed(start, nil, answer{code: protocol.SpawnFailed, data: failure(nil, err.Error())}) {
@@ -67,7 +67,7 @@ func (d *Daemon) startProduct(start *launch) {
 				d.finishClaimed(start, child, true)
 			}
 		case <-d.shutdown:
-			if !d.finishUnclaimed(start, child, answer{code: protocol.Internal}) {
+			if !d.finishUnclaimed(start, child, answer{code: protocol.Internal, data: "daemon shutting down"}) {
 				d.finishClaimed(start, child, false)
 			}
 		}

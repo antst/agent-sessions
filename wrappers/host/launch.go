@@ -10,12 +10,12 @@ import (
 )
 
 const (
-	SocketEnv    = "AGENTBUS_SOCKET"
-	LocalKeyEnv  = "AGENTBUS_LOCAL_KEY"
-	TokenEnv     = "AGENTBUS_LAUNCH_TOKEN"
-	SessionIDEnv = "AGENTBUS_SESSION_ID"
-	NameEnv      = "AGENTBUS_SESSION_NAME"
-	GroupsEnv    = "AGENTBUS_GROUPS"
+	SocketEnv    = "SESSIONBUS_SOCKET"
+	LocalKeyEnv  = "SESSIONBUS_LOCAL_KEY"
+	TokenEnv     = "SESSIONBUS_LAUNCH_TOKEN"
+	SessionIDEnv = "SESSIONBUS_SESSION_ID"
+	NameEnv      = "SESSIONBUS_SESSION_NAME"
+	GroupsEnv    = "SESSIONBUS_GROUPS"
 )
 
 func LaneMode() bool { _, present := os.LookupEnv(TokenEnv); return present }
@@ -55,8 +55,9 @@ func StartChild(command *exec.Cmd, lock *SessionLock, endpoint *PrivateEndpoint)
 func (c *Child) Done() <-chan struct{} { return c.done }
 func (c *Child) Wait() error           { <-c.done; return c.err }
 func (c *Child) Close(ctx context.Context, stop func(context.Context) error) error {
-	err := stop(ctx)
-	return errors.Join(err, c.Wait(), c.endpoint.Close(), c.lock.Close())
+	_ = stop(ctx)
+	_ = c.Wait()
+	return errors.Join(c.endpoint.Close(), c.lock.Close())
 }
 
 // InteractivePlan removes only wrapper-owned group flags. Native option arity

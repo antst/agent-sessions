@@ -38,10 +38,10 @@ listener; one shared key replaces federation's SNI lookup. A keyed daemon never
 accepts plain frames. A kit without the required key reports `daemon requires
 local key`; a keyed client connecting to a plain daemon reports the TLS
 handshake failure. The key is never a wire field, argument, or log value.
-Clients read the daemon Unix-socket path from `AGENTBUS_SOCKET`, falling
+Clients read the daemon Unix-socket path from `SESSIONBUS_SOCKET`, falling
 back to the documented default path when absent. Every spawned lane receives
-that variable alongside `AGENTBUS_LAUNCH_TOKEN` and, when configured,
-`AGENTBUS_LOCAL_KEY`.
+that variable alongside `SESSIONBUS_LAUNCH_TOKEN` and, when configured,
+`SESSIONBUS_LOCAL_KEY`.
 
 A product is a binary; started with a launch token in its environment it is a
 lane worker, with no mode argument. Lane-only workers such as non-AI tools are
@@ -57,14 +57,19 @@ every federated host. The product owns the ID part because it owns the session
 primitive that can address it; the daemon mints no session IDs. A caller may
 use a bare ID or bare name as shorthand for its own daemon's host.
 Resolution splits a qualified name on its last `@`. Name parts are 1–128
-printable characters with no whitespace or control character; `/` and `@` are
-allowed. The last `@` is always the canonical host boundary. Host parts match
+printable Unicode characters, including spaces, with control characters excluded;
+`/` and `@` are allowed. Name values are preserved exactly: no trimming,
+whitespace collapse, tokenization on whitespace, or Unicode normalization. The
+128-character limit counts Unicode code points. ID parts remain 1–128 printable
+characters with no whitespace or control character. The last `@` is always the
+canonical host boundary. Host parts match
 `^[a-z0-9][a-z0-9-]{0,31}$`. For identity input, no `@` means a bare local part:
 the daemon appends the caller's host, then tries exact ID before exact name. An
 input containing `@` is always split at the last one, and an unknown right part
-is `unknown_host` rather than a bare name. These grammars
-are daemon checks because the shared schema deliberately has no `pattern`
-keyword.
+is `unknown_host` rather than a bare name. The schema carries the printable-name
+pattern and code-point bounds; the daemon separately checks name, ID, product,
+and host grammar so changing one does not loosen another. Overlong or
+control-bearing product titles are rejected visibly and are never rewritten.
 The wire has no generic tool frame: after hello, a peer or committed worker
 originates the ordinary client-to-daemon methods in this section. Product-facing
 start/wait/status/interrupt/list/send tools are caller-kit sugar over them.
@@ -290,8 +295,8 @@ at most once per run, and later interrupt requests return `{}`.
 
 Either a caller sends `session.close` to the daemon or the daemon sends it to
 the addressed lane. The request has optional `forget`, default false. The
-worker asks the product to close and returns `{}` when
-it does. One constant `closeBound = 10s`, measured from the daemon sending this
+worker asks the product to close and always returns `{}`; a product cleanup
+error is one quoted line on worker stderr. One constant `closeBound = 10s`, measured from the daemon sending this
 request, bounds the entire close path. A result before the bound makes the
 daemon close the socket, send TERM, and reap; expiry makes it close the socket,
 send KILL, and reap with no second waiting period. The spawn/open transaction
@@ -430,9 +435,10 @@ The closed method authority therefore shrinks from twenty-one methods to eleven.
 ### 1.4 Error authority
 
 Every correlated failure uses exactly one numeric JSON-RPC code and symbolic
-message from this table. Kits match the code, never free-form text. Only
-`spawn_failed` has `data`: the closed object
-`{exit_code?:integer,stderr_tail:[string]}`. `exit_code` is absent when process
+message from this table. Kits match the code, never free-form text.
+`spawn_failed` has the closed `data` object
+`{exit_code?:integer,stderr_tail:[string]}`; `internal` has a non-empty string
+containing the daemon error. No other code has `data`. `exit_code` is absent when process
 creation itself failed, because no child existed from which to obtain one. If an
 invalid frame has no valid request ID, the daemon cannot correlate a response
 and closes the connection without writing one.
@@ -455,7 +461,7 @@ and closes the connection without writing one.
 | `-32013` | `name_taken` | New `lane.spawn` when another row on that host already holds the requested composed name. |
 | `-32014` | `unknown_host` | `lane.describe` or new `lane.spawn` naming an unfederated `host`, or any canonical identity input whose host part is neither local nor connected. |
 | `-32015` | `forward_lost` | A one-hop federated request whose transport ends before its response; the request may or may not have been applied on the target host and is never retried. |
-| `-32603` | `internal` | A durable row-file operation fails after directory cleanup, or a worker interrupt/close callback fails; it has no other use. |
+| `-32603` | `internal` | The daemon's own shutdown or durable row-file operation fails; `data` carries its error text. A product callback never raises this code. |
 
 ### 3.1 Product contract
 
@@ -506,12 +512,12 @@ Callback failures map exactly once:
 | --- | --- |
 | `open` | `spawn_failed` with `stderr_tail:[message]`; the daemon passes it through unchanged. |
 | `run` | Terminal `{outcome:"failed",result:message}`; a run callback never returns an RPC error. |
-| `interrupt` | `internal`. |
+| `interrupt` | `{}`; the callback message is one quoted line on worker stderr, and the run terminal remains the stopping truth. |
 | `deliver` | Rejected receipt with the callback message as `reason`. |
-| `close` | `internal`, followed by ordinary kit exit. |
+| `close` | `{}` followed by ordinary kit exit; the callback message is one quoted line on worker stderr. |
 
-The worker kit reads `AGENTBUS_SOCKET`,
-`AGENTBUS_LAUNCH_TOKEN`, and the optional `AGENTBUS_LOCAL_KEY`;
+The worker kit reads `SESSIONBUS_SOCKET`,
+`SESSIONBUS_LAUNCH_TOKEN`, and the optional `SESSIONBUS_LOCAL_KEY`;
 it removes both secrets from the process environment and connects to the
 named daemon endpoint. The local key selects TLS and is retained only
 in the kit's private connection material; neither secret is logged, returned,

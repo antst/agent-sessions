@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
 )
 
 const (
@@ -79,7 +79,7 @@ func (h *Handoff) Run(ctx context.Context, run *sessionkit.Run, input string, st
 }
 
 func (h *Handoff) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, inject Inject) (sessionkit.DeliveryReceipt, error) {
-	rendered, err := render(request)
+	rendered, err := RenderNativeMessage(request)
 	if err != nil {
 		return sessionkit.DeliveryReceipt{}, err
 	}

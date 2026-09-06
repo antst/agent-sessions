@@ -4,7 +4,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/antst/agent-sessions/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/protocol"
 )
 
 const closeBound = 10 * time.Second
@@ -61,7 +61,7 @@ func (s *session) finishOpen(frame protocol.Frame) {
 	}
 	opened := decoded.(*protocol.OpenResult)
 	item := s.launch.entry
-	if !validPart(opened.SessionID) || !s.launch.fresh && opened.SessionID != unqualify(item.row.SessionID) {
+	if !validIDPart(opened.SessionID) || !s.launch.fresh && opened.SessionID != unqualify(item.row.SessionID) {
 		s.abortLaunch(answer{code: protocol.SpawnFailed, data: failure(s.child, "worker returned an invalid session id")})
 		s.orderlyStop()
 		return
@@ -76,13 +76,13 @@ func (s *session) finishOpen(frame protocol.Frame) {
 		persisted := cloneRow(item.row)
 		persisted.CreatedAt = time.Now().UTC()
 		if err = s.daemon.table.write(persisted); err != nil {
-			s.abortLaunch(answer{code: protocol.Internal})
+			s.abortLaunch(answer{code: protocol.Internal, data: err.Error()})
 			s.orderlyStop()
 			return
 		}
 		if !s.daemon.directory.publish(s.launch, s, persisted.CreatedAt) {
 			_ = s.daemon.table.delete(item.row.SessionID)
-			s.abortLaunch(answer{code: protocol.Internal})
+			s.abortLaunch(answer{code: protocol.Internal, data: "session publication failed"})
 			s.orderlyStop()
 			return
 		}
@@ -112,8 +112,13 @@ func (s *session) beginClose(request routedRequest) {
 }
 
 func (s *session) finishCloseResponse(frame protocol.Frame) {
-	if frame.Error != nil && frame.Error.Code == protocol.Internal {
-		s.closeAnswer = answer{code: protocol.Internal}
+	if frame.Error != nil {
+		s.wire.Close()
+		return
+	}
+	if _, err := protocol.DecodeResult("session.close", frame.Result); err != nil {
+		s.wire.Close()
+		return
 	}
 	s.orderlyStop()
 }
@@ -187,7 +192,7 @@ func (s *session) finishLane() {
 	if s.committed {
 		if s.forget {
 			if err := s.daemon.table.delete(s.identity.row.SessionID); err != nil {
-				s.closeAnswer = answer{code: protocol.Internal}
+				s.closeAnswer = answer{code: protocol.Internal, data: err.Error()}
 				s.forget = false
 			}
 		}
