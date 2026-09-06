@@ -41,6 +41,7 @@ func TestHandoffDeliveryAndQueueCommit(t *testing.T) {
 	receipt, err := h.Deliver(context.Background(), delivery("active"), func(_ context.Context, message string) (bool, error) { injected = message; return true, nil })
 	must(t, err)
 	check(t, receipt.Disposition == "injected" && strings.Contains(injected, "active"), "active receipt = %#v", receipt)
+	check(t, len(h.Claim()) == 1, "active delivery was not claimed")
 	started, release := make(chan struct{}), make(chan struct{})
 	delivered := make(chan sessionkit.DeliveryReceipt, 1)
 	go func() {
@@ -60,7 +61,11 @@ func TestHandoffDeliveryAndQueueCommit(t *testing.T) {
 }
 
 func TestHandoffFailedCreationKeepsFullQueue(t *testing.T) {
-	h := &Handoff{queue: make([]string, MaxQueuedDeliveries), queueSize: MaxQueuedDeliveries - 1}
+	full := make([]*deliverySlot, MaxQueuedDeliveries)
+	for index := range full {
+		full[index] = &deliverySlot{}
+	}
+	h := &Handoff{queue: full, queueSize: MaxQueuedDeliveries - 1}
 	started, release := make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
@@ -76,10 +81,39 @@ func TestHandoffFailedCreationKeepsFullQueue(t *testing.T) {
 	must(t, err)
 	close(release)
 	check(t, receipt.Reason == "queue_full" && (<-done).Error() == "failed" && len(h.queue) == MaxQueuedDeliveries, "receipt = %#v, queue = %d", receipt, len(h.queue))
-	h = &Handoff{queue: []string{"full"}, queueSize: MaxQueuedBytes}
+	h = &Handoff{queue: []*deliverySlot{{body: "full"}}, queueSize: MaxQueuedBytes}
 	receipt, err = h.Deliver(context.Background(), delivery("overflow"), nil)
 	must(t, err)
 	check(t, receipt.Reason == "queue_full", "byte-bound receipt = %#v", receipt)
+}
+
+func TestHandoffClaimAndFinish(t *testing.T) {
+	h := &Handoff{}
+	started, release := make(chan struct{}), make(chan struct{})
+	done := make(chan sessionkit.DeliveryReceipt, 1)
+	go func() {
+		receipt, _ := h.Deliver(context.Background(), delivery("active"), func(context.Context, string) (bool, error) {
+			close(started)
+			<-release
+			return true, nil
+		})
+		done <- receipt
+	}()
+	<-started
+	check(t, len(h.Claim()) == 0, "pending delivery was claimed")
+	close(release)
+	check(t, (<-done).Disposition == "injected", "delivery was not injected")
+	claimed := h.Claim()
+	check(t, len(claimed) == 1 && strings.Contains(string(claimed[0]), "active") && len(h.Claim()) == 0, "claim = %#v", claimed)
+
+	_, _ = h.Deliver(context.Background(), delivery("unclaimed"), func(context.Context, string) (bool, error) { return true, nil })
+	_, _ = h.Deliver(context.Background(), delivery("idle"), nil)
+	h.Finish()
+	next, prompt := newFakeTurn(), ""
+	close(next.done)
+	_, err := h.Run(context.Background(), &sessionkit.Run{}, "", func(_ context.Context, got string) (Turn, error) { prompt = got; return next, nil })
+	must(t, err)
+	check(t, strings.Count(prompt, "unclaimed") == 1 && strings.Count(prompt, "idle") == 1 && strings.Index(prompt, "unclaimed") < strings.Index(prompt, "idle"), "prompt = %q", prompt)
 }
 
 type workerProduct struct {
