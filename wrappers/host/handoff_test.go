@@ -87,6 +87,40 @@ func TestHandoffFailedCreationKeepsFullQueue(t *testing.T) {
 	check(t, receipt.Reason == "queue_full", "byte-bound receipt = %#v", receipt)
 }
 
+func TestHandoffFailedCreationRestoresPendingDelivery(t *testing.T) {
+	h := &Handoff{}
+	creating, fail, injecting, release := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := h.Run(context.Background(), &sessionkit.Run{}, "input", func(context.Context, string) (Turn, error) {
+			close(creating)
+			<-fail
+			return nil, errors.New("failed")
+		})
+		runDone <- err
+	}()
+	<-creating
+	delivered := make(chan sessionkit.DeliveryReceipt, 1)
+	go func() {
+		receipt, _ := h.Deliver(context.Background(), delivery("pending"), func(context.Context, string) (Injection, error) {
+			close(injecting)
+			<-release
+			return Pending, nil
+		})
+		delivered <- receipt
+	}()
+	<-injecting
+	close(fail)
+	check(t, (<-runDone).Error() == "failed", "creation did not fail")
+	close(release)
+	check(t, (<-delivered).Disposition == "queued_for_next_turn", "failed-start delivery was acknowledged")
+	next, prompt := newFakeTurn(), ""
+	close(next.done)
+	_, err := h.Run(context.Background(), &sessionkit.Run{}, "next", func(_ context.Context, got string) (Turn, error) { prompt = got; return next, nil })
+	must(t, err)
+	check(t, strings.Count(prompt, "pending") == 1 && h.queueSize == 0, "prompt/size = %q/%d", prompt, h.queueSize)
+}
+
 func TestHandoffClaimAndFinish(t *testing.T) {
 	h := &Handoff{}
 	started, release := make(chan struct{}), make(chan struct{})
