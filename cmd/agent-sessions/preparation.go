@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sync"
 
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
 )
 
 func pendingAttachmentEvidence[T any](

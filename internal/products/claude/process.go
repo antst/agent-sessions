@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/antst/agent-sessions/internal/productruntime"
-	"github.com/antst/agent-sessions/internal/structuredprocess"
+	"github.com/antst/sessionbus/internal/productruntime"
+	"github.com/antst/sessionbus/internal/structuredprocess"
 )
 
 type streamProcess interface {

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/procinfo"
+	"github.com/antst/sessionbus/internal/procinfo"
 )
 
 // CodexAdapterConfig supplies only the native operations that cannot live in

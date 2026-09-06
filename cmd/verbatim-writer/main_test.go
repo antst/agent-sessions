@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/internal/productruntime"
+	"github.com/antst/sessionbus/internal/productruntime"
 )
 
 func TestWriteDeliveryJSONL(t *testing.T) {

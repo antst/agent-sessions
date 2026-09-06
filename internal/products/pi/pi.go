@@ -3,9 +3,9 @@ package pi
 import (
 	"time"
 
-	"github.com/antst/agent-sessions/internal/productcatalog"
-	"github.com/antst/agent-sessions/internal/productruntime"
-	"github.com/antst/agent-sessions/internal/products/pifamily"
+	"github.com/antst/sessionbus/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/productruntime"
+	"github.com/antst/sessionbus/internal/products/pifamily"
 )
 
 const (

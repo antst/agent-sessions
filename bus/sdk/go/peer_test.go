@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antst/agent-sessions/bus/internal/daemon"
-	"github.com/antst/agent-sessions/bus/internal/protocol"
-	"github.com/antst/agent-sessions/bus/internal/rpc"
+	"github.com/antst/sessionbus/bus/internal/daemon"
+	"github.com/antst/sessionbus/bus/internal/protocol"
+	"github.com/antst/sessionbus/bus/internal/rpc"
 )
 
 func TestPeerDesiredIdentityAndDeepSnapshots(t *testing.T) {
@@ -383,7 +383,7 @@ func (c *pauseNthWriteConn) Write(body []byte) (int, error) {
 func TestCallerReportsRealDaemonEOF(t *testing.T) {
 	fixtures := loadCallerFixtures(t)
 	directory := t.TempDir()
-	socket := filepath.Join(directory, "agentbus.sock")
+	socket := filepath.Join(directory, "sessionbus.sock")
 	service := startDaemon(t, socket)
 	caller := startPeer(t, socket, "caller")
 	fd, err := net.Dial("unix", socket)
@@ -430,7 +430,7 @@ type rehelloFixture struct {
 
 func TestPeerDaemonRehelloRules(t *testing.T) {
 	directory := t.TempDir()
-	socket := filepath.Join(directory, "agentbus.sock")
+	socket := filepath.Join(directory, "sessionbus.sock")
 	startDaemon(t, socket)
 	peer := startPeer(t, socket, "peer")
 	if err := peer.Rehello("renamed", map[string]any{"revision": 2}); err != nil {
@@ -457,7 +457,7 @@ func usePeerDialer(t *testing.T, dial func(string, string) (net.Conn, error)) {
 	t.Helper()
 	oldDial, oldInterval := dialPeer, peerReconnectInterval
 	dialPeer, peerReconnectInterval = dial, time.Millisecond
-	t.Setenv("AGENTBUS_SOCKET", "fixture.sock")
+	t.Setenv("SESSIONBUS_SOCKET", "fixture.sock")
 	t.Cleanup(func() { dialPeer, peerReconnectInterval = oldDial, oldInterval })
 }
 
@@ -490,7 +490,7 @@ func startDaemon(t *testing.T, socket string) *daemon.Daemon {
 
 func startPeer(t *testing.T, socket, id string) *Peer {
 	t.Helper()
-	t.Setenv("AGENTBUS_SOCKET", socket)
+	t.Setenv("SESSIONBUS_SOCKET", socket)
 	peer, err := ConnectPeer(PeerIdentity{Product: "fixture-client", SessionID: id, Name: id, Groups: []string{"shared"}, Info: map[string]any{}}, acceptDelivery)
 	if err != nil {
 		t.Fatal(err)

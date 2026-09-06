@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:agentbus:session:v1",
+  "$id": "urn:sessionbus:session:v1",
   "$defs": {
     "SessionHelloRequest": {
       "type": "object",

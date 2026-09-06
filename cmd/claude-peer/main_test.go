@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/antst/agent-sessions/wrappers/host"
+	"github.com/antst/sessionbus/wrappers/host"
 )
 
 func TestLaneModeRejectsArguments(t *testing.T) {

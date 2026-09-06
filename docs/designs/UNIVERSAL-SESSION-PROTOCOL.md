@@ -1,4 +1,4 @@
-# Agentbus Universal Session Protocol
+# Sessionbus Universal Session Protocol
 
 Status: design in progress. Section 1 is the proposed wire contract; later
 sections will derive the daemon, native product kits, DSH integration, wrappers,
@@ -44,10 +44,10 @@ listener; one shared key replaces federation's SNI lookup. A keyed daemon never
 accepts plain frames. A kit without the required key reports `daemon requires
 local key`; a keyed client connecting to a plain daemon reports the TLS
 handshake failure. The key is never a wire field, argument, or log value.
-Clients read the daemon Unix-socket path from `AGENTBUS_SOCKET`, falling
+Clients read the daemon Unix-socket path from `SESSIONBUS_SOCKET`, falling
 back to the documented default path when absent. Every spawned lane receives
-that variable alongside `AGENTBUS_LAUNCH_TOKEN` and, when configured,
-`AGENTBUS_LOCAL_KEY`.
+that variable alongside `SESSIONBUS_LAUNCH_TOKEN` and, when configured,
+`SESSIONBUS_LOCAL_KEY`.
 
 A product is a binary; started with a launch token in its environment it is a
 lane worker, with no mode argument. Lane-only workers such as non-AI tools are
@@ -558,7 +558,7 @@ with a unique secret for every host. The product list is an advertisement for
 discovery, not a registry or allowlist: the service PATH alone decides whether
 a lane can launch. The daemon validates each configured product name at load,
 refuses duplicate names with one error, and treats an empty list as absent.
-`agentbus secret` generates and prints 32 random bytes
+`sessionbus secret` generates and prints 32 random bytes
 encoded as base64; the daemon and hub reject any configured federation secret
 or `local_key` shorter than 32 decoded bytes. Config files containing secrets
 must be mode 0600.
@@ -616,10 +616,10 @@ or capability check.
 
 The product token is exactly a binary name on the daemon's service PATH.
 Native and wrapped products have one process contract: exec `<product>` with
-empty argv and `AGENTBUS_LAUNCH_TOKEN` in the environment. Presence of
+empty argv and `SESSIONBUS_LAUNCH_TOKEN` in the environment. Presence of
 that variable selects worker mode; absence selects the product's ordinary
 entry. Tokens are per-spawn, single-use, and expiring, so an ordinary human
-shell never holds one accidentally. When configured, the daemon also supplies `AGENTBUS_LOCAL_KEY`;
+shell never holds one accidentally. When configured, the daemon also supplies `SESSIONBUS_LOCAL_KEY`;
 the worker kit consumes and scrubs both variables before product code runs.
 Callers name the product binary but never supply an executable path.
 The daemon has no executable registry, fixed-argument table, or product
@@ -850,7 +850,7 @@ contribution at once.
 
 Hub-to-daemon transport is standard TLS 1.3 from Go's standard library. For a
 configured secret and label, key derivation is exactly HKDF-SHA256 with empty
-salt, info `agentbus/v1/<label>`, and 32 output bytes, passed as the seed
+salt, info `sessionbus/v1/<label>`, and 32 output bytes, passed as the seed
 to `ed25519.NewKeyFromSeed`. Federation uses labels `host` for the daemon
 identity and `hub` for the hub identity toward that host. Derived keypairs are
 never stored or transmitted. The daemon presents a self-signed X.509
@@ -921,7 +921,7 @@ and packaging projection. A future repository split can use `git subtree`
 without moving a file across that boundary.
 
 `bus/internal/daemon` owns the directory, session owner loops, row files,
-reservations, routing, and federation. `bus/cmd/agentbus` only
+reservations, routing, and federation. `bus/cmd/sessionbus` only
 parses CLI/MCP input, constructs the daemon with its optional federation,
 discovery, and local-encryption configuration, and renders results. Product
 selection never enters either request router.
@@ -947,7 +947,7 @@ owner-loop facts.
 `bus/internal/structuredprocess` retains generic bounded TERM/KILL process
 ownership and must not import a product or protocol state type. The public Go
 and JavaScript worker and caller kits live only at `bus/sdk/go` and
-`bus/sdk/js`; the JavaScript kit is published as `@agentbus/kit`, and wrappers
+`bus/sdk/js`; the JavaScript kit is published as `@sessionbus/kit`, and wrappers
 import bus code only through those paths. One Go module
 contains bus, SDKs, and wrappers for now, so Go's `internal` rule enforces the
 boundary mechanically while leaving each SDK a clean public import path.
@@ -982,7 +982,7 @@ lines, not as additions hidden behind relocation accounting:
 | `bus/internal/conn` subcap | 150 | One reader, one writer, bounded inbox/outbox, and descriptor close. |
 | `bus/internal/rpc` | 200 | Framing, one reader, pending calls, complete-frame writes, and close. |
 | `bus/internal/structuredprocess` | 700 | Generic process ownership; current functionality may remain. |
-| `bus/cmd/agentbus` daemon composition | 350 | Construction and rendering only; no protocol state. |
+| `bus/cmd/sessionbus` daemon composition | 350 | Construction and rendering only; no protocol state. |
 
 The daemon migration must therefore delete at least 8,000 net production and
 test lines across the surfaces listed below, before any product wrapper
@@ -1000,22 +1000,22 @@ product-side fate.
 
 | Lines | File | Reason | Replacement / rehoming |
 | ---: | --- | --- | --- |
-| 1,116 | `cmd/agent-sessions/codex_host.go` | Product-composed host coordinator and attachment authority die. | Generic daemon construction plus the Codex wrapper in Section 4. |
-| 445 | `cmd/agent-sessions/codex_host_test.go` | Tests the deleted coordinator. | Daemon transaction tests and Codex wrapper conformance tests. |
-| 169 | `cmd/agent-sessions/control_retry_test.go` | Tests the deleted side control protocol. | Universal connection pending-call and supersession tests. |
-| 41 | `cmd/agent-sessions/dsh_lane.go` | Daemon-side DSH driver composition dies. | Universal PATH launch plus the native DSH plugin. |
-| 348 | `cmd/agent-sessions/federation.go` | Product-aware federation router dies. | The generic one-hop forwarding function. |
-| 444 | `cmd/agent-sessions/federation_test.go` | Tests the deleted router. | Daemon federation proofs in Section 5. |
-| 1,628 | `cmd/agent-sessions/lane.go` | Lane actor, parsers, lifecycle, and product dispatch die. | Daemon table/router plus caller-kit composition. |
-| 94 | `cmd/agent-sessions/lane_names.go` | Actor-derived name authority dies. | Durable-table name index and runtime-map identity. |
-| 149 | `cmd/agent-sessions/lane_notice.go` | Terminal notice and collection machinery die. | Direct `turn.run` reply plus filtered `session.list`. |
-| 1,245 | `cmd/agent-sessions/lane_test.go` | Tests the deleted lane machinery. | Daemon transaction tests and shared kit fixtures. |
-| 746 | `cmd/agent-sessions/messaging.go` | Product-aware peer/lane routing dies. | Generic daemon resolution and delivery. |
-| 662 | `cmd/agent-sessions/messaging_test.go` | Tests the deleted messaging router. | Daemon delivery and federation proofs in Section 5. |
-| 434 | `cmd/agent-sessions/presence.go` | Report/projection presence server dies. | Universal connection admission in `internal/daemon`. |
-| 1,257 | `cmd/agent-sessions/presence_test.go` | Tests the deleted presence server. | Universal admission, listing, EOF, and swap tests. |
-| 68 | `cmd/agent-sessions/preparation.go` | Old host preparation composition dies. | Minimal command composition over the universal PATH launch. |
-| 43 | `cmd/agent-sessions/socket_test.go` | Tests the deleted command-side socket server. | Socket helper moves with retained connector endpoint tests in Section 4. |
+| 1,116 | `ff81565:cmd/agent-sessions/codex_host.go` | Product-composed host coordinator and attachment authority die. | Generic daemon construction plus the Codex wrapper in Section 4. |
+| 445 | `ff81565:cmd/agent-sessions/codex_host_test.go` | Tests the deleted coordinator. | Daemon transaction tests and Codex wrapper conformance tests. |
+| 169 | `ff81565:cmd/agent-sessions/control_retry_test.go` | Tests the deleted side control protocol. | Universal connection pending-call and supersession tests. |
+| 41 | `ff81565:cmd/agent-sessions/dsh_lane.go` | Daemon-side DSH driver composition dies. | Universal PATH launch plus the native DSH plugin. |
+| 348 | `ff81565:cmd/agent-sessions/federation.go` | Product-aware federation router dies. | The generic one-hop forwarding function. |
+| 444 | `ff81565:cmd/agent-sessions/federation_test.go` | Tests the deleted router. | Daemon federation proofs in Section 5. |
+| 1,628 | `ff81565:cmd/agent-sessions/lane.go` | Lane actor, parsers, lifecycle, and product dispatch die. | Daemon table/router plus caller-kit composition. |
+| 94 | `ff81565:cmd/agent-sessions/lane_names.go` | Actor-derived name authority dies. | Durable-table name index and runtime-map identity. |
+| 149 | `ff81565:cmd/agent-sessions/lane_notice.go` | Terminal notice and collection machinery die. | Direct `turn.run` reply plus filtered `session.list`. |
+| 1,245 | `ff81565:cmd/agent-sessions/lane_test.go` | Tests the deleted lane machinery. | Daemon transaction tests and shared kit fixtures. |
+| 746 | `ff81565:cmd/agent-sessions/messaging.go` | Product-aware peer/lane routing dies. | Generic daemon resolution and delivery. |
+| 662 | `ff81565:cmd/agent-sessions/messaging_test.go` | Tests the deleted messaging router. | Daemon delivery and federation proofs in Section 5. |
+| 434 | `ff81565:cmd/agent-sessions/presence.go` | Report/projection presence server dies. | Universal connection admission in `internal/daemon`. |
+| 1,257 | `ff81565:cmd/agent-sessions/presence_test.go` | Tests the deleted presence server. | Universal admission, listing, EOF, and swap tests. |
+| 68 | `ff81565:cmd/agent-sessions/preparation.go` | Old host preparation composition dies. | Minimal command composition over the universal PATH launch. |
+| 43 | `ff81565:cmd/agent-sessions/socket_test.go` | Tests the deleted command-side socket server. | Socket helper moves with retained connector endpoint tests in Section 4. |
 | 41 | `internal/daemon/admin.go` | Side-channel admin operation dies. | Ordinary `session.list` and `lane.describe` routes. |
 | 164 | `internal/daemon/admin_test.go` | Tests deleted admin routing. | Daemon method-table tests. |
 | 22 | `internal/daemon/adapter_authorization_test.go` | Adapter authorization seam dies. | Visibility-as-authority router tests. |
@@ -1053,7 +1053,7 @@ deletion:
 
 | Retained file | Deleted dependency | Replacement / rehoming |
 | --- | --- | --- |
-| `cmd/agent-sessions/hook.go:38-72` | Its `internal/bridge` hook dispatcher dependency is separated from the Codex lane/App Server primitive. | Hook input and attestation dispatch stay in the command package and use the universal caller/control boundary; only Codex lane primitives move into the resident wrapper. |
+| `ff81565:cmd/agent-sessions/hook.go:38-72` | Its `internal/bridge` hook dispatcher dependency is separated from the Codex lane/App Server primitive. | Hook input and attestation dispatch stay in the command package and use the universal caller/control boundary; only Codex lane primitives move into the resident wrapper. |
 
 This floor is **47 files and 12,263 deleted lines**: 16 command files / 8,889
 lines, 20 daemon files / 2,634 lines, and all 11 product-runtime files / 740
@@ -1116,8 +1116,8 @@ Callback failures map exactly once:
 | `deliver` | Rejected receipt with the callback message as `reason`. |
 | `close` | `{}` followed by ordinary kit exit; the callback message is one quoted line on worker stderr. |
 
-The worker kit reads `AGENTBUS_SOCKET`,
-`AGENTBUS_LAUNCH_TOKEN`, and the optional `AGENTBUS_LOCAL_KEY`;
+The worker kit reads `SESSIONBUS_SOCKET`,
+`SESSIONBUS_LAUNCH_TOKEN`, and the optional `SESSIONBUS_LOCAL_KEY`;
 it removes both secrets from the process environment and connects to the
 named daemon endpoint. The local key selects TLS and is retained only
 in the kit's private connection material; neither secret is logged, returned,
@@ -1257,7 +1257,7 @@ connection-bound client supplies `list`, `send`, `describe`, `spawn`, `resume`,
 without blocking the reader. Go also exports one thin no-hello client:
 `Dial(socket)`, `Call(ctx, method, params)`, and `Close`; the caller kit and a
 wrapper's private lane socket use that one framed implementation. `Socket()`
-returns `AGENTBUS_SOCKET` when set and otherwise the documented state-root
+returns `SESSIONBUS_SOCKET` when set and otherwise the documented state-root
 socket; `Dial("")`, peer connections, and worker connections use that value.
 Go exports `NewCaller(call)` to place the same typed methods and caller
 conveniences over that no-hello client's call function; workers and peers are
@@ -1277,7 +1277,7 @@ calls return that same object, including when called before `Serve`.
 
 `start`, `status`, and `wait` are caller conveniences for resident callers such
 as plugins and the shared MCP server. They are not wire methods or
-`agentbus-call` subcommands, and have one shared Go/JavaScript shape:
+`sessionbus-call` subcommands, and have one shared Go/JavaScript shape:
 
 | Call | Result and local rule |
 | --- | --- |
@@ -1365,31 +1365,31 @@ must be simplified.
 
 ### 3.4 DSH: the first native worker
 
-DSH's product token and binary name are `dashi`. DSH uses one Agent Sessions
+DSH's product token and binary name are `dashi`. DSH uses one Sessionbus
 plugin and one connection per DSH root session. In
 ordinary product mode the plugin sends peer hello without a launch token and
 reconnects after daemon EOF. In lane mode it captures and scrubs the token,
 waits for DSH app-ready, and sends worker hello on that same socket. It does not
 also publish peer presence: successful `session.open` turns the worker
 connection itself into the lane's presence, tool path, and delivery path.
-Its read-only `/agent-sessions` command reports the current connection mode,
+Its read-only `/sessionbus` command reports the current connection mode,
 canonical identity, and attachment facts without mutating either product or
 daemon state.
 
-The DSH `agent-sessions` profile is exactly headless DSH core plus the unified
+The DSH `sessionbus` profile is exactly headless DSH core plus the unified
 plugin configured `mode: lane`; it disables DSH automatic title changes after
 open, and no TUI, second comms plugin, lane extension, relay, or local socket is
 loaded. Its package profile is
 `{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-headless"],"patchReload":"startup"}`
 under `dsh.profile`, and its `cordis.patch.yml` inserts exactly
 the `session-controller`, `workspace`, and
-`{id: agent-sessions, name: '@agentbus/dsh', config: {mode: lane}}` rows,
+`{id: sessionbus, name: '@sessionbus/dsh', config: {mode: lane}}` rows,
 plus the `workspace-write-noninteractive` permission-preset override, after
 bundle patches and before any `--patch` overlays. A non-disabled plugin row is
 load-mandatory by DSH boot semantics: import failure exits one with "plugin tree
 failed to load". Phase 2 makes the `dashi` boot layer select this exact profile
 and `mode: lane` plugin configuration whenever
-`AGENTBUS_LAUNCH_TOKEN` is present; no command-line switch or alias is
+`SESSIONBUS_LAUNCH_TOKEN` is present; no command-line switch or alias is
 involved. Without that variable, the normal DSH profile runs the same plugin in
 peer mode. Forcing the plugin's lane mode without a launch token is a startup
 error rather than an accidental peer.
@@ -1419,7 +1419,7 @@ plugin needs:
   synchronously to the durable surface, starts no turn, and the next request is
   built from that surface. The plugin reports `injected`. `agent.inject` is not
   a substitute because its inbox splice is claimed only by a running turn; and
-- `tools.register` exposes the product's Agent Sessions tool while the kit's
+- `tools.register` exposes the product's Sessionbus tool while the kit's
   client-to-daemon session-method API carries its calls on the same socket.
 
 Fresh open creates the DSH session only after the typed request arrives,
@@ -1435,7 +1435,7 @@ product that lacks that primitive. A running delivery is `injected` exactly when
 `agent.steer` resolves; there is no receipt polling. In peer mode, a DSH rename
 sends a same-ID re-hello with the new title and unchanged groups, updating the
 bus name in place. Lane open applies the daemon-composed title and a lane never
-re-hellos. The registered Agent Sessions tool exposes the
+re-hellos. The registered Sessionbus tool exposes the
 caller kit's start/wait/status/interrupt/spawn/describe/close/list/send surface
 defined once in Sections 4 and 5. The close callback cancels if needed, waits
 on the currently unbounded `agent.whenIdle`, flushes the session, and returns;
@@ -1464,21 +1464,21 @@ by the one-plugin/one-connection design. The nine-line
 packaging step.
 
 `integrations/dsh/comms` remains as the source location but its package identity
-becomes `@agentbus/dsh`; `dsh-comms` is a deprecated compatibility alias
+becomes `@sessionbus/dsh`; `dsh-comms` is a deprecated compatibility alias
 only during packaging migration. Its plugin and tests are rewritten
 around the shared JavaScript kit; its Cordis patch installs peer mode, while the
-headless `agent-sessions` profile pins lane mode. Package/install inventory must
+headless `sessionbus` profile pins lane mode. Package/install inventory must
 contain one DSH integration artifact, not the old comms-plus-lane pair.
 
 DSH also applies `$DSH_HOME/cordis.patch.yml` (default
 `~/.dsh/cordis.patch.yml`) to every profile above per-profile patches and below
-`--patch` overlays. The installer writes one `@agentbus/dsh` insert there
+`--patch` overlays. The installer writes one `@sessionbus/dsh` insert there
 and places the package where every profile's module walk resolves it, for
-example `$DSH_HOME/profiles/node_modules/@agentbus/dsh`. DSH currently
+example `$DSH_HOME/profiles/node_modules/@sessionbus/dsh`. DSH currently
 heals `profiles/node_modules` only for its own dependency closure; teaching it
 to preserve this external package is the upstream packaging ask. The `dashi`
 launcher retains its exact DSH version pin and, for peer launches, maps its
-`-g` values to the JSON `AGENTBUS_GROUPS` environment.
+`-g` values to the JSON `SESSIONBUS_GROUPS` environment.
 
 The DSH migration therefore adds **16 more deleted files and 1,504 deleted
 lines** before rewriting the retained unified plugin. Combined with Section 2,
@@ -1493,31 +1493,31 @@ must remain net-negative after the kit is accounted separately.
 | --- | --- | --- |
 | Process and connection | Lane mode starts one resident wrapper, which owns the product session, worker connection, one caller-kit instance, and one private Unix endpoint. In peer mode the resident owner is the process the product keeps for that session: a launcher-owned wrapper, a product-kept helper, or a product-daemon-spawned per-session helper, as named in the product ledger. | Caller `start`/`status`/`wait` state stays in that resident owner rather than in a process the product may kill after one call. A launcher-owned interactive child keeps its inherited terminal while the wrapper propagates signals and exit status. |
 | Installed entry forms | One installed integration image is named `<native>-peer`. With a launch token it holds the worker connection and owns a headless child. Without a token its product ledger identifies the resident peer owner; a short-lived `<native>-peer mcp` hops to that owner, while a product-kept helper may be the owner itself. | The environment is the mode discriminator for lane workers; peer ownership follows the product's observed process lifetime, and no product-specific worker flag enters the daemon. |
-| Peer identity and name | Identity is fixed before peer hello from the exact environment table below when present; otherwise Claude resolves its parent through `claude agents --json` (`cmd/agent-sessions/connector.go:449-487`), while DSH/OpenCode/Kilo/Pi/OMP read their in-process session ID; Codex defers hello until the first tool call supplies `_meta.threadId` (`connector.go:247-251`). Fresh Grok and Qwen peer launchers mint one product-compatible UUID and pass it both through native `--session-id` and `AGENTBUS_SESSION_ID`; a hand-started Grok or Qwen process without either source serves every Agent Sessions tool with an error naming the required launcher and never sends hello. The product's current title is the hello name; a supported retitle sends a same-ID, same-groups re-hello. | Identity and title are launcher or product facts, never guessed process-global values. Re-hello mirrors one product name on the bus without adding an update method. |
+| Peer identity and name | Identity is fixed before peer hello from the exact environment table below when present; otherwise Claude resolves its parent through `claude agents --json` (`ff81565:cmd/agent-sessions/connector.go:449-487`), while DSH/OpenCode/Kilo/Pi/OMP read their in-process session ID; Codex defers hello until the first tool call supplies `_meta.threadId` (`connector.go:247-251`). Fresh Grok and Qwen peer launchers mint one product-compatible UUID and pass it both through native `--session-id` and `SESSIONBUS_SESSION_ID`; a hand-started Grok or Qwen process without either source serves every Sessionbus tool with an error naming the required launcher and never sends hello. The product's current title is the hello name; a supported retitle sends a same-ID, same-groups re-hello. | Identity and title are launcher or product facts, never guessed process-global values. Re-hello mirrors one product name on the bus without adding an update method. |
 | Product boundary | The wrapper exposes the six Section 3 callbacks locally and contains every product import, argument translation, native protocol, and delivery compromise. | Deleting one wrapper when a vendor adopts the native kit must require no daemon, schema, or caller-kit change. |
 | Child launch and title | The lane wrapper connects and sends worker hello before starting a native child. It receives and validates `session.open`, then spawns the child with the stored cwd, model, reasoning, permission, ordered argument values, and composed name as the product title wherever the product supports one. It never observes or publishes later native retitles. If a product cannot keep that title fixed, its ledger names the R5 relaxation and the bus name remains authoritative. | Process-level flags and titles are ordinary open fields for wrappers because the product does not exist until open. Native products start before open and therefore need session-level primitives instead. A fixed lane identity cannot silently follow product auto-title churn. |
 | Child lifetime | If the native child dies while idle, the wrapper reaps it and exits immediately; worker EOF makes the row offline and explicitly resumable. | A live worker connection must never advertise a dead product or synthesize an internal restart policy. |
-| Native-session exclusivity | Before touching a resumed session, or before fresh creation when the wrapper chooses its ID, the wrapper opens `dirname(AGENTBUS_SOCKET)/locks/<product>/<session_id>` with `O_CREAT` and takes an exclusive flock. It never treats file existence as ownership: a stale file is harmless and only a live flock blocks. When only the product can allocate a fresh ID, the wrapper locks immediately after allocation and before every later mutation. It passes that same open file description to the native child as an inherited descriptor and holds it through cleanup. The OS releases the lock only after every holder exits; contention fails open as `spawn_failed` with `session busy`. A native product may replace this only with its own cross-process exclusion of competing writers. | An ordinary wrapper death must not release ownership while its child can still write. The inherited flock provides a death-safe process boundary without PID state, a reap registry, or daemon product knowledge; locking an unknown not-yet-minted ID would be fictitious. |
-| Tool ingress | In lane mode the resident wrapper owns a private Unix socket under `dirname(AGENTBUS_SOCKET)/lanes/`, unlinks it on exit, and passes that path as `AGENTBUS_LANE_SOCKET` to the product-spawned `<product>-peer mcp` helper. The helper sends one `{action, arguments}` value to that endpoint and returns its one result. In peer mode the helper uses the same hop only when the product keeps another session owner resident; otherwise the helper owns the peer connection and caller itself. | Each session has exactly one daemon connection and one caller-kit instance. A per-session Unix path cannot be reused by a stray child as a different session's endpoint, and a short-lived helper never becomes presence or owns caller state. |
+| Native-session exclusivity | Before touching a resumed session, or before fresh creation when the wrapper chooses its ID, the wrapper opens `dirname(SESSIONBUS_SOCKET)/locks/<product>/<session_id>` with `O_CREAT` and takes an exclusive flock. It never treats file existence as ownership: a stale file is harmless and only a live flock blocks. When only the product can allocate a fresh ID, the wrapper locks immediately after allocation and before every later mutation. It passes that same open file description to the native child as an inherited descriptor and holds it through cleanup. The OS releases the lock only after every holder exits; contention fails open as `spawn_failed` with `session busy`. A native product may replace this only with its own cross-process exclusion of competing writers. | An ordinary wrapper death must not release ownership while its child can still write. The inherited flock provides a death-safe process boundary without PID state, a reap registry, or daemon product knowledge; locking an unknown not-yet-minted ID would be fictitious. |
+| Tool ingress | In lane mode the resident wrapper owns a private Unix socket under `dirname(SESSIONBUS_SOCKET)/lanes/`, unlinks it on exit, and passes that path as `SESSIONBUS_LANE_SOCKET` to the product-spawned `<product>-peer mcp` helper. The helper sends one `{action, arguments}` value to that endpoint and returns its one result. In peer mode the helper uses the same hop only when the product keeps another session owner resident; otherwise the helper owns the peer connection and caller itself. | Each session has exactly one daemon connection and one caller-kit instance. A per-session Unix path cannot be reused by a stray child as a different session's endpoint, and a short-lived helper never becomes presence or owns caller state. |
 | Shared MCP entry | `wrappers/mcp` is one stdio MCP server for the caller-kit tool surface. Its private backend carries one action request to a resident wrapper; its direct backend uses the caller owned by a product-kept helper. Each product adds only `<product>-peer mcp` dispatch and the backend selected by its observed lifetime. A raw framed method hop remains test-only. | One MCP implementation prevents every wrapper from rebuilding tool JSON, while the backend keeps `start`/`status`/`wait` in the actual resident process. Budget: **200 production / 200 test logical lines**. |
-| Local encryption handoff | Thin peer launchers place `AGENTBUS_LOCAL_KEY` in the product environment when configured, and the product-spawned MCP entry or JavaScript plugin consumes and scrubs it. A lane wrapper consumes the key for its daemon connection and never passes it to its private MCP/plugin endpoint or native child. | Only connections to the daemon use optional local TLS; private wrapper hops are not daemon connections and carry no daemon key. |
-| Wrapper-only queue and run handoff | A wrapper that lacks native append/injection owns one in-memory FIFO capped at 64 deliveries and 1 MiB total after rendering and newline separators. The wrapper host's own renderer, fixed by a golden fixture, emits the `[agentbus-metadata: ...]` carrier line, preserves arrival order, joins rendered entries with newlines, and prepends the result before caller input. FIFO extraction, native-turn creation, and interrupt are serialized under one boundary: interrupt before native creation aborts creation and returns terminal `interrupted` without a native call; after creation it calls native cancel. `injected` is returned only when the product callback confirms an actually active native turn; otherwise the message joins the next input. At run start the host atomically swaps the FIFO; overflow is rejected as `queue_full`. Shared fixtures cover interrupt at creation, delivery racing the first turn, and delivery racing terminal completion. | One renderer and one handoff boundary prevent wrappers from changing sender metadata, losing a boundary delivery, creating an unstoppable turn, or claiming injection into a turn that did not exist. `queued_for_next_turn` remains truthful; loss with wrapper exit is the accepted loss in Section 1.2. |
+| Local encryption handoff | Thin peer launchers place `SESSIONBUS_LOCAL_KEY` in the product environment when configured, and the product-spawned MCP entry or JavaScript plugin consumes and scrubs it. A lane wrapper consumes the key for its daemon connection and never passes it to its private MCP/plugin endpoint or native child. | Only connections to the daemon use optional local TLS; private wrapper hops are not daemon connections and carry no daemon key. |
+| Wrapper-only queue and run handoff | A wrapper that lacks native append/injection owns one in-memory FIFO capped at 64 deliveries and 1 MiB total after rendering and newline separators. The wrapper host's own renderer, fixed by a golden fixture, emits the `[sessionbus-metadata: ...]` carrier line, preserves arrival order, joins rendered entries with newlines, and prepends the result before caller input. FIFO extraction, native-turn creation, and interrupt are serialized under one boundary: interrupt before native creation aborts creation and returns terminal `interrupted` without a native call; after creation it calls native cancel. `injected` is returned only when the product callback confirms an actually active native turn; otherwise the message joins the next input. At run start the host atomically swaps the FIFO; overflow is rejected as `queue_full`. Shared fixtures cover interrupt at creation, delivery racing the first turn, and delivery racing terminal completion. | One renderer and one handoff boundary prevent wrappers from changing sender metadata, losing a boundary delivery, creating an unstoppable turn, or claiming injection into a turn that did not exist. `queued_for_next_turn` remains truthful; loss with wrapper exit is the accepted loss in Section 1.2. |
 | Interactive delivery | A peer integration may let an interactive product start a turn in response to delivery and report `injected`; the wrapper FIFO rule applies only to a lane, where delivery must not start an unrequested turn. | Peer interaction is already user-owned product work; lane control remains explicit through `turn.run`. |
 | Caller tool surface | Every product exposes the same caller-kit start/wait/status/interrupt/spawn/describe/close/list/send operations; product plugins do not invent wire methods. | Tool presentation is kit sugar over the eleven methods and is identical for native and wrapped products. |
 | Shared size cap | Wrapper host, private MCP/plugin endpoint, and bounded FIFO together: **400 production / 400 test logical lines**. | Product-independent scaffolding larger than the daemon router would be a second protocol implementation. |
-| Shared deletion | Delete the 16 shared files in `internal/launcher`, including `lane_grok_test.go` exactly once (2,199 lines), and `cmd/agent-sessions/connector_refresh.go` plus its test (333 lines). Rewrite `connector.go`/test as the resident peer wrapper's connection, and rewrite `native_peer.go` as thin exec-time product configuration; the stdio entry is only the private action helper. | The old launcher package still dies: CLI parsing and thin peer plans move to `cmd`, product and connection ownership to wrappers, and lane recipes to wrappers. Connector self-exec/release refresh is unnecessary when the resident wrapper holds the connection. |
+| Shared deletion | Delete the 16 shared files in `internal/launcher`, including `lane_grok_test.go` exactly once (2,199 lines), and `ff81565:cmd/agent-sessions/connector_refresh.go` plus its test (333 lines). Rewrite `connector.go`/test as the resident peer wrapper's connection, and rewrite `native_peer.go` as thin exec-time product configuration; the stdio entry is only the private action helper. | The old launcher package still dies: CLI parsing and thin peer plans move to `cmd`, product and connection ownership to wrappers, and lane recipes to wrappers. Connector self-exec/release refresh is unnecessary when the resident wrapper holds the connection. |
 
 The launcher/daemon environment contract is exact:
 
 | Variable | Value | Producer |
 | --- | --- | --- |
-| `AGENTBUS_SESSION_ID` | Bare product session ID part. | Peer launcher only. |
-| `AGENTBUS_SESSION_NAME` | Bare, unqualified name part. | Peer launcher only. |
-| `AGENTBUS_GROUPS` | JSON array string containing the asserted groups. | Peer launcher only. |
-| `AGENTBUS_SOCKET` | Named daemon Unix-socket endpoint. | Peer launcher and daemon lane spawn. |
-| `AGENTBUS_LOCAL_KEY` | Optional local-TLS secret. | Peer launcher and daemon lane spawn when configured. |
-| `AGENTBUS_LAUNCH_TOKEN` | One-use expiring worker reservation token. | Daemon lane spawn only. |
-| `AGENTBUS_LANE_SOCKET` | Wrapper's per-session Unix socket for the stdio MCP helper. | Lane wrapper only. |
+| `SESSIONBUS_SESSION_ID` | Bare product session ID part. | Peer launcher only. |
+| `SESSIONBUS_SESSION_NAME` | Bare, unqualified name part. | Peer launcher only. |
+| `SESSIONBUS_GROUPS` | JSON array string containing the asserted groups. | Peer launcher only. |
+| `SESSIONBUS_SOCKET` | Named daemon Unix-socket endpoint. | Peer launcher and daemon lane spawn. |
+| `SESSIONBUS_LOCAL_KEY` | Optional local-TLS secret. | Peer launcher and daemon lane spawn when configured. |
+| `SESSIONBUS_LAUNCH_TOKEN` | One-use expiring worker reservation token. | Daemon lane spawn only. |
+| `SESSIONBUS_LANE_SOCKET` | Wrapper's per-session Unix socket for the stdio MCP helper. | Lane wrapper only. |
 
 Peer launchers pass ID, name, groups, socket, and optional local key unchanged
 through the product to its MCP/plugin child. Lane launches contain only socket,
@@ -1528,7 +1528,7 @@ optional local key, and launch token; canonical lane identity arrives later in
 
 | Ledger item | Decision | Source-backed reason |
 | --- | --- | --- |
-| Resident wrapper | `claude-peer` with a launch token owns one long-lived `claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages` child. Without a token, `claude-peer` launches interactive Claude; Claude's product-spawned Agent Sessions stdio MCP server owns the peer connection. | The lane stream is proven at c5b280d `internal/products/claude/lane.go:112-145`. Peer presence needs no TUI wrapper and continues to work for hand-started Claude sessions. |
+| Resident wrapper | `claude-peer` with a launch token owns one long-lived `claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages` child. Without a token, `claude-peer` launches interactive Claude; Claude's product-spawned Sessionbus stdio MCP server owns the peer connection. | The lane stream is proven at c5b280d `internal/products/claude/lane.go:112-145`. Peer presence needs no TUI wrapper and continues to work for hand-started Claude sessions. |
 | Open and resume | Fresh mints a product-compatible UUID, passes its bare part as `--session-id`, applies the composed title with `--name`, and returns that ID; resume uses `--resume <resume_session_id>` and reapplies the stored open object. Claude supports all five open fields: `cwd`, `permission_mode`, `model`, `reasoning_effort`, and `arguments`; model maps to `--model`, effort to `--effort`, and the protocol's default permission maps deliberately to `--permission-mode dontAsk`. | c5b280d maps the existing stream flags at `lane.go:112-141`; Claude's product CLI help exposes `--session-id`, `--name`, `--model`, `--effort`, and permission mode. The wrapper, not the daemon, owns ID minting and the single interpretive permission mapping. |
 | Readiness and projection | The wrapper hellos immediately after Claude starts because it minted the session ID. Claude's `system/init` is verified when it arrives with the first turn, and its `session_id` must equal the minted one. An exit before the first turn is reported by the ordinary process-exit path. Interactive projection lands with the `claude-peer mcp` entry, not the lane wrapper. | No readiness timer. |
 | Run | Write one stream-json user frame, keep the run callback pending, and convert the exact result frame to the terminal result. | `lane.go:173-225` already proves the single stream write plus terminal observation. |
@@ -1543,7 +1543,7 @@ optional local key, and launch token; canonical lane identity arrives later in
 
 | Ledger item | Decision | Source-backed reason |
 | --- | --- | --- |
-| Resident wrapper | `codex-peer` with a launch token owns one session-specific App Server client/subscription. Without a token, `codex-peer` launches interactive Codex; Codex's product-spawned Agent Sessions stdio MCP server owns the peer connection. | The lane surface is already App Server RPC (`internal/bridge/codex_native.go`). Peer presence does not require the lane wrapper or a host-global coordinator. |
+| Resident wrapper | `codex-peer` with a launch token owns one session-specific App Server client/subscription. Without a token, `codex-peer` launches interactive Codex; Codex's product-spawned Sessionbus stdio MCP server owns the peer connection. | The lane surface is already App Server RPC (`internal/bridge/codex_native.go`). Peer presence does not require the lane wrapper or a host-global coordinator. |
 | Open and resume | Fresh performs `thread/start`, returns the product thread ID, applies the composed name through `thread/name/set`, and materializes its rollout; resume uses `resume_session_id` and reapplies the stored open object. It supports all five open fields. Permission mapping is exact: default means approval `never` with the configured sandbox, while bypass means approval `never` plus `danger-full-access`. | `CodexStartRequest` and `CodexLaneTurnRequest` at `codex_native.go:51-70` expose cwd, model, reasoning effort, permissions, and arguments. The wrapper preserves the product-owned thread ID and name instead of inventing daemon aliases. |
 | Run | Send one `turn/start`, await the matching `turn/completed`, and extract the final agent message. | `internal/products/codex/lane.go:75-122` and `codex_native.go:528-656` prove the end-to-end primitive. |
 | Tools | In lane mode the wrapper supplies a private `codex-peer mcp` Unix endpoint in App Server `thread/start` `mcp_servers`; calls are stateless action hops. In peer mode the App Server daemon starts one helper per thread with no launcher environment; that helper owns the thread's peer connection and caller and defers hello until the first thread identity exists. After Codex `/clear`, the new thread gets its own helper and peer identity. | MCP configuration and peer ownership are per thread; the App Server's observed helper lifetime removes the old transient identity without `inactive` or a launcher-owned endpoint. |
@@ -1557,21 +1557,21 @@ optional local key, and launch token; canonical lane identity arrives later in
 
 | Ledger item | Decision | Source-backed reason |
 | --- | --- | --- |
-| Resident wrapper | With a launch token, `grok-peer` owns one private leader, one authenticated ACP primary, and one observer for the exact lane session. Without a token, the launcher owns one private leader, one forever-quiet authenticated startup hold, and the inherited-terminal TUI child; it propagates signals and the TUI's exit status and joins all three. The private leader starts one resident `grok-peer mcp` helper for each native session. Each helper owns that session's one peer connection and caller, using the immutable product-injected `GROK_SESSION_ID`; `/new` starts another helper and peer while the product keeps the former session resident. Headless-only flags are rejected with an error naming lane mode. | Grok Build 1.0.13 keeps each configured stdio MCP helper alive for its session and injects `GROK_SESSION_ID` and `GROK_LEADER_SOCKET`; the launcher supplies the inherited Agentbus socket and groups. The helper, not the launcher, is therefore the product-observed resident owner. Its private leader still needs the quiet hold before the TUI starts. A headless invocation auto-started a detached default leader which outlived the command, and that stale leader held later interactive startup at `Starting session`; the launcher-owned private leader makes process ownership explicit. |
+| Resident wrapper | With a launch token, `grok-peer` owns one private leader, one authenticated ACP primary, and one observer for the exact lane session. Without a token, the launcher owns one private leader, one forever-quiet authenticated startup hold, and the inherited-terminal TUI child; it propagates signals and the TUI's exit status and joins all three. The private leader starts one resident `grok-peer mcp` helper for each native session. Each helper owns that session's one peer connection and caller, using the immutable product-injected `GROK_SESSION_ID`; `/new` starts another helper and peer while the product keeps the former session resident. Headless-only flags are rejected with an error naming lane mode. | Grok Build 1.0.13 keeps each configured stdio MCP helper alive for its session and injects `GROK_SESSION_ID` and `GROK_LEADER_SOCKET`; the launcher supplies the inherited Sessionbus socket and groups. The helper, not the launcher, is therefore the product-observed resident owner. Its private leader still needs the quiet hold before the TUI starts. A headless invocation auto-started a detached default leader which outlived the command, and that stale leader held later interactive startup at `Starting session`; the launcher-owned private leader makes process ownership explicit. |
 | Open and resume | The resident wrapper receives `session.open` before it starts the private leader. For a fresh lane it holds `locks/grok/<launch-token-digest>`, uses the same digest for the private lane-socket path, starts Grok without `--session-id`, and calls ACP `session/new`; Grok's returned ID becomes the session ID, then the wrapper renames the lock to `locks/grok/<session_id>` without replacing an existing lock and applies the composed title through the observer rename primitive. Resume locks `locks/grok/<resume_session_id>` directly, starts no argv resume selector, and calls `session/load` for that ID. It puts `--permission-mode`, `--reasoning-effort`, `-m`, and ordered `arguments` on the process command line, with `cwd` as the child working directory. | Grok Build 1.0.13 ignores a fresh `--session-id` in this ACP entry; `session/new` returns the product-owned ID and `session/load` is the sole resume selector. ACP `_meta` exposes only `yoloMode` / `autoMode`; it is not an open-field transport. All five fields and the title are applied at open. The existing 15-second startup hold remains inside `spawnTransactionTimeout = 60s`. |
-| Run | Call ACP `session/prompt`, consume only update notifications carrying that prompt's ID, and return its stop reason and accumulated output. Notifications from any other product turn are ignored. | One Agentbus run owns one native prompt; an unrelated product turn cannot become its result. `grok_native_session.go:270-308` is the resident prompt primitive. |
-| Tools | In lane mode the wrapper publishes `lanes/<launch-token-digest>.sock`, and each stdio helper is a stateless action hop to the lane-owned caller. In peer mode the product-spawned resident helper serves MCP in-process over its own peer-owned caller; it has no private endpoint and no launcher-side caller. | ACP is the wrapper-to-Grok control protocol; MCP is the product-facing Agentbus tool boundary. Caller state lives in the resident owner in both modes, never in a transient action hop. |
-| Deliver | In lane mode, while a wrapper-owned prompt is active, observer interjection reports `injected` only after the actor acknowledges it; while idle, delivery enters the shared bounded wrapper FIFO, reports `queued_for_next_turn`, and is prepended to the next `session/prompt`. In peer mode the resident helper lazily opens and keeps one observer on first delivery, validates its immutable session against the exact live roster row, updates the peer title by same-ID re-hello, and reports `injected` after the actor acknowledges the native interject in any supported live state. | Grok's idle interject starts its own `interject-fallback` turn, so it cannot implement lane-idle delivery: a lane never starts an unrequested turn. Peer mode owns no Agentbus run; the product has accepted an acknowledged interject and decides when it runs. The helper can start before the native summary exists; that short product window is recorded, not mechanised with polling or a startup marker. |
+| Run | Call ACP `session/prompt`, consume only update notifications carrying that prompt's ID, and return its stop reason and accumulated output. Notifications from any other product turn are ignored. | One Sessionbus run owns one native prompt; an unrelated product turn cannot become its result. `grok_native_session.go:270-308` is the resident prompt primitive. |
+| Tools | In lane mode the wrapper publishes `lanes/<launch-token-digest>.sock`, and each stdio helper is a stateless action hop to the lane-owned caller. In peer mode the product-spawned resident helper serves MCP in-process over its own peer-owned caller; it has no private endpoint and no launcher-side caller. | ACP is the wrapper-to-Grok control protocol; MCP is the product-facing Sessionbus tool boundary. Caller state lives in the resident owner in both modes, never in a transient action hop. |
+| Deliver | In lane mode, while a wrapper-owned prompt is active, observer interjection reports `injected` only after the actor acknowledges it; while idle, delivery enters the shared bounded wrapper FIFO, reports `queued_for_next_turn`, and is prepended to the next `session/prompt`. In peer mode the resident helper lazily opens and keeps one observer on first delivery, validates its immutable session against the exact live roster row, updates the peer title by same-ID re-hello, and reports `injected` after the actor acknowledges the native interject in any supported live state. | Grok's idle interject starts its own `interject-fallback` turn, so it cannot implement lane-idle delivery: a lane never starts an unrequested turn. Peer mode owns no Sessionbus run; the product has accepted an acknowledged interject and decides when it runs. The helper can start before the native summary exists; that short product window is recorded, not mechanised with polling or a startup marker. |
 | Interrupt and close | Interrupt sends one ACP `session/cancel` notification; `{}` means the notification was sent, not that the run has stopped. The worker kit's universal close path interrupts an active lane run and waits for its terminal before invoking Grok's `close`, which releases the primary, observer, leader, private socket, and lock. In peer mode helper EOF releases its observer and peer, while launcher shutdown joins the TUI, quiet hold, and leader. | Grok adds no close timer: the daemon's single 10-second `closeBound` closes the worker and kills its process group if lane cleanup stalls. Grok's close callback never receives an active run; peer processes follow the product-owned stdio and launcher lifetimes. |
 | Exception ledger | Section 1 code exceptions: **0**. Declared unsupported open fields: **none**. Wrapper-only state: the shared bounded idle-delivery FIFO. | Grok exposes active interjection and all typed open controls; only idle delivery lacks a native append primitive and stays wrapper-local. |
 | Size cap | **975 production / 930 test logical lines**, including ACP framing, both launcher modes, helper-owned peer mode, and leader bootstrap but excluding the shared wrapper host. | The measured implementation is 968 / 930. The peer launcher owns only leader, quiet hold, TUI, and argument translation; the product-spawned helper owns peer, caller, in-process tools, and its lazy observer. |
-| Deletion inventory | Delete all `internal/products/grok` (2 files / 637 lines), `internal/launcher/{grok_peer.go,grok_peer_test.go}` (2 / 1,183), `cmd/agent-sessions/grok_peer.go` (1 / 213), and all 11 `internal/bridge/grok*.go` files (1,883). `internal/launcher/lane_grok_test.go` is counted once in the shared row. Rewrite `grok/.mcp.json` and `grok/scripts/native-entry` as dual-entry peer/direct or lane/local assets. Delete the disproven launcher-owned peer, caller, private peer endpoint, roster observer, artifact watcher, and `/new` Replace path. Total legacy deletion: **16 files / 3,916 lines**. | The wrapper receives copied, product-owned ACP/leader/observer slices rather than retaining a cross-product bridge package. The interactive launcher wraps the TUI only to own its private leader and quiet hold; product-spawned helpers own immutable per-session presence. |
+| Deletion inventory | Delete all `internal/products/grok` (2 files / 637 lines), `internal/launcher/{grok_peer.go,grok_peer_test.go}` (2 / 1,183), `ff81565:cmd/agent-sessions/grok_peer.go` (1 / 213), and all 11 `internal/bridge/grok*.go` files (1,883). `internal/launcher/lane_grok_test.go` is counted once in the shared row. Rewrite `grok/.mcp.json` and `grok/scripts/native-entry` as dual-entry peer/direct or lane/local assets. Delete the disproven launcher-owned peer, caller, private peer endpoint, roster observer, artifact watcher, and `/new` Replace path. Total legacy deletion: **16 files / 3,916 lines**. | The wrapper receives copied, product-owned ACP/leader/observer slices rather than retaining a cross-product bridge package. The interactive launcher wraps the TUI only to own its private leader and quiet hold; product-spawned helpers own immutable per-session presence. |
 
 ### 4.5 Qwen Code
 
 | Ledger item | Decision | Source-backed reason |
 | --- | --- | --- |
-| Resident wrapper | `qwen-peer` with a launch token owns one `qwen --acp` child and one ACP client for the lane session. Without a token, `qwen-peer` mints a Qwen-compatible v4 UUID, passes it to Qwen as both `--session-id` and `AGENTBUS_SESSION_ID`, then execs interactive Qwen; its spawned stdio MCP server owns the peer connection. | `internal/products/qwen/lane.go:102-181` proves the headless ACP lifetime. A hand-started peer lacking this identity returns the launcher error and never hellos; obsolete file-observer presence dies. |
+| Resident wrapper | `qwen-peer` with a launch token owns one `qwen --acp` child and one ACP client for the lane session. Without a token, `qwen-peer` mints a Qwen-compatible v4 UUID, passes it to Qwen as both `--session-id` and `SESSIONBUS_SESSION_ID`, then execs interactive Qwen; its spawned stdio MCP server owns the peer connection. | `internal/products/qwen/lane.go:102-181` proves the headless ACP lifetime. A hand-started peer lacking this identity returns the launcher error and never hellos; obsolete file-observer presence dies. |
 | Open and resume | Initialize ACP v1, mint a v4 ID for fresh open and pass it in `_meta["qwen-code/sessionId"]` to `session/new`, or use capability-checked `session/resume` with `resume_session_id`; verify and return the exact product ID, then rename fresh sessions to the composed title. Supported open fields are `cwd`, `permission_mode`, `model`, and `arguments`; model maps to `-m`. Default permission uses Qwen's ordinary mode; bypass adds `--yolo` and verifies the returned mode. Arguments may not claim `--acp`, approval/yolo, resume/continue/session-id, prompt/input/output, or name controls. | Qwen Code 0.23.0 accepts the session ID metadata, resume, and `-m`; it exposes no reasoning-effort flag or ACP field. The wrapper mints only because Qwen requires the caller-provided UUID and fails closed on reserved controls. |
 | Run | Start `session/prompt`, accumulate session updates, and resolve the matching future to a terminal result. | `lane.go:199-263` and `client.go` prove the one ACP request/future. |
 | Tools | In both modes ACP `mcpServers` starts stateless `qwen-peer mcp` calls against the resident wrapper's private Unix endpoint; the wrapper owns the caller and its peer or worker connection. | c5 already injects an MCP server during `session/new` (`lane.go:134`); the product-spawned helper remains the tool entry but owns no connection or caller state. |
@@ -1579,7 +1579,7 @@ optional local key, and launch token; canonical lane identity arrives later in
 | Interrupt and close | Interrupt calls `craft/cancelPendingPrompt`; close cancels the ACP lifetime and reaps the child. | `lane.go:265-310` proves both calls. |
 | Exception ledger | Section 1 code exceptions: **0**. Declared unsupported open field: `reasoning_effort`. Wrapper-only state: the bounded idle and recovery FIFO; native mid-turn drain state remains Qwen-owned. | Product help exposes model but no effort selector; permission vocabulary and reserved arguments stay wrapper data, and no Qwen condition enters the daemon. |
 | Size cap | **520 production / 600 test logical lines**, including ACP framing but excluding the shared wrapper host. | The current driver/client split contains generic actor state that disappears; all retained Qwen protocol code remains charged here. |
-| Deletion inventory | Delete all `internal/products/qwen` (4 files / 1,031 lines), `internal/launcher/{qwen_peer.go,qwen_peer_test.go,qwen_test_helpers_test.go}` (3 / 1,412), `cmd/agent-sessions/{qwen_peer.go,qwen_peer_test.go}` (2 / 234), and the obsolete 11-line `qwen/scripts/native-entry`; replace it with the installed dual-entry MCP image and rewrite `qwen/mcp.json`. Total: **10 files / 2,688 lines**. | ACP becomes lane-wrapper-owned; event-file identity and old peer launcher state die, while a thin peer exec plan and product-spawned MCP entry replace them. |
+| Deletion inventory | Delete all `internal/products/qwen` (4 files / 1,031 lines), `internal/launcher/{qwen_peer.go,qwen_peer_test.go,qwen_test_helpers_test.go}` (3 / 1,412), `ff81565:cmd/agent-sessions/{qwen_peer.go,qwen_peer_test.go}` (2 / 234), and the obsolete 11-line `qwen/scripts/native-entry`; replace it with the installed dual-entry MCP image and rewrite `qwen/mcp.json`. Total: **10 files / 2,688 lines**. | ACP becomes lane-wrapper-owned; event-file identity and old peer launcher state die, while a thin peer exec plan and product-spawned MCP entry replace them. |
 
 ### 4.6 OpenCode and Kilo
 
@@ -1588,7 +1588,7 @@ optional local key, and launch token; canonical lane identity arrives later in
 | Worker entry | Token-selected `opencode-peer` or `kilo-peer` is only a boot shim for `<product> serve --hostname 127.0.0.1 --port 0`; the in-process JavaScript plugin links the native worker kit and owns the one daemon connection. Without a token the entry launches the interactive product and the same plugin runs peer mode. The shim remains only until upstream product boot checks the token directly. | The product SDK already owns session creation, prompt, events, abort, title, tools, and directory. Keeping the universal lifecycle in the plugin makes this the DSH-native shape rather than a Go HTTP adapter. |
 | Open and resume | After a v2 SDK capability probe and app-ready, create or fetch the exact product session, return its ID, apply the composed title and permission rules, and retain model/agent/variant defaults. Both products support all five open fields; ordered arguments allow only the documented `--agent` selector. | `opencodefamily/lane.go:69-187` proves the product primitives. The deployed pdev plugin/SDK is 1.2.10 while the CLI is 1.18.28, so the v2 probe must succeed before hello rather than trusting the CLI version. |
 | Run | Call `session.promptAsync`, follow the exact event stream, then fetch the matching assistant result. | `lane.go:168-337` and `client.go` contain the existing bounded HTTP/SSE primitive. |
-| Tools | The plugin's peer and worker modes use the same JS caller/worker kit and register the same product tool; there is no lane-local bridge endpoint. | The current plugins already own SDK tool registration in `integrations/{opencode,kilo}/agent-sessions.mjs`; the token changes hello mode, not transport shape. |
+| Tools | The plugin's peer and worker modes use the same JS caller/worker kit and register the same product tool; there is no lane-local bridge endpoint. | The current plugins already own SDK tool registration in `ff81565:integrations/{opencode,kilo}/agent-sessions.mjs`; the token changes hello mode, not transport shape. |
 | Deliver | Without a session-level append or active injection primitive, the plugin reports `queued_for_next_turn` using product-native pending input if available; otherwise this is the named upstream blocker and the worker cell cannot pass. | Starting `promptAsync` would create unrequested work, while the old Go driver's unsupported steer is not a native contract. The conformance probe, not adapter history, decides readiness. |
 | Interrupt and close | Interrupt calls the SDK abort endpoint and cancels event wait; close disposes the exact product session and lets the kit close the socket. | The plugin owns both session and connection, so no private server supervisor state enters the bus. |
 | Exception ledger | Section 1 code exceptions: **0** for both products. Declared unsupported open fields: **none**. Product lifecycle exceptions: **0** once the v2 SDK and delivery probes pass. | Dialect differences remain product SDK data; they never select a wire method or daemon branch. |
@@ -1616,7 +1616,7 @@ optional local key, and launch token; canonical lane identity arrives later in
 | Resident wrapper | `omp-peer` with a launch token owns the exact `omp --extension=<managed-plugin> --mode=rpc ...` JSONL child for product `omp`; resume is spelled `--resume=<id>`. Without a token, `omp-peer` launches interactive OMP, whose JavaScript plugin owns the direct peer connection through the JS kit. | `internal/products/pifamily/quirks.go` and `rpc_lane_test.go:388-437` prove the equals-style lane dialect; interactive OMP already supervises its plugin. |
 | Open and resume | Create or resume the exact OMP session, call `set_session_name` at fresh open so the product title equals the composed bus name, and apply mapped permissions. OMP supports all five typed open fields: cwd maps to `--cwd=`, model to `--model=`, and reasoning effort to `--thinking`. Its three documented extra arguments are `--tools`, `--exclude-tools`, and `--approval-mode`; conflicts with typed permission fail before spawn. | OMP product help exposes the typed flags, while its ready/RPC surface proves the title call. The default permission path fails closed when RPC approval mediation is unavailable; bypass maps explicitly to the product's noninteractive mode. |
 | Run | Send RPC `prompt`, accept OMP's declared terminal event, and read final assistant text through the family implementation. | `pifamily/rpc.go` contains the closed event decoder; OMP selects the terminal quirk rather than a second lifecycle. |
-| Tools | The retained OMP entrypoint loads the Pi-family plugin in peer/direct or lane/local mode and registers the same caller tool. | `integrations/omp/agent-sessions.mjs` is already a three-line family entrypoint; the shared plugin owns mode selection. |
+| Tools | The retained OMP entrypoint loads the Pi-family plugin in peer/direct or lane/local mode and registers the same caller tool. | `ff81565:integrations/omp/agent-sessions.mjs` is already a three-line family entrypoint; the shared plugin owns mode selection. |
 | Deliver | Running uses RPC `steer` and reports `injected`; lane-idle delivery uses the bounded wrapper FIFO. In peer mode, the product's native `nextTurn` queue retains the message and may report `queued_for_next_turn`. | OMP's native steer does its own framing (`pifamily/lane.go:301-326`); the interactive plugin's next-turn queue is product state, not wrapper or daemon state. |
 | Interrupt and close | RPC `abort` and exact process cleanup are identical to Pi. | No OMP-specific lifecycle callback is justified. |
 | Exception ledger | Section 1 code exceptions: **0**. Declared unsupported open fields: **none**. Wrapper-only state: the bounded idle-delivery FIFO. | OMP exposes every open value as a process flag; its dialect remains launch/result data only and never reaches the daemon or wire. |
@@ -1661,9 +1661,9 @@ against installed products is permitted only on `umka-dev1`.
 | Reference | Closed behavior |
 | --- | --- |
 | Reference worker | PATH-resolved `example-peer` starts with the one-use launch token in its environment and empty argv. Its hello declares all five open fields. Ordered `open.arguments` entries are `key=value`; `session_id=<id>` selects the returned product session ID and its absence makes the worker mint one. A plain turn input is echoed; `block` waits only for the run cancellation and returns `interrupted`; `call <method> <params-json>` performs that worker-originated session method and returns the response JSON; `fail <code>` returns that error. An idle delivery is `queued_for_next_turn` and prepended to the next input; a delivery during a run is `injected` and appended to the echoed result. The close callback returns immediately. The worker has no configuration, clock, or product import. |
-| Reference caller | `bus/cmd/agentbus-call [-name <name>] [-g a,b] [-socket <path>] <method> [<params-json>]` opens one peer connection, sends exactly one raw client-to-daemon request, prints its result or error object on stdout, and exits 0 for a result, 1 for an error, or 2 for usage. `turn.run` waits for its terminal; deliveries during the call are JSON lines on stderr and receive `injected`. Separate invocations supply a second peer or abandon a reply sink. The binary has no configuration file, stdin protocol, product condition, or local turn registry. |
+| Reference caller | `bus/cmd/sessionbus-call [-name <name>] [-g a,b] [-socket <path>] <method> [<params-json>]` opens one peer connection, sends exactly one raw client-to-daemon request, prints its result or error object on stdout, and exits 0 for a result, 1 for an error, or 2 for usage. `turn.run` waits for its terminal; deliveries during the call are JSON lines on stderr and receive `injected`. Separate invocations supply a second peer or abandon a reply sink. The binary has no configuration file, stdin protocol, product condition, or local turn registry. |
 | Worker invocation | The worker suite accepts only a product token and invokes that exact PATH binary with empty argv and a launch token in its environment; every vendor and `example-peer` run the identical trace. |
-| Caller invocation | The caller suite invokes the product's installed Agent Sessions tool, not a private test API; every product runs the identical trace against the reference worker. |
+| Caller invocation | The caller suite invokes the product's installed Sessionbus tool, not a private test API; every product runs the identical trace against the reference worker. |
 
 The caller/reference size contract is final logical lines:
 
@@ -1769,8 +1769,8 @@ check.
 | Visibility | The authoritative daemon filters by groups; the receiving daemon trusts that assertion and never persists a remote row. |
 | Messaging | One canonical remote message is forwarded once, produces one receipt, and is never retried or duplicated after federation reconnect. Bare input selects the caller's own host; qualified input is split only at the last `@`. |
 | Control and creation | The capped function forwards canonical remote resume/run/interrupt/close and explicit-host spawn/describe exactly one hop as `{from:{session_id:id@host,groups},request}`; the TLS connection identifies the origin and the JSON-RPC ID correlates it. The target applies ordinary visibility, caller loss removes only the reply sink, and transport loss returns `forward_lost` without retry. |
-| Federation authentication | `agentbus secret` produces 32 random bytes in base64; either side rejects a decoded secret shorter than 32 bytes. A correct host/secret pair federates; a wrong secret, unknown or reserved `local` name, duplicate host, or name/key mismatch fails the TLS handshake. Changing one side's secret disconnects that host until both configurations match; no separate expiry or revocation exists, and secret-bearing config is mode 0600. |
-| Optional local encryption | A keyed daemon rejects a keyless client; a keyed client fails truthfully against a plain daemon; matching keys connect; and a spawned lane receives and scrubs both `AGENTBUS_LAUNCH_TOKEN` and `AGENTBUS_LOCAL_KEY`. |
+| Federation authentication | `sessionbus secret` produces 32 random bytes in base64; either side rejects a decoded secret shorter than 32 bytes. A correct host/secret pair federates; a wrong secret, unknown or reserved `local` name, duplicate host, or name/key mismatch fails the TLS handshake. Changing one side's secret disconnects that host until both configurations match; no separate expiry or revocation exists, and secret-bearing config is mode 0600. |
+| Optional local encryption | A keyed daemon rejects a keyless client; a keyed client fails truthfully against a plain daemon; matching keys connect; and a spawned lane receives and scrubs both `SESSIONBUS_LAUNCH_TOKEN` and `SESSIONBUS_LOCAL_KEY`. |
 | Reconnect | A per-host snapshot replaces its predecessor atomically and is followed by ordered live updates. `maxPendingForwardedPerHost = 256` is the sole flow cap and the existing 1 MiB frame limit bounds snapshots; overflow disconnects that host. Disconnect removes its entire transient contribution and fails pending one-hop calls once as `forward_lost`; reconnect publishes a fresh snapshot and never replays a request. |
 | Refused federation machinery | The hub has no replay, durable rows, distributed locks, automatic placement, multi-hop routing, or capability negotiation that gates PATH launch. |
 

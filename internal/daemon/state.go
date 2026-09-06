@@ -12,9 +12,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/antst/agent-sessions/internal/pathidentity"
-	"github.com/antst/agent-sessions/internal/productcatalog"
-	"github.com/antst/agent-sessions/internal/statestore"
+	"github.com/antst/sessionbus/internal/pathidentity"
+	"github.com/antst/sessionbus/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/statestore"
 )
 
 // PrepareStateRoot keeps only an empty root or the current one-table state.

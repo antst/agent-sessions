@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/launcher"
+	"github.com/antst/sessionbus/internal/launcher"
 )
 
 const testQwenNativeSessionID = "12345678-1234-4234-8234-123456789abc"

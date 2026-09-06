@@ -3,7 +3,7 @@ package launcher
 import (
 	"testing"
 
-	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/productcatalog"
 )
 
 func TestLauncherProductProjectionCoversEveryDescriptor(t *testing.T) {

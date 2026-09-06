@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/antst/agent-sessions/internal/procinfo"
-	"github.com/antst/agent-sessions/internal/productcatalog"
+	"github.com/antst/sessionbus/internal/procinfo"
+	"github.com/antst/sessionbus/internal/productcatalog"
 )
 
 var (

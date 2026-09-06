@@ -8,10 +8,10 @@ import (
 	"os"
 	"sync"
 
-	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
+	sessionkit "github.com/antst/sessionbus/bus/sdk/go"
 )
 
-const LaneSocketEnv = "AGENTBUS_LANE_SOCKET"
+const LaneSocketEnv = "SESSIONBUS_LANE_SOCKET"
 
 type LaneBackend struct{ path string }
 
@@ -27,7 +27,7 @@ type laneFrame struct {
 func NewLaneBackend() (*LaneBackend, error) {
 	path := os.Getenv(LaneSocketEnv)
 	if path == "" {
-		return nil, errors.New("AGENTBUS_LANE_SOCKET is required")
+		return nil, errors.New("SESSIONBUS_LANE_SOCKET is required")
 	}
 	return &LaneBackend{path: path}, nil
 }

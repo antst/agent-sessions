@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	daemonpkg "github.com/antst/agent-sessions/internal/daemon"
-	"github.com/antst/agent-sessions/internal/productcatalog"
+	daemonpkg "github.com/antst/sessionbus/internal/daemon"
+	"github.com/antst/sessionbus/internal/productcatalog"
 )
 
 // HookAttestation is exact non-model evidence for one native lifecycle event.

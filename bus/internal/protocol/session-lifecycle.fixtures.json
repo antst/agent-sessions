@@ -17,5 +17,6 @@
     {"name":"shutdown", "calls":[1,0,0,0,0,0]},
     {"name":"run-done-write-failure", "calls":[1,1,1,0,0,1]},
     {"name":"close-error", "calls":[1,1,0,0,0,1]},
-    {"name":"interrupt-error", "calls":[1,1,1,1,0,0]}
+    {"name":"interrupt-error", "calls":[1,1,1,1,0,0]},
+    {"name":"close-forget", "calls":[1,1,1,1,0,1]}
 ]

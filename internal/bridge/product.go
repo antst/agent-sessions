@@ -1,6 +1,6 @@
 package bridge
 
-import "github.com/antst/agent-sessions/internal/productcatalog"
+import "github.com/antst/sessionbus/internal/productcatalog"
 
 type bridgeProduct struct {
 	descriptor productcatalog.Descriptor

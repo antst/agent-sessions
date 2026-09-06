@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/antst/agent-sessions/internal/products/dsh"
+	"github.com/antst/sessionbus/internal/products/dsh"
 )
 
 type coordinatorDSHPresence struct{ coordinator *hostCoordinator }

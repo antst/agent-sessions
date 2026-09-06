@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"net"
 
-	"github.com/antst/agent-sessions/bus/internal/rpc"
-	"github.com/antst/agent-sessions/bus/internal/stateroot"
+	"github.com/antst/sessionbus/bus/internal/rpc"
+	"github.com/antst/sessionbus/bus/internal/stateroot"
 )
 
 // Client is a framed connection without a session hello.
