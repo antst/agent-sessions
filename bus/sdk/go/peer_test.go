@@ -208,6 +208,45 @@ func TestPeerReplaceSettlesOldRunAndReconnectsAsNewIdentity(t *testing.T) {
 	await(t, peer.Closed(), "peer closed")
 }
 
+func TestPeerDeliveryKeepsAdmissionIdentityAcrossReplace(t *testing.T) {
+	requests, server, client := peerPipe(t)
+	connections := make(chan net.Conn, 1)
+	connections <- client
+	usePeerDialer(t, func(string, string) (net.Conn, error) { return <-connections, nil })
+	admitted := make(chan PeerIdentity, 1)
+	peer, err := ConnectPeer(Identity{Product: "fixture-client", SessionID: "old", Name: "old", Groups: []string{"old"}, Info: map[string]any{}}, func(ctx context.Context, identity PeerIdentity, _ DeliveryRequest) (DeliveryReceipt, error) {
+		admitted <- identity
+		<-ctx.Done()
+		return DeliveryReceipt{Disposition: "rejected", Reason: "closing"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := <-requests
+	mustRPC(t, server.Result(hello, struct{}{}))
+	await(t, peer.Ready(), "peer ready")
+	delivered := make(chan DeliveryReceipt, 1)
+	go func() {
+		var receipt DeliveryReceipt
+		_ = server.Call(context.Background(), "message.deliver", DeliveryRequest{MessageID: "message", From: DeliverySource{SessionID: "sender@local", Name: "sender@local", Product: "fixture", Groups: []string{}}, Body: "body"}, &receipt)
+		delivered <- receipt
+	}()
+	identity := <-admitted
+	replaced := make(chan error, 1)
+	go func() {
+		replaced <- peer.Replace(context.Background(), Identity{Product: "fixture-client", SessionID: "new", Name: "new", Groups: []string{"new"}, Info: map[string]any{}})
+	}()
+	replacement := <-requests
+	receipt := <-delivered
+	if identity.SessionID != "old" || receipt.Reason != "closing" {
+		t.Fatalf("delivery identity/receipt = %q/%#v", identity.SessionID, receipt)
+	}
+	mustRPC(t, server.Result(replacement, struct{}{}))
+	mustRPC(t, <-replaced)
+	peer.Shutdown()
+	await(t, peer.Closed(), "peer closed")
+}
+
 type pauseNthWriteConn struct {
 	net.Conn
 	at, writes       int
@@ -346,7 +385,7 @@ func startPeer(t *testing.T, socket, id string) *Peer {
 	return peer
 }
 
-func acceptDelivery(context.Context, DeliveryRequest) (DeliveryReceipt, error) {
+func acceptDelivery(context.Context, PeerIdentity, DeliveryRequest) (DeliveryReceipt, error) {
 	return DeliveryReceipt{Disposition: "injected"}, nil
 }
 
