@@ -29,6 +29,17 @@ type preparedBackend struct {
 	caller   *sessionkit.Caller
 }
 
+type actionBackend struct {
+	action    string
+	arguments string
+}
+
+func (*actionBackend) Prepare(context.Context, json.RawMessage) error { return nil }
+func (b *actionBackend) Action(_ context.Context, action string, arguments json.RawMessage) (json.RawMessage, error) {
+	b.action, b.arguments = action, string(arguments)
+	return json.RawMessage(`{"message_id":"message","deliveries":[]}`), nil
+}
+
 func (b *preparedBackend) Caller() *sessionkit.Caller { return b.caller }
 func (b *preparedBackend) Prepare(_ context.Context, meta json.RawMessage) error {
 	b.prepared++
@@ -133,6 +144,14 @@ func TestServerUsesBackendCallerAfterPrepare(t *testing.T) {
 	response, _ = serveOne(server, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"wait","arguments":{"turn_id":"t-1"}}}}`)
 	encoded, _ = json.Marshal(response)
 	check(t, strings.Contains(string(encoded), `\"state\":\"done\"`) && strings.Contains(string(encoded), `\"result\":\"done\"`) && reflect.DeepEqual(backend.meta, []string{`{"threadId":"native"}`, "", ""}), "wait = %s, meta = %#v", encoded, backend.meta)
+}
+
+func TestServerUsesStatelessActionBackend(t *testing.T) {
+	backend := &actionBackend{}
+	response, err := serveOne(&Server{Backend: backend}, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"send","arguments":{"target":"peer","message":"hello"}}}}`)
+	check(t, err == nil, "serve: %v", err)
+	result := response["result"].(map[string]any)
+	check(t, backend.action == "send" && backend.arguments == `{"target":"peer","message":"hello"}` && result["structuredContent"].(map[string]any)["message_id"] == "message", "action/result = %#v / %#v", backend, result)
 }
 
 func TestServerReturnsOutputFailure(t *testing.T) {
