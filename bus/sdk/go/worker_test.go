@@ -222,6 +222,7 @@ func runCase(t *testing.T, name string) [6]int32 {
 		if name == "eof-during-run" {
 			p.closeErr = errors.New("first failure\nsecond failure")
 			p.closeContext = make(chan error, 1)
+			p.closeRequest = make(chan SessionCloseRequest, 1)
 		}
 		h := startHarness(t, p, true, true)
 		p.started = make(chan *Run)
@@ -233,6 +234,7 @@ func runCase(t *testing.T, name string) [6]int32 {
 		<-runToken.Done()
 		if name == "eof-during-run" {
 			check(t, <-p.closeContext != nil, "EOF left the product Close context live")
+			check(t, <-p.closeRequest == (SessionCloseRequest{}), "pure EOF carried a close request")
 		}
 	case "peer-lifetime":
 		h := startHarness(t, p, true, false)
@@ -271,16 +273,26 @@ func runCase(t *testing.T, name string) [6]int32 {
 	case "close-error":
 		p.closeErr = errors.New("first failure\nsecond failure")
 		p.closeContext = make(chan error, 1)
+		p.closeRequest = make(chan SessionCloseRequest, 1)
 		h := startHarness(t, p, true, true)
 		check(t, h.Call(context.Background(), "session.close", target, &struct{}{}) == nil, "close error reached the wire")
 		check(t, <-p.closeContext == nil, "session.close cancelled the product Close context")
+		check(t, <-p.closeRequest == (SessionCloseRequest{SessionID: target.SessionID}), "ordinary close request changed")
 	case "close-forget":
+		p.started, p.release, p.interrupted = make(chan *Run), make(chan struct{}), make(chan struct{})
 		p.closeContext, p.closeRequest = make(chan error, 1), make(chan SessionCloseRequest, 1)
 		h := startHarness(t, p, true, true)
+		running := async(h, "turn.run", protocol.TurnRunRequest{SessionID: target.SessionID, Input: "block"}, &TurnResult{})
+		<-p.started
 		request := SessionCloseRequest{SessionID: target.SessionID, Forget: true}
-		check(t, h.Call(context.Background(), "session.close", request, &struct{}{}) == nil, "forget close failed")
-		check(t, <-p.closeContext == nil, "forget close cancelled the product Close context")
+		closing := async(h, "session.close", request, &struct{}{})
+		<-p.interrupted
+		_ = h.Close()
+		check(t, <-p.closeContext != nil, "EOF left crossed product Close context live")
 		check(t, <-p.closeRequest == request, "product Close request changed")
+		close(p.release)
+		<-p.worker.Closed()
+		check(t, <-running != nil && <-closing != nil, "crossed calls survived EOF")
 	default:
 		t.Fatalf("unknown lifecycle case %q", name)
 	}

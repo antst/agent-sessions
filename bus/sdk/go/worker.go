@@ -37,17 +37,18 @@ func (r *Run) Interrupted() bool     { return r.interrupted.Load() }
 func (r *Run) Done() <-chan struct{} { return r.done }
 
 type Worker struct {
-	product WorkerCallbacks
-	caller  *Caller
-	dial    func(context.Context, string, string) (net.Conn, error)
-	mu      sync.Mutex
-	conn    *rpc.Conn
-	context context.Context
-	cancel  context.CancelFunc
-	run     *Run
-	opened  atomic.Bool
-	once    sync.Once
-	closed  chan struct{}
+	product      WorkerCallbacks
+	caller       *Caller
+	dial         func(context.Context, string, string) (net.Conn, error)
+	mu           sync.Mutex
+	conn         *rpc.Conn
+	context      context.Context
+	cancel       context.CancelFunc
+	run          *Run
+	closeRequest SessionCloseRequest
+	opened       atomic.Bool
+	once         sync.Once
+	closed       chan struct{}
 }
 
 func NewWorker(product WorkerCallbacks) *Worker {
@@ -89,7 +90,7 @@ func (w *Worker) Serve(ctx context.Context) error {
 		w.run.finish()
 	}
 	w.mu.Unlock()
-	w.closeProduct(w.conn.Context(), SessionCloseRequest{})
+	w.closeProduct(w.conn.Context())
 	return err
 }
 
@@ -153,6 +154,7 @@ func (w *Worker) handle(ctx context.Context, request *rpc.Request) {
 		}
 		w.run = &Run{}
 		w.run.interrupted.Store(true)
+		w.closeRequest = *request.Params.(*SessionCloseRequest)
 		interrupt := slot != nil && slot.context.Err() == nil && slot.interrupted.CompareAndSwap(false, true)
 		w.mu.Unlock()
 		go w.close(ctx, request, slot, interrupt)
@@ -217,7 +219,7 @@ func (w *Worker) close(ctx context.Context, request *rpc.Request, slot *Run, int
 		<-slot.done
 	}
 	w.cancel()
-	w.closeProduct(ctx, *request.Params.(*SessionCloseRequest))
+	w.closeProduct(ctx)
 	w.reply(w.conn.Result(request, struct{}{}))
 	_ = w.conn.Close()
 }
@@ -237,8 +239,11 @@ func (w *Worker) answer(request *rpc.Request, value any, code int) {
 	}
 }
 
-func (w *Worker) closeProduct(ctx context.Context, request SessionCloseRequest) {
+func (w *Worker) closeProduct(ctx context.Context) {
 	w.once.Do(func() {
+		w.mu.Lock()
+		request := w.closeRequest
+		w.mu.Unlock()
 		if w.opened.Load() {
 			callbackError("close", w.product.Close(ctx, request))
 		}
