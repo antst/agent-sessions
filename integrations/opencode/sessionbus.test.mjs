@@ -57,6 +57,15 @@ test("lane plugin is presence-inert and sends one stateless action", async () =>
   assert.deepEqual(calls[0].slice(0, 3), ["/tmp/lane.sock", "list", {}]);
 });
 
+test("plugin stays discovery-safe without a Sessionbus connection environment", async () => {
+  const module = await load(), records = { peers: [], actions: [], prompts: [] };
+  const plugin = module.createPlugin({ tool: fakeTool, createClient: () => ({ v2: v2(records) }), connectPeer: peerFactory(records), onExit() {} });
+  const hooks = await plugin({ client: {}, directory: "/work", serverUrl: new URL("http://127.0.0.1"), environment: {} });
+  await hooks.event({ event: { type: "session.created", properties: { info: { id: "ses_exact", title: "Native", directory: "/work" } } } });
+  assert.equal(records.peers.length, 0);
+  await assert.rejects(hooks.tool.sessionbus.execute({ action: "list", arguments: {} }, context), /no live OpenCode peer/u);
+});
+
 test("unknown update publishes a peer, retitles it, and deletion retires it", async () => {
   const module = await load(), records = { peers: [], actions: [], prompts: [] };
   const plugin = module.createPlugin({ tool: fakeTool, createClient: () => ({ v2: v2(records) }), connectPeer: peerFactory(records), onExit() {} });

@@ -140,7 +140,7 @@ export function createPlugin(dependencies = {}) {
       }
       const current = sessions.get(id);
       if (!current) {
-        if (!laneSocket) sessions.set(id, { identity, peer: makePeer(identity, deliver, connectionEnvironment(saved)) });
+        if (!laneSocket && saved.SESSIONBUS_SOCKET) sessions.set(id, { identity, peer: makePeer(identity, deliver, connectionEnvironment(saved)) });
       } else if (current.identity.name !== name || current.identity.info.cwd !== identity.info.cwd) {
         await current.peer.rehello(undefined, name, identity.info);
         current.identity = identity;

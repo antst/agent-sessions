@@ -4,6 +4,18 @@ Install this package in exactly one supported OpenCode plugin location. The
 same plugin serves lane and peer mode: a lane uses the wrapper's private socket,
 while an interactive session publishes one peer from native lifecycle events.
 
+`sessionbus-opencode-install` transactionally adds the exact package specifier
+to the `plugin` array in the user OpenCode config. During development, pass a
+product-verified local or tarball specifier:
+
+```sh
+sessionbus-opencode-install --specifier file:/absolute/path/to/integrations/opencode
+```
+
+Run `sessionbus-opencode-install --remove` to remove the managed entry. Other
+config keys and plugin entries are retained. OpenCode resolves the configured
+package; the installer does not copy plugin source into its config directory.
+
 The plugin registers the `sessionbus` tool and uses OpenCode's v2 session API
 for native delivery. OpenCode must run without `--pure`, which disables external
 plugins.
