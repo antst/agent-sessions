@@ -38,14 +38,14 @@ func (t *fakeTurn) Interrupt(context.Context) error {
 func TestHandoffDeliveryAndQueueCommit(t *testing.T) {
 	h := &Handoff{}
 	var injected string
-	receipt, err := h.Deliver(context.Background(), delivery("active"), func(_ context.Context, message string) (bool, error) { injected = message; return true, nil })
+	receipt, err := h.Deliver(context.Background(), delivery("active"), func(_ context.Context, message string) (Injection, error) { injected = message; return Injected, nil })
 	must(t, err)
 	check(t, receipt.Disposition == "injected" && strings.Contains(injected, "active"), "active receipt = %#v", receipt)
-	check(t, len(h.Claim()) == 1, "active delivery was not claimed")
+	check(t, len(h.Claim()) == 0, "claimed injection stayed pending")
 	started, release := make(chan struct{}), make(chan struct{})
 	delivered := make(chan sessionkit.DeliveryReceipt, 1)
 	go func() {
-		receipt, _ := h.Deliver(context.Background(), delivery("racing"), func(context.Context, string) (bool, error) { close(started); <-release; return false, nil })
+		receipt, _ := h.Deliver(context.Background(), delivery("racing"), func(context.Context, string) (Injection, error) { close(started); <-release; return NotInjected, nil })
 		delivered <- receipt
 	}()
 	<-started
@@ -92,10 +92,10 @@ func TestHandoffClaimAndFinish(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
 	done := make(chan sessionkit.DeliveryReceipt, 1)
 	go func() {
-		receipt, _ := h.Deliver(context.Background(), delivery("active"), func(context.Context, string) (bool, error) {
+		receipt, _ := h.Deliver(context.Background(), delivery("active"), func(context.Context, string) (Injection, error) {
 			close(started)
 			<-release
-			return true, nil
+			return Pending, nil
 		})
 		done <- receipt
 	}()
@@ -106,14 +106,27 @@ func TestHandoffClaimAndFinish(t *testing.T) {
 	claimed := h.Claim()
 	check(t, len(claimed) == 1 && strings.Contains(string(claimed[0]), "active") && len(h.Claim()) == 0, "claim = %#v", claimed)
 
-	_, _ = h.Deliver(context.Background(), delivery("unclaimed"), func(context.Context, string) (bool, error) { return true, nil })
+	_, _ = h.Deliver(context.Background(), delivery("unclaimed"), func(context.Context, string) (Injection, error) { return Pending, nil })
 	_, _ = h.Deliver(context.Background(), delivery("idle"), nil)
 	h.Finish()
+	crossed, finish := make(chan struct{}), make(chan struct{})
+	go func() {
+		receipt, _ := h.Deliver(context.Background(), delivery("crossed"), func(context.Context, string) (Injection, error) {
+			close(crossed)
+			<-finish
+			return Injected, nil
+		})
+		done <- receipt
+	}()
+	<-crossed
+	h.Finish()
+	close(finish)
+	check(t, (<-done).Disposition == "queued_for_next_turn", "crossed injection was acknowledged")
 	next, prompt := newFakeTurn(), ""
 	close(next.done)
 	_, err := h.Run(context.Background(), &sessionkit.Run{}, "", func(_ context.Context, got string) (Turn, error) { prompt = got; return next, nil })
 	must(t, err)
-	check(t, strings.Count(prompt, "unclaimed") == 1 && strings.Count(prompt, "idle") == 1 && strings.Index(prompt, "unclaimed") < strings.Index(prompt, "idle"), "prompt = %q", prompt)
+	check(t, strings.Count(prompt, "unclaimed") == 1 && strings.Count(prompt, "idle") == 1 && strings.Count(prompt, "crossed") == 1 && strings.Index(prompt, "unclaimed") < strings.Index(prompt, "idle"), "prompt = %q", prompt)
 }
 
 type workerProduct struct {
