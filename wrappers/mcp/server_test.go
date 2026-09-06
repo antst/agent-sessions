@@ -23,11 +23,16 @@ type fakeBackend struct {
 type preparedBackend struct {
 	fakeBackend
 	prepared int
+	meta     []string
 	caller   *sessionkit.Caller
 }
 
-func (b *preparedBackend) Caller() *sessionkit.Caller    { return b.caller }
-func (b *preparedBackend) Prepare(context.Context) error { b.prepared++; return nil }
+func (b *preparedBackend) Caller() *sessionkit.Caller { return b.caller }
+func (b *preparedBackend) Prepare(_ context.Context, meta json.RawMessage) error {
+	b.prepared++
+	b.meta = append(b.meta, string(meta))
+	return nil
+}
 
 func (b *fakeBackend) Call(_ context.Context, method string, params any) (json.RawMessage, error) {
 	encoded, _ := json.Marshal(params)
@@ -115,7 +120,7 @@ func TestServerUsesBackendCallerAfterPrepare(t *testing.T) {
 		return json.RawMessage(`{"outcome":"completed","result":"done"}`), nil
 	})}
 	server := &Server{Backend: backend}
-	response, _ := serveOne(server, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"start","arguments":{"session_id":"lane@local","input":"work"}}}}`)
+	response, _ := serveOne(server, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_sessions","_meta":{"threadId":"native"},"arguments":{"action":"start","arguments":{"session_id":"lane@local","input":"work"}}}}`)
 	encoded, _ := json.Marshal(response)
 	check(t, strings.Contains(string(encoded), `\"turn_id\":\"t-1\"`), "start = %s", encoded)
 	<-started
@@ -125,7 +130,7 @@ func TestServerUsesBackendCallerAfterPrepare(t *testing.T) {
 	close(release)
 	response, _ = serveOne(server, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agent_sessions","arguments":{"action":"wait","arguments":{"turn_id":"t-1"}}}}`)
 	encoded, _ = json.Marshal(response)
-	check(t, strings.Contains(string(encoded), `\"state\":\"done\"`) && strings.Contains(string(encoded), `\"result\":\"done\"`) && backend.prepared == 3, "wait = %s, prepare = %d", encoded, backend.prepared)
+	check(t, strings.Contains(string(encoded), `\"state\":\"done\"`) && strings.Contains(string(encoded), `\"result\":\"done\"`) && reflect.DeepEqual(backend.meta, []string{`{"threadId":"native"}`, "", ""}), "wait = %s, meta = %#v", encoded, backend.meta)
 }
 
 func TestServerReturnsOutputFailure(t *testing.T) {

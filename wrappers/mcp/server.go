@@ -115,7 +115,8 @@ func (s *Server) call(ctx context.Context, caller *sessionkit.Caller, request re
 
 func (s *Server) callTool(ctx context.Context, caller *sessionkit.Caller, raw json.RawMessage) (any, *failure) {
 	var call struct {
-		Name      string `json:"name"`
+		Name      string          `json:"name"`
+		Meta      json.RawMessage `json:"_meta"`
 		Arguments struct {
 			Action    string          `json:"action"`
 			Arguments json.RawMessage `json:"arguments"`
@@ -130,8 +131,10 @@ func (s *Server) callTool(ctx context.Context, caller *sessionkit.Caller, raw js
 	} else if !object(arguments) {
 		return nil, &failure{Code: -32602, Message: "Invalid params"}
 	}
-	if backend, ok := s.Backend.(interface{ Prepare(context.Context) error }); ok {
-		if err := backend.Prepare(ctx); err != nil {
+	if backend, ok := s.Backend.(interface {
+		Prepare(context.Context, json.RawMessage) error
+	}); ok {
+		if err := backend.Prepare(ctx, call.Meta); err != nil {
 			return nil, errorFailure(err)
 		}
 	}
