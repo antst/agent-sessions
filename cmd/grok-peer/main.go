@@ -74,12 +74,17 @@ func run(ctx context.Context, arguments []string) error {
 }
 
 func runMCP(ctx context.Context) error {
-	if os.Getenv(mcp.LaneSocketEnv) == "" {
-		return errors.New("Grok peer identity is unavailable; start Grok with grok-peer")
+	if os.Getenv(mcp.LaneSocketEnv) != "" {
+		backend, err := mcp.NewLaneBackend()
+		if err != nil {
+			return err
+		}
+		return (&mcp.Server{Backend: backend}).Serve(ctx, os.Stdin, os.Stdout)
 	}
-	backend, err := mcp.NewLaneBackend()
+	backend, err := grok.NewPeerBackend(ctx, os.Environ())
 	if err != nil {
 		return err
 	}
+	defer backend.Shutdown()
 	return (&mcp.Server{Backend: backend}).Serve(ctx, os.Stdin, os.Stdout)
 }

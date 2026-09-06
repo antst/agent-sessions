@@ -45,7 +45,7 @@ func fakeGrok() {
 	index := slices.Index(os.Args, "--")
 	arguments := os.Args[index+1:]
 	cwd, _ := os.Getwd()
-	record("START", map[string]any{"pid": os.Getpid(), "arguments": arguments, "cwd": cwd, "laneSocket": os.Getenv("AGENTBUS_LANE_SOCKET")})
+	record("START", map[string]any{"pid": os.Getpid(), "arguments": arguments, "cwd": cwd, "laneSocket": os.Getenv("AGENTBUS_LANE_SOCKET"), "environment": map[string]string{host.SocketEnv: os.Getenv(host.SocketEnv), host.GroupsEnv: os.Getenv(host.GroupsEnv)}})
 	if path := os.Getenv("GROK_TEST_INTERACTIVE_STARTED"); path != "" && slices.Contains(arguments, "--leader") && !slices.Contains(arguments, "stdio") {
 		publishTestFile(path, []byte("started"))
 	}
@@ -125,7 +125,7 @@ func fakeGrok() {
 				reply(map[string]any{"jsonrpc": "2.0", "method": "_x.ai/sessions/changed", "params": map[string]any{}})
 				continue
 			}
-			titleIndex := rosterCalls - 2
+			titleIndex := rosterCalls - 1
 			if os.Getenv("GROK_TEST_ROSTER_DELAY") != "" {
 				titleIndex--
 			}
@@ -136,7 +136,7 @@ func fakeGrok() {
 			if ids := strings.Split(os.Getenv("GROK_TEST_SESSION_IDS"), ","); len(ids) > 0 && ids[0] != "" {
 				session = ids[min(rosterCalls-1, len(ids)-1)]
 			}
-			reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"result": map[string]any{"sessions": []map[string]any{{"sessionId": session, "title": title, "cwd": os.TempDir(), "activity": "working", "resident": true, "yolo": true}}}}})
+			reply(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"result": map[string]any{"sessions": []map[string]any{{"sessionId": session, "title": title, "cwd": first(os.Getenv("GROK_TEST_CWD"), os.TempDir()), "activity": first(os.Getenv("GROK_TEST_ACTIVITY"), "working"), "resident": true, "yolo": true}}}}})
 			if path := os.Getenv("GROK_TEST_ROSTER_CHANGE"); path != "" && rosterCalls == 1 {
 				go func() {
 					<-fileReady(path)

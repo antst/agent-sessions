@@ -13,11 +13,9 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	sessionkit "github.com/antst/agent-sessions/bus/sdk/go"
 	"github.com/antst/agent-sessions/wrappers/host"
-	"github.com/antst/agent-sessions/wrappers/mcp"
 )
 
 type peerSession struct {
@@ -32,16 +30,17 @@ type peerSession struct {
 var errNoLeader = errors.New("no_leader")
 var errRosterActorGone = errors.New("Grok roster actor is not live")
 
+const grokSessionIDEnv = "GROK_SESSION_ID"
+const grokLeaderSocketEnv = "GROK_LEADER_SOCKET"
+
 type PeerBackend struct {
-	mu          sync.Mutex
-	peer        *sessionkit.Peer
-	hold        *acpClient
-	holdProcess *nativeProcess
-	observer    *acpClient
-	process     *nativeProcess
-	leader      *nativeProcess
-	identity    sessionkit.PeerIdentity
-	failed      chan error
+	mu       sync.Mutex
+	peer     *sessionkit.Peer
+	observer *acpClient
+	process  *nativeProcess
+	identity sessionkit.PeerIdentity
+	leader   string
+	cwd      string
 }
 
 func startPeerClient(ctx context.Context, leaderPath, cwd string, notify func(acpFrame)) (*acpClient, *nativeProcess, error) {
@@ -50,81 +49,39 @@ func startPeerClient(ctx context.Context, leaderPath, cwd string, notify func(ac
 	return startObserverClient(ctx, cmd, notify)
 }
 
-func startPeerObserver(ctx context.Context, leaderPath, cwd string) (*acpClient, *nativeProcess, <-chan struct{}, error) {
-	changed := make(chan struct{}, 1)
-	observer, process, err := startPeerClient(ctx, leaderPath, cwd, func(frame acpFrame) {
-		if frame.Method == "_x.ai/sessions/changed" {
-			select {
-			case changed <- struct{}{}:
-			default:
-			}
-		}
-	})
+func NewPeerBackend(ctx context.Context, environment []string) (*PeerBackend, error) {
+	id := environmentValue(environment, grokSessionIDEnv)
+	leader := environmentValue(environment, grokLeaderSocketEnv)
+	if id == "" || leader == "" {
+		return nil, errors.New("Grok peer identity is unavailable; start Grok with grok-peer")
+	}
+	groups := []string{}
+	if raw := environmentValue(environment, host.GroupsEnv); raw != "" && json.Unmarshal([]byte(raw), &groups) != nil {
+		return nil, errors.New("AGENTBUS_GROUPS must be a JSON array")
+	}
+	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	return observer, process, changed, nil
-}
-
-func connectPeerBackend(ctx context.Context, identity sessionkit.PeerIdentity, hold *acpClient, holdProcess *nativeProcess, observer *acpClient, process, leader *nativeProcess, changed <-chan struct{}) (*PeerBackend, error) {
-	id := identity.SessionID
-	var err error
-	if identity.Groups == nil {
-		identity.Groups = []string{}
-	}
-	stop := func(err error) (*PeerBackend, error) {
-		stopPeerClient(observer, process)
-		stopPeerClient(hold, holdProcess)
-		return nil, errors.Join(err, closeNative("leader", leader))
-	}
-	b := &PeerBackend{hold: hold, holdProcess: holdProcess, observer: observer, process: process, leader: leader, failed: make(chan error, 1)}
-	wanted := identity.Name
-	var row peerSession
-	for {
-		row, err = roster(ctx, observer, id)
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, errNoLeader) {
-			return stop(err)
-		}
-		select {
-		case <-changed:
-		case <-ctx.Done():
-			return stop(ctx.Err())
-		}
-	}
-	if wanted != "" && wanted != id && wanted != row.Title {
-		var renamed struct {
-			Success bool `json:"success"`
-		}
-		if err = observer.request(ctx, "_x.ai/session/rename", map[string]string{"sessionId": id, "title": wanted}, &renamed); err != nil || !renamed.Success {
-			return stop(errors.New("Grok peer title is unavailable"))
-		}
-		if row, err = roster(ctx, observer, id); err != nil || row.Title != wanted {
-			return stop(errors.New("Grok peer title was not confirmed"))
-		}
-	}
-	b.identity = sessionkit.PeerIdentity{Product: "grok", SessionID: id, Name: first(row.Title, wanted, id), Groups: identity.Groups, Info: map[string]any{"cwd": row.Cwd}}
+	b := &PeerBackend{identity: sessionkit.PeerIdentity{Product: "grok", SessionID: id, Name: id, Groups: groups, Info: map[string]any{"cwd": cwd}}, leader: leader, cwd: cwd}
 	peer, err := sessionkit.ConnectPeer(b.identity, b.deliver)
 	if err != nil {
-		return stop(err)
+		return nil, err
 	}
 	b.peer = peer
 	select {
 	case <-peer.Ready():
+		return b, nil
 	case <-peer.Closed():
 		err = peer.Err()
 		if err == nil {
 			err = errors.New("Agentbus peer closed before ready")
 		}
-		return stop(err)
 	case <-ctx.Done():
-		peer.Shutdown()
-		return stop(ctx.Err())
+		err = ctx.Err()
 	}
-	go b.watchRoster(ctx, observer, changed)
-	return b, nil
+	b.Shutdown()
+	return nil, err
 }
 
 func RunInteractive(ctx context.Context, plan host.ExecPlan) error {
@@ -144,45 +101,24 @@ func RunInteractive(ctx context.Context, plan host.ExecPlan) error {
 	if err != nil {
 		return err
 	}
-	artifact, artifactExisted, artifactBefore, err := sessionArtifact(plan.Env, cwd, identity.SessionID)
-	if err != nil {
-		return err
-	}
-	endpoint, err := host.ListenPrivate(socket, key)
-	if err != nil {
-		return err
-	}
 	leaderPath := leaderSocket(socket, key)
 	defer os.Remove(leaderPath)
 	defer os.Remove(strings.TrimSuffix(leaderPath, ".sock") + ".lock")
-	leader, err := startLeader(socket, key, cwd, interactivePermission(plan.Args), setEnvironment(nativeEnvironment(), mcp.LaneSocketEnv, endpoint.Path))
+	leader, err := startLeader(socket, key, cwd, interactivePermission(plan.Args), peerNativeEnvironment(plan.Env))
 	if err != nil {
-		_ = endpoint.Close()
 		return err
 	}
 	childCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	hold, holdProcess, err := startPeerClient(childCtx, leaderPath, cwd, nil)
 	if err != nil {
-		_ = endpoint.Close()
 		return errors.Join(err, closeNative("leader", leader))
 	}
-	bootstrapCtx, cancelBootstrap := context.WithCancel(childCtx)
-	defer cancelBootstrap()
-	go func() {
-		select {
-		case <-hold.done:
-			cancelBootstrap()
-		case <-bootstrapCtx.Done():
-		}
-	}()
-	plan.Env = setEnvironment(plan.Env, mcp.LaneSocketEnv, endpoint.Path)
 	plan.Args = insertBeforeSeparator(plan.Args, "--leader-socket", leaderPath)
 	child := command(plan.Path, plan.Args...)
 	child.Env, child.Stdin, child.Stdout, child.Stderr = plan.Env, os.Stdin, os.Stdout, os.Stderr
 	if err = child.Start(); err != nil {
 		stopPeerClient(hold, holdProcess)
-		_ = endpoint.Close()
 		return errors.Join(err, closeNative("leader", leader))
 	}
 	childDone := make(chan error, 1)
@@ -191,97 +127,29 @@ func RunInteractive(ctx context.Context, plan host.ExecPlan) error {
 		close(childDone)
 		cancel()
 	}()
-	stopUnready := func(childErr error) error {
+	finish := func(childErr error) error {
 		stopPeerClient(hold, holdProcess)
-		_ = endpoint.Close()
 		return errors.Join(childErr, closeNative("leader", leader))
 	}
-	tick := time.NewTicker(grokReadyInterval)
-	for {
-		ready, statErr := sessionArtifactReady(artifact, artifactExisted, artifactBefore)
-		if statErr != nil {
-			tick.Stop()
-			childErr := finishInteractiveChild(child, childDone, syscall.SIGTERM)
-			return stopUnready(errors.Join(fmt.Errorf("watch Grok session artifact: %w", statErr), childErr))
-		}
-		if ready {
-			tick.Stop()
-			break
-		}
-		select {
-		case childErr := <-childDone:
-			tick.Stop()
-			if childErr == nil {
-				childErr = errors.New("exit status 0")
-			}
-			return stopUnready(fmt.Errorf("Grok TUI exited before its session appeared: %w", childErr))
-		case <-ctx.Done():
-			tick.Stop()
-			return stopUnready(finishInteractiveChild(child, childDone, interactiveSignal(ctx)))
-		case <-hold.done:
-			tick.Stop()
-			childErr := finishInteractiveChild(child, childDone, syscall.SIGTERM)
-			return stopUnready(errors.Join(fmt.Errorf("Grok startup hold closed: %w", hold.err), childErr))
-		case <-tick.C:
-		}
-	}
-	observer, observerProcess, changed, err := startPeerObserver(bootstrapCtx, leaderPath, cwd)
-	if err != nil {
-		if errors.Is(err, context.Canceled) && childCtx.Err() == nil {
-			err = fmt.Errorf("Grok startup hold closed: %w", hold.err)
-		}
-		childErr := finishInteractiveChild(child, childDone, syscall.SIGTERM)
-		return stopUnready(errors.Join(err, childErr))
-	}
-	backend, err := connectPeerBackend(bootstrapCtx, identity, hold, holdProcess, observer, observerProcess, leader, changed)
-	if err != nil {
-		if errors.Is(err, context.Canceled) && childCtx.Err() == nil {
-			err = fmt.Errorf("Grok startup hold closed: %w", hold.err)
-		}
-		select {
-		case childErr := <-childDone:
-			_ = endpoint.Close()
-			return childErr
-		default:
-		}
-		_ = endpoint.Close()
-		if ctx.Err() != nil {
-			return finishInteractiveChild(child, childDone, interactiveSignal(ctx))
-		}
-		_ = finishInteractiveChild(child, childDone, syscall.SIGTERM)
-		return err
-	}
-	serveDone := make(chan error, 1)
-	go func() { serveDone <- mcp.ServeLane(childCtx, endpoint, backend) }()
-	peer, hold, observer := backend.peer, backend.hold, backend.observer
-	var childErr, dependencyErr error
-	var stop os.Signal
 	select {
-	case childErr = <-childDone:
+	case childErr := <-childDone:
+		return finish(childErr)
 	case <-ctx.Done():
-		stop = interactiveSignal(ctx)
-	case <-peer.Closed():
-		dependencyErr, stop = peer.Err(), syscall.SIGTERM
-		if dependencyErr == nil {
-			dependencyErr = errors.New("Agentbus peer closed")
-		}
-	case <-observer.done:
-		dependencyErr, stop = fmt.Errorf("Grok observer closed: %w", observer.err), syscall.SIGTERM
+		return finish(finishInteractiveChild(child, childDone, interactiveSignal(ctx)))
 	case <-hold.done:
-		dependencyErr, stop = fmt.Errorf("Grok startup hold closed: %w", hold.err), syscall.SIGTERM
-	case dependencyErr = <-backend.failed:
-		stop = syscall.SIGTERM
+		childErr := finishInteractiveChild(child, childDone, syscall.SIGTERM)
+		return finish(errors.Join(fmt.Errorf("Grok startup hold closed: %w", hold.err), childErr))
 	}
-	if stop != nil {
-		childErr = finishInteractiveChild(child, childDone, stop)
+}
+
+func peerNativeEnvironment(environment []string) []string {
+	result := nativeEnvironment()
+	for _, name := range []string{host.SocketEnv, host.GroupsEnv} {
+		if value := environmentValue(environment, name); value != "" {
+			result = setEnvironment(result, name, value)
+		}
 	}
-	backend.Shutdown()
-	_ = endpoint.Close()
-	<-serveDone
-	if dependencyErr != nil {
-		return dependencyErr
-	}
-	return childErr
+	return result
 }
 
 func finishInteractiveChild(child *exec.Cmd, done <-chan error, stop os.Signal) error {
@@ -348,64 +216,31 @@ func (b *PeerBackend) Caller() *sessionkit.Caller {
 	return b.peer.Caller
 }
 
-func (b *PeerBackend) Prepare(ctx context.Context, _ json.RawMessage) error {
-	return b.prepare(ctx)
-}
-
-func (b *PeerBackend) prepare(ctx context.Context) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	id, old, observer, peer := b.identity.SessionID, b.identity, b.observer, b.peer
-	rows, err := rosterRows(ctx, observer)
-	if err != nil {
-		return err
-	}
-	row, err := observedRoster(rows, id)
-	if err != nil {
-		return err
-	}
-	name := first(row.Title, row.SessionID)
-	info := map[string]any{"cwd": row.Cwd}
-	if row.SessionID == id && name == old.Name && row.Cwd == old.Info["cwd"] {
-		return nil
-	}
-	next := sessionkit.PeerIdentity{Product: "grok", SessionID: row.SessionID, Name: name, Groups: old.Groups, Info: info}
-	if row.SessionID != id {
-		err = peer.Replace(ctx, next)
-	} else {
-		err = peer.Rehello(name, info)
-	}
-	if err != nil {
-		return err
-	}
-	b.identity = next
-	return nil
-}
-
-func (b *PeerBackend) watchRoster(ctx context.Context, observer *acpClient, changed <-chan struct{}) {
-	for {
-		select {
-		case <-changed:
-			if err := b.prepare(ctx); err != nil {
-				select {
-				case b.failed <- err:
-				default:
-				}
-				return
-			}
-		case <-observer.done:
-			return
-		case <-ctx.Done():
-			return
-		}
-	}
-}
+func (*PeerBackend) Prepare(context.Context, json.RawMessage) error { return nil }
 
 func (b *PeerBackend) deliver(ctx context.Context, identity sessionkit.PeerIdentity, request sessionkit.DeliveryRequest) (sessionkit.DeliveryReceipt, error) {
 	b.mu.Lock()
-	observer := b.observer
-	b.mu.Unlock()
+	if b.observer == nil {
+		observer, process, err := startPeerClient(ctx, b.leader, b.cwd, nil)
+		if err != nil {
+			b.mu.Unlock()
+			return sessionkit.DeliveryReceipt{}, fmt.Errorf("start Grok observer: %w", err)
+		}
+		b.observer, b.process = observer, process
+	}
+	observer, peer := b.observer, b.peer
 	row, err := roster(ctx, observer, identity.SessionID)
+	if err == nil {
+		name := first(row.Title, row.SessionID)
+		info := map[string]any{"cwd": row.Cwd}
+		if name != b.identity.Name || row.Cwd != b.identity.Info["cwd"] {
+			err = peer.Rehello(name, info)
+			if err == nil {
+				b.identity.Name, b.identity.Info = name, info
+			}
+		}
+	}
+	b.mu.Unlock()
 	if err != nil {
 		if errors.Is(err, errNoLeader) {
 			return sessionkit.DeliveryReceipt{Disposition: "rejected", Reason: "no_leader"}, nil
@@ -419,10 +254,7 @@ func (b *PeerBackend) deliver(ctx context.Context, identity sessionkit.PeerIdent
 	if err = observer.interject(ctx, identity.SessionID, request.MessageID, message); err != nil {
 		return sessionkit.DeliveryReceipt{}, fmt.Errorf("Grok interject: %w", err)
 	}
-	if row.Activity == "working" {
-		return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
-	}
-	return sessionkit.DeliveryReceipt{Disposition: "queued_for_next_turn"}, nil
+	return sessionkit.DeliveryReceipt{Disposition: "injected"}, nil
 }
 
 func roster(ctx context.Context, observer *acpClient, id string) (peerSession, error) {
@@ -478,43 +310,18 @@ func exactRoster(sessions []peerSession, id string) (peerSession, error) {
 	return found, nil
 }
 
-func observedRoster(sessions []peerSession, id string) (peerSession, error) {
-	current, currentErr := exactRoster(sessions, id)
-	if currentErr == nil {
-		return current, nil
-	}
-	if !errors.Is(currentErr, errNoLeader) && !errors.Is(currentErr, errRosterActorGone) {
-		return peerSession{}, currentErr
-	}
-	var next []peerSession
-	seen := map[string]bool{id: true}
-	for _, session := range sessions {
-		if session.SessionID == "" || seen[session.SessionID] {
-			continue
-		}
-		seen[session.SessionID] = true
-		if candidate, err := exactRoster(sessions, session.SessionID); err == nil {
-			next = append(next, candidate)
-		}
-	}
-	if len(next) != 1 {
-		return peerSession{}, currentErr
-	}
-	return next[0], nil
-}
-
 func (b *PeerBackend) Shutdown() {
 	b.mu.Lock()
-	peer, hold, holdProcess := b.peer, b.hold, b.holdProcess
-	observer, process, leader := b.observer, b.process, b.leader
-	b.peer, b.hold, b.holdProcess, b.observer, b.process, b.leader = nil, nil, nil, nil, nil, nil
+	peer := b.peer
 	b.mu.Unlock()
 	if peer != nil {
 		peer.Shutdown()
 	}
+	b.mu.Lock()
+	observer, process := b.observer, b.process
+	b.peer, b.observer, b.process = nil, nil, nil
+	b.mu.Unlock()
 	stopPeerClient(observer, process)
-	stopPeerClient(hold, holdProcess)
-	_ = closeNative("leader", leader)
 }
 
 func stopPeerClient(client *acpClient, process *nativeProcess) {
