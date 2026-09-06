@@ -114,18 +114,19 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 	command.Dir, command.Stderr = request.Open.Cwd, os.Stderr
 	environment := slices.DeleteFunc(os.Environ(), func(value string) bool { return strings.HasPrefix(value, LaneSocketEnv+"=") })
 	command.Env = append(environment, LaneSocketEnv+"="+endpoint.Path)
-	input, _ := command.StdinPipe()
-	output, _ := command.StdoutPipe()
-	child, err := host.StartChild(command, lock, endpoint)
+	child, input, output, err := host.StartChild(command, lock, endpoint)
 	if err != nil {
-		_ = input.Close()
 		return sessionkit.OpenResult{}, closeLaunch(lock, endpoint, fmt.Errorf("start Claude stream: %w", err))
 	}
 	p.mu.Lock()
 	p.child, p.input, p.encoder, p.expected, p.ready, p.opened = child, input, json.NewEncoder(input), id, make(chan error, 1), true
 	p.mu.Unlock()
-	go p.read(output)
-	go p.watch(child)
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		p.read(output)
+	}()
+	go p.watch(child, drained)
 	return sessionkit.OpenResult{SessionID: id}, nil
 }
 
@@ -241,7 +242,8 @@ func (p *Wrapper) interrupt(ctx context.Context, t *turn) error {
 	}
 }
 
-func (p *Wrapper) read(output io.Reader) {
+func (p *Wrapper) read(output io.ReadCloser) {
+	defer output.Close()
 	decoder := json.NewDecoder(output)
 	for {
 		var item frame
@@ -334,8 +336,9 @@ func (p *Wrapper) failLocked(err error) {
 	}
 }
 
-func (p *Wrapper) watch(child *host.Child) {
+func (p *Wrapper) watch(child *host.Child, drained <-chan struct{}) {
 	err := child.Wait()
+	<-drained
 	if err == nil {
 		err = errors.New("Claude stream exited")
 	}

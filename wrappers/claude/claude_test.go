@@ -50,7 +50,14 @@ func fakeChild(mode string) {
 				os.Exit(7)
 			}
 			_ = output.Encode(map[string]any{"type": "user", "isReplay": true})
-			_ = output.Encode(map[string]any{"type": "result", "subtype": "success", "session_id": fixtureID, "result": "ok"})
+			result := "ok"
+			if mode == "large-result-exit" {
+				result = strings.Repeat("x", 300000) + "tail"
+			}
+			_ = output.Encode(map[string]any{"type": "result", "subtype": "success", "session_id": fixtureID, "result": result})
+			if mode == "large-result-exit" {
+				return
+			}
 		}
 	}
 }
@@ -295,6 +302,25 @@ func TestOpenCommitsBeforeInitAndChildDeathWritesTerminalBeforeEOF(t *testing.T)
 	_ = connection.Close()
 	_ = listener.Close()
 	_ = <-served
+}
+
+func TestLargeResultDrainsAfterChildExit(t *testing.T) {
+	directory := t.TempDir()
+	socket := filepath.Join(directory, "bus.sock")
+	t.Setenv("CLAUDE_TEST_CHILD", "large-result-exit")
+	t.Setenv("CLAUDE_TEST_RECORD", filepath.Join(directory, "child.json"))
+	must(t, os.Symlink(os.Args[0], filepath.Join(directory, "claude")))
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	p := New(socket)
+	p.SetCall(func(context.Context, string, any) (json.RawMessage, error) {
+		return json.RawMessage(`{"sessions":[]}`), nil
+	})
+	_, err := p.Open(context.Background(), sessionkit.OpenRequest{Name: "large@local", ResumeSessionID: fixtureID})
+	must(t, err)
+	result, err := p.Run(context.Background(), &sessionkit.Run{}, "large")
+	must(t, err)
+	check(t, result.Outcome == "completed" && len(result.Result) == 300004 && strings.HasSuffix(result.Result, "tail"), "terminal = outcome %q, bytes %d", result.Outcome, len(result.Result))
+	must(t, p.Close(context.Background()))
 }
 
 func environmentValue(environment []string, name string) string {
