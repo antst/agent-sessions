@@ -72,8 +72,10 @@ func (h *Handoff) Run(ctx context.Context, run *sessionkit.Run, input string, st
 	}
 	if err != nil {
 		interrupted := run.Interrupted()
+		h.queue = append(h.queue, h.active...)
+		h.active = nil
+		h.recount()
 		h.mu.Unlock()
-		h.Finish()
 		if interrupted {
 			return sessionkit.TurnResult{Outcome: "interrupted"}, nil
 		}
