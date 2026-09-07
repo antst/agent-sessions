@@ -69,7 +69,7 @@ func (c *nativeClient) request(ctx context.Context, method, path string, body an
 	if err != nil {
 		return nil, err
 	}
-	request.SetBasicAuth(c.username, c.password)
+	c.authenticate(request)
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
@@ -331,7 +331,7 @@ func (c *nativeClient) subscribe(ctx context.Context, handle func(context.Contex
 	if err != nil {
 		return nil, err
 	}
-	request.SetBasicAuth(c.username, c.password)
+	c.authenticate(request)
 	response, err := c.http.Do(request)
 	if err != nil {
 		return nil, err
@@ -384,6 +384,11 @@ type nativeEvent struct {
 func deliveryMessageID(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return "msg_" + hex.EncodeToString(digest[:16])
+}
+
+func (c *nativeClient) authenticate(request *http.Request) {
+	request.SetBasicAuth(c.username, c.password)
+	request.Header.Set("x-opencode-directory", c.directory)
 }
 
 func validNativeID(value string) bool {

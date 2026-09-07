@@ -122,6 +122,9 @@ func TestReadinessWaitsForExactPluginTool(t *testing.T) {
 		if username, password, ok := request.BasicAuth(); !ok || username != "user" || password != "pass" {
 			t.Fatalf("auth = %q/%q/%v", username, password, ok)
 		}
+		if directory := request.Header.Get("x-opencode-directory"); directory != "/work" {
+			t.Fatalf("directory header = %q", directory)
+		}
 		if request.URL.Path == "/doc" {
 			paths := map[string]any{}
 			for _, path := range []string{"/session", "/session/{sessionID}", "/event", "/api/session/{sessionID}/prompt", "/api/session/{sessionID}/wait", "/api/session/{sessionID}/message", "/api/session/{sessionID}/interrupt", "/api/session/{sessionID}/model", "/api/session/{sessionID}/agent", "/experimental/tool/ids"} {
@@ -673,6 +676,9 @@ func TestCloseDeletesOnlyForExplicitForget(t *testing.T) {
 func TestPermissionEventIsRejected(t *testing.T) {
 	rejected := make(chan map[string]string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if directory := request.Header.Get("x-opencode-directory"); directory != "/work" {
+			t.Fatalf("directory header = %q", directory)
+		}
 		switch request.URL.Path {
 		case "/event":
 			response.Header().Set("Content-Type", "text/event-stream")
