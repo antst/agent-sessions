@@ -11,7 +11,7 @@ import (
 )
 
 type modelRef struct {
-	ModelID    string `json:"modelID"`
+	ID         string `json:"id"`
 	ProviderID string `json:"providerID"`
 }
 
@@ -79,7 +79,7 @@ func launchArguments(open sessionkit.OpenOptions) ([]string, *modelRef, string, 
 		if !found || !nativeValue(provider) || !nativeValue(name) {
 			return nil, nil, "", errors.New("model requires one provider/model value")
 		}
-		model = &modelRef{ModelID: name, ProviderID: provider}
+		model = &modelRef{ID: name, ProviderID: provider}
 	}
 	return arguments, model, agent, nil
 }

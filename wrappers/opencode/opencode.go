@@ -144,10 +144,14 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 	p.child, p.command, p.client = child, command, client
 	p.mu.Unlock()
 	go p.watch(child, drained)
+	createdID := ""
 	cleanup := func(cause error) (sessionkit.OpenResult, error) {
 		p.mu.Lock()
 		p.closing = true
 		p.mu.Unlock()
+		if createdID != "" {
+			cause = errors.Join(cause, client.remove(ctx, createdID))
+		}
 		_ = child.Close(ctx, func(context.Context) error { return command.Process.Signal(syscall.SIGTERM) })
 		return sessionkit.OpenResult{}, cause
 	}
@@ -177,6 +181,9 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 	var session nativeSession
 	if request.ResumeSessionID == "" {
 		session, err = client.create(ctx, name, permission)
+		if err == nil {
+			createdID = session.ID
+		}
 	} else if !validNativeID(request.ResumeSessionID) {
 		err = errors.New("OpenCode resume session id is invalid")
 	} else {

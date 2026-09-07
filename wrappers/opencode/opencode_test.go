@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -285,28 +286,28 @@ func TestResumeReadsThenAppliesAndVerifiesExactSettings(t *testing.T) {
 func TestConfigureUsesCapturedV2Shapes(t *testing.T) {
 	requests := make(chan struct {
 		path string
-		body map[string]any
+		body string
 	}, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		var body map[string]any
-		if json.NewDecoder(request.Body).Decode(&body) != nil {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
 			t.Fatal("malformed request body")
 		}
 		requests <- struct {
 			path string
-			body map[string]any
-		}{request.URL.Path, body}
+			body string
+		}{request.URL.Path, string(body)}
 		response.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	if err := testClient(server).configure(context.Background(), "ses_exact", &modelRef{ProviderID: "openai", ModelID: "gpt"}, "build"); err != nil {
+	if err := testClient(server).configure(context.Background(), "ses_exact", &modelRef{ProviderID: "openai", ID: "gpt"}, "build"); err != nil {
 		t.Fatal(err)
 	}
 	model, agent := <-requests, <-requests
-	if model.path != "/api/session/ses_exact/model" || fmt.Sprint(model.body) != "map[model:map[modelID:gpt providerID:openai]]" {
+	if model.path != "/api/session/ses_exact/model" || model.body != `{"model":{"id":"gpt","providerID":"openai"}}` {
 		t.Fatalf("model = %#v", model)
 	}
-	if agent.path != "/api/session/ses_exact/agent" || fmt.Sprint(agent.body) != "map[agent:build]" {
+	if agent.path != "/api/session/ses_exact/agent" || agent.body != `{"agent":"build"}` {
 		t.Fatalf("agent = %#v", agent)
 	}
 }
@@ -403,7 +404,7 @@ func TestWrapperOpenOwnsServerPluginAndSessionLifecycle(t *testing.T) {
 		}
 	}
 	joined := fmt.Sprint(rows[1:])
-	for _, fragment := range []string{"GET /doc", "GET /experimental/tool/ids?directory=", "GET /event?directory=", "POST /session?directory=", `permission:[map[action:allow pattern:* permission:*]]`, `modelID:gpt`, `providerID:openai`, `agent:build`, "DELETE /session/ses_exact?directory="} {
+	for _, fragment := range []string{"GET /doc", "GET /experimental/tool/ids?directory=", "GET /event?directory=", "POST /session?directory=", `permission:[map[action:allow pattern:* permission:*]]`, `id:gpt`, `providerID:openai`, `agent:build`, "DELETE /session/ses_exact?directory="} {
 		if !strings.Contains(joined, fragment) {
 			t.Fatalf("request log omitted %q: %s", fragment, joined)
 		}
@@ -413,6 +414,39 @@ func TestWrapperOpenOwnsServerPluginAndSessionLifecycle(t *testing.T) {
 	}
 	if _, err = os.Stat(filepath.Join(directory, "lanes", "provisional.sock")); !os.IsNotExist(err) {
 		t.Fatalf("lane socket remains: %v", err)
+	}
+}
+
+func TestOpenFailureDeletesOnlyFreshNativeSession(t *testing.T) {
+	for _, row := range []struct {
+		name       string
+		resume     bool
+		wantDelete bool
+	}{{"fresh", false, true}, {"resume", true, false}} {
+		t.Run(row.name, func(t *testing.T) {
+			directory, record := t.TempDir(), filepath.Join(t.TempDir(), "requests.jsonl")
+			t.Setenv("OPENCODE_TEST_CHILD", "1")
+			t.Setenv("OPENCODE_TEST_MODE", "model-error")
+			t.Setenv("OPENCODE_TEST_RECORD", record)
+			oldCommand := laneCommand
+			laneCommand = func(_ string, arguments ...string) *exec.Cmd {
+				return exec.Command(os.Args[0], append([]string{"-test.run=TestOpenCodeProcess", "--"}, arguments...)...)
+			}
+			t.Cleanup(func() { laneCommand = oldCommand })
+			p := New(filepath.Join(directory, "sessionbus.sock"), "provisional")
+			p.SetCall(func(context.Context, string, any) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
+			request := sessionkit.OpenRequest{Name: "Lane title@local", Open: sessionkit.OpenOptions{Cwd: directory, Model: "openai/gpt"}}
+			if row.resume {
+				request.ResumeSessionID = "ses_exact"
+			}
+			if _, err := p.Open(context.Background(), request); err == nil || !strings.Contains(err.Error(), "model returned HTTP 400") {
+				t.Fatalf("open error = %v", err)
+			}
+			deleted := strings.Contains(fmt.Sprint(readProcessRows(t, record)), "DELETE /session/ses_exact?directory=")
+			if deleted != row.wantDelete {
+				t.Fatalf("deleted = %v, want %v", deleted, row.wantDelete)
+			}
+		})
 	}
 }
 
@@ -476,6 +510,12 @@ func TestOpenCodeProcess(t *testing.T) {
 			<-request.Context().Done()
 		case request.Method == http.MethodPost && request.URL.Path == "/session":
 			_ = json.NewEncoder(response).Encode(nativeSession{ID: "ses_exact", Title: "Lane title", Directory: request.URL.Query().Get("directory")})
+		case request.Method == http.MethodGet && request.URL.Path == "/session/ses_exact":
+			_ = json.NewEncoder(response).Encode(nativeSession{ID: "ses_exact", Title: "Previous title", Directory: request.URL.Query().Get("directory")})
+		case request.Method == http.MethodPatch && request.URL.Path == "/session/ses_exact":
+			_ = json.NewEncoder(response).Encode(nativeSession{ID: "ses_exact", Title: "Lane title", Directory: request.URL.Query().Get("directory")})
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/model") && mode == "model-error":
+			response.WriteHeader(http.StatusBadRequest)
 		case request.Method == http.MethodPost && (strings.HasSuffix(request.URL.Path, "/model") || strings.HasSuffix(request.URL.Path, "/agent")):
 			response.WriteHeader(http.StatusNoContent)
 		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/prompt"):
@@ -866,7 +906,7 @@ func TestResultKeepsAscendingOrderAcrossPages(t *testing.T) {
 
 func TestOpenArgumentsAndInteractiveArity(t *testing.T) {
 	arguments, model, agent, err := launchArguments(sessionkit.OpenOptions{PermissionMode: "default", Model: "openai/gpt", Arguments: []string{"--agent", "build", "--log-level", "INFO"}})
-	if err != nil || !slices.Equal(arguments, []string{"--log-level", "INFO"}) || model.ProviderID != "openai" || model.ModelID != "gpt" || agent != "build" {
+	if err != nil || !slices.Equal(arguments, []string{"--log-level", "INFO"}) || model.ProviderID != "openai" || model.ID != "gpt" || agent != "build" {
 		t.Fatalf("arguments = %#v/%#v/%q/%v", arguments, model, agent, err)
 	}
 	if _, _, _, err = launchArguments(sessionkit.OpenOptions{Arguments: []string{"--pure"}}); err == nil || err.Error() != "unsupported argument --pure" {
