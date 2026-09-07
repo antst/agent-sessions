@@ -289,7 +289,11 @@ func (p *Wrapper) interrupt(ctx context.Context, run runToken) error {
 }
 
 func (p *Wrapper) Deliver(ctx context.Context, request sessionkit.DeliveryRequest, run *sessionkit.Run) (sessionkit.DeliveryReceipt, error) {
-	return p.deliver(ctx, request, run)
+	var token runToken
+	if run != nil {
+		token = run
+	}
+	return p.deliver(ctx, request, token)
 }
 
 func (p *Wrapper) deliver(ctx context.Context, request sessionkit.DeliveryRequest, run runToken) (sessionkit.DeliveryReceipt, error) {

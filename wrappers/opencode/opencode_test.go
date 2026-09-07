@@ -1,9 +1,11 @@
 package opencode
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,6 +33,74 @@ func (r *fakeRun) Admitted()                     { r.once.Do(func() { close(r.ad
 func (r *fakeRun) AdmittedDone() <-chan struct{} { return r.admitted }
 func (r *fakeRun) Done() <-chan struct{}         { return r.done }
 func (r *fakeRun) Interrupted() bool             { return r.interrupted }
+
+type workerProduct struct{ *Wrapper }
+
+func (*workerProduct) Open(context.Context, sessionkit.OpenRequest) (sessionkit.OpenResult, error) {
+	return sessionkit.OpenResult{SessionID: "ses_exact"}, nil
+}
+func (*workerProduct) Close(context.Context, sessionkit.SessionCloseRequest) error { return nil }
+
+func startWorker(t *testing.T, wrapper *Wrapper) (net.Conn, *bufio.Reader, *sessionkit.Worker) {
+	path := filepath.Join(t.TempDir(), "sessionbus.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(host.SocketEnv, path)
+	t.Setenv(host.TokenEnv, "token")
+	worker := sessionkit.NewWorker(&workerProduct{Wrapper: wrapper})
+	go func() { _ = worker.Serve(context.Background()) }()
+	connection, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(connection)
+	if _, err = reader.ReadBytes('\n'); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = connection.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n")); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkerRequest(t, connection, 1, "session.open", map[string]any{"name": "lane@local", "groups": []string{}, "open": map[string]any{}})
+	readWorkerResponse(t, reader, 1)
+	t.Cleanup(func() {
+		_ = connection.Close()
+		<-worker.Closed()
+		_ = listener.Close()
+	})
+	return connection, reader, worker
+}
+
+func writeWorkerRequest(t *testing.T, connection net.Conn, id int, method string, params any) {
+	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = connection.Write(append(body, '\n')); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readWorkerResponse(t *testing.T, reader *bufio.Reader, id int) json.RawMessage {
+	t.Helper()
+	body, err := reader.ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		ID     int             `json:"id"`
+		Result json.RawMessage `json:"result"`
+		Error  json.RawMessage `json:"error"`
+	}
+	if err = json.Unmarshal(body, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.ID != id || len(response.Error) != 0 {
+		t.Fatalf("response %d = %s", id, body)
+	}
+	return response.Result
+}
 
 func testClient(server *httptest.Server) *nativeClient {
 	return &nativeClient{endpoint: server.URL, username: "user", password: "pass", directory: "/work", http: server.Client()}
@@ -563,10 +633,17 @@ func TestIdleRunQueuesDelivery(t *testing.T) {
 	}))
 	defer server.Close()
 	p := &Wrapper{opened: true, id: "ses_exact", client: testClient(server)}
-	receipt, err := p.deliver(context.Background(), delivery(), nil)
-	if err != nil || receipt.Disposition != "queued_for_next_turn" || requestBody["resume"] != false {
-		t.Fatalf("delivery = %#v/%v, body=%#v", receipt, err, requestBody)
+	connection, reader, _ := startWorker(t, p)
+	writeWorkerRequest(t, connection, 2, "message.deliver", delivery())
+	var receipt sessionkit.DeliveryReceipt
+	if err := json.Unmarshal(readWorkerResponse(t, reader, 2), &receipt); err != nil {
+		t.Fatal(err)
 	}
+	if receipt.Disposition != "queued_for_next_turn" || requestBody["resume"] != false {
+		t.Fatalf("delivery = %#v, body=%#v", receipt, requestBody)
+	}
+	writeWorkerRequest(t, connection, 3, "session.close", map[string]any{"session_id": "ses_exact@local"})
+	readWorkerResponse(t, reader, 3)
 }
 
 func TestCloseDeletesOnlyForExplicitForget(t *testing.T) {
@@ -772,5 +849,5 @@ func TestNativeIDsFollowProductPrefixAndBusIdentityBounds(t *testing.T) {
 }
 
 func delivery() sessionkit.DeliveryRequest {
-	return sessionkit.DeliveryRequest{MessageID: "delivery", From: sessionkit.DeliverySource{SessionID: "sender", Name: "Sender", Product: "codex", Groups: []string{}}, Body: "hello"}
+	return sessionkit.DeliveryRequest{MessageID: "delivery", From: sessionkit.DeliverySource{SessionID: "sender@local", Name: "Sender@local", Product: "codex", Groups: []string{}}, Body: "hello"}
 }
