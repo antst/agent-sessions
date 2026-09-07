@@ -342,6 +342,7 @@ func (c *nativeClient) subscribe(ctx context.Context, handle func(context.Contex
 	}
 	done := make(chan error, 1)
 	go func() {
+		defer close(done)
 		defer response.Body.Close()
 		scanner := bufio.NewScanner(response.Body)
 		scanner.Buffer(make([]byte, 4096), nativeLimit)
@@ -387,6 +388,8 @@ func (c *nativeClient) bootstrap(ctx context.Context) error {
 	events, err := c.subscribe(ctx, func(context.Context, nativeEvent) error { return bootstrapEvent })
 	if err == nil {
 		err = <-events
+		for range events {
+		}
 	}
 	if errors.Is(err, bootstrapEvent) {
 		return nil
