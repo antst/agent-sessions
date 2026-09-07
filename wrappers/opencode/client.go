@@ -381,6 +381,19 @@ type nativeEvent struct {
 	} `json:"properties"`
 }
 
+var bootstrapEvent = errors.New("OpenCode bootstrap event received")
+
+func (c *nativeClient) bootstrap(ctx context.Context) error {
+	events, err := c.subscribe(ctx, func(context.Context, nativeEvent) error { return bootstrapEvent })
+	if err == nil {
+		err = <-events
+	}
+	if errors.Is(err, bootstrapEvent) {
+		return nil
+	}
+	return err
+}
+
 func deliveryMessageID(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return "msg_" + hex.EncodeToString(digest[:16])

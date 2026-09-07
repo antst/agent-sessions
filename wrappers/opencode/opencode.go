@@ -26,15 +26,17 @@ import (
 )
 
 const (
-	Product       = "opencode-peer"
-	ToolName      = "sessionbus"
-	LaneSocketEnv = "SESSIONBUS_LANE_SOCKET"
+	Product        = "opencode-peer"
+	ToolName       = "sessionbus"
+	LaneSocketEnv  = "SESSIONBUS_LANE_SOCKET"
+	bootstrapProbe = 5 * time.Second
 )
 
 var (
-	laneCommand = exec.Command
-	listenTCP   = net.Listen
-	retryReady  = func(ctx context.Context) error {
+	laneCommand   = exec.Command
+	listenTCP     = net.Listen
+	bootstrapWait = bootstrapProbe
+	retryReady    = func(ctx context.Context) error {
 		timer := time.NewTimer(20 * time.Millisecond)
 		defer timer.Stop()
 		select {
@@ -149,7 +151,7 @@ func (p *Wrapper) Open(ctx context.Context, request sessionkit.OpenRequest) (ses
 		_ = child.Close(ctx, func(context.Context) error { return command.Process.Signal(syscall.SIGTERM) })
 		return sessionkit.OpenResult{}, cause
 	}
-	if err = waitReady(ctx, child.Done(), client.ready); err != nil {
+	if err = waitReady(ctx, child.Done(), client.bootstrap, client.ready); err != nil {
 		return cleanup(err)
 	}
 	eventCtx, eventCancel := context.WithCancel(ctx)
@@ -435,19 +437,46 @@ func connectionFailure(err error) bool {
 	return errors.As(err, &operation)
 }
 
-func waitReady(ctx context.Context, exited <-chan struct{}, ready func(context.Context) (bool, error)) error {
+func waitReady(ctx context.Context, exited <-chan struct{}, bootstrap func(context.Context) error, ready func(context.Context) (bool, error)) error {
+	ctx, cancel := context.WithCancelCause(ctx)
+	watched := make(chan struct{})
+	defer func() { cancel(nil); <-watched }()
+	go func() {
+		defer close(watched)
+		select {
+		case <-exited:
+			cancel(errors.New("OpenCode exited before plugin readiness"))
+		case <-ctx.Done():
+		}
+	}()
+	for {
+		attempt, stop := context.WithTimeout(ctx, bootstrapWait)
+		err := bootstrap(attempt)
+		timedOut := errors.Is(attempt.Err(), context.DeadlineExceeded)
+		stop()
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
+		if err == nil || timedOut {
+			break
+		}
+		if !connectionFailure(err) {
+			return err
+		}
+		if err = retryReady(ctx); err != nil {
+			return err
+		}
+	}
 	for {
 		ok, err := ready(ctx)
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
 		if err == nil && ok {
 			return nil
 		}
 		if err != nil && !connectionFailure(err) {
 			return err
-		}
-		select {
-		case <-exited:
-			return errors.New("OpenCode exited before plugin readiness")
-		default:
 		}
 		if err = retryReady(ctx); err != nil {
 			return err

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -310,29 +312,62 @@ func TestConfigureUsesCapturedV2Shapes(t *testing.T) {
 }
 
 func TestOpenBarrierWaitsForPluginAndReportsExit(t *testing.T) {
-	previous := retryReady
+	previous, previousWait := retryReady, bootstrapWait
 	retryReady = func(context.Context) error { return nil }
-	defer func() { retryReady = previous }()
-	attempts := 0
-	err := waitReady(context.Background(), make(chan struct{}), func(context.Context) (bool, error) {
+	bootstrapWait = time.Millisecond
+	defer func() { retryReady, bootstrapWait = previous, previousWait }()
+	attempts, readyCalls := 0, 0
+	probeDone := make(chan struct{})
+	err := waitReady(context.Background(), make(chan struct{}), func(ctx context.Context) error {
 		attempts++
-		return attempts == 2, nil
+		if attempts == 1 {
+			return &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+		}
+		<-ctx.Done()
+		close(probeDone)
+		return ctx.Err()
+	}, func(context.Context) (bool, error) {
+		readyCalls++
+		return readyCalls == 2, nil
 	})
-	if err != nil || attempts != 2 {
-		t.Fatalf("wait = %v after %d attempts", err, attempts)
+	if err != nil || attempts != 2 || readyCalls != 2 {
+		t.Fatalf("wait = %v after %d bootstrap/%d ready attempts", err, attempts, readyCalls)
 	}
+	<-probeDone
 	exited := make(chan struct{})
+	entered, stopped, result := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		result <- waitReady(context.Background(), exited, func(ctx context.Context) error {
+			close(entered)
+			<-ctx.Done()
+			close(stopped)
+			return ctx.Err()
+		}, func(context.Context) (bool, error) { return true, nil })
+	}()
+	<-entered
 	close(exited)
-	err = waitReady(context.Background(), exited, func(context.Context) (bool, error) { return false, nil })
+	err = <-result
 	if err == nil || err.Error() != "OpenCode exited before plugin readiness" {
 		t.Fatalf("exit error = %v", err)
 	}
-	retryReady = previous
+	<-stopped
+	bootstrapWait = time.Hour
 	cancelled, cancel := context.WithCancel(context.Background())
+	entered, stopped = make(chan struct{}), make(chan struct{})
+	go func() {
+		result <- waitReady(cancelled, make(chan struct{}), func(ctx context.Context) error {
+			close(entered)
+			<-ctx.Done()
+			close(stopped)
+			return ctx.Err()
+		}, func(context.Context) (bool, error) { return true, nil })
+	}()
+	<-entered
 	cancel()
-	if err = waitReady(cancelled, make(chan struct{}), func(context.Context) (bool, error) { return false, nil }); err != context.Canceled {
+	if err = <-result; err != context.Canceled {
 		t.Fatalf("cancel error = %v", err)
 	}
+	<-stopped
 }
 
 func TestWrapperOpenOwnsServerPluginAndSessionLifecycle(t *testing.T) {
@@ -436,6 +471,7 @@ func TestOpenCodeProcess(t *testing.T) {
 		case request.URL.Path == "/event":
 			response.Header().Set("Content-Type", "text/event-stream")
 			response.WriteHeader(http.StatusOK)
+			_, _ = response.Write([]byte("data: {\"type\":\"server.connected\",\"properties\":{}}\n\n"))
 			response.(http.Flusher).Flush()
 			<-request.Context().Done()
 		case request.Method == http.MethodPost && request.URL.Path == "/session":
@@ -706,6 +742,28 @@ func TestPermissionEventIsRejected(t *testing.T) {
 	if err = <-done; err == nil || err.Error() != "OpenCode event stream ended" {
 		t.Fatalf("stream end = %v", err)
 	}
+}
+
+func TestBootstrapEventCancellationDrainsStream(t *testing.T) {
+	started, stopped := make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		response.WriteHeader(http.StatusOK)
+		response.(http.Flusher).Flush()
+		close(started)
+		<-request.Context().Done()
+		close(stopped)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- testClient(server).bootstrap(ctx) }()
+	<-started
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("bootstrap error = %v", err)
+	}
+	<-stopped
 }
 
 func TestResultProjectsEveryCompletedAssistantAfterInput(t *testing.T) {
